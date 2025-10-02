@@ -583,10 +583,26 @@ func (c *VectorCollection) Close() error {
 
 // startBackgroundOptimization starts the background optimization routine
 func (c *VectorCollection) startBackgroundOptimization() {
+	c.mu.Lock()
+	if c.optimizeTicker != nil || c.stopOptimize != nil {
+		c.mu.Unlock()
+		return
+	}
 	c.optimizeTicker = time.NewTicker(c.optimizeInterval)
 	c.stopOptimize = make(chan bool, 1)
+	c.mu.Unlock()
 
 	go func() {
+		defer func() {
+			// Ensure ticker is stopped when goroutine exits
+			c.mu.Lock()
+			if c.optimizeTicker != nil {
+				c.optimizeTicker.Stop()
+				c.optimizeTicker = nil
+			}
+			c.mu.Unlock()
+		}()
+
 		for {
 			select {
 			case <-c.optimizeTicker.C:
@@ -598,7 +614,6 @@ func (c *VectorCollection) startBackgroundOptimization() {
 					c.metadata.OperationCount = 0
 				}
 			case <-c.stopOptimize:
-				c.optimizeTicker.Stop()
 				return
 			}
 		}
@@ -606,9 +621,13 @@ func (c *VectorCollection) startBackgroundOptimization() {
 }
 
 // stopBackgroundOptimization stops the background optimization routine
+// Note: caller must hold the mutex
 func (c *VectorCollection) stopBackgroundOptimization() {
 	if c.stopOptimize != nil {
-		c.stopOptimize <- true
+		select {
+		case c.stopOptimize <- true:
+		default:
+		}
 		close(c.stopOptimize)
 		c.stopOptimize = nil
 	}

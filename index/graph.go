@@ -394,23 +394,14 @@ func (g *HNSWGraph) Delete(id string) error {
 		return ErrNotFound
 	}
 
-	// Find the node in our internal structure
-	// This is a simplified approach - in a full implementation,
-	// you'd want to maintain a separate map of ID -> HNSWNode
-	var nodeToDelete *HNSWNode
+	// Find and delete the node in our internal structure
 	g.nodes.ForEach(func(key string, val *Vector) {
 		if key == id {
-			// This is simplified - we need a better way to track nodes
-			// For now, we'll mark the vector as deleted in the SafeMap
 			g.nodes.Delete(id)
 			g.stats.DeletedCount++
 			g.stats.NodeCount--
 		}
 	})
-
-	if nodeToDelete != nil {
-		nodeToDelete.MarkDeleted()
-	}
 
 	return nil
 }
