@@ -163,6 +163,17 @@ func (mm *ManifestManager) CreateCollection(ctx context.Context, config *api.Col
 		mm.manifest.Collections = make(map[string]*CollectionInfo)
 	}
 
+	// Validate collection config
+	if config.Dimension <= 0 {
+		return fmt.Errorf("invalid dimension: must be greater than 0, got %d", config.Dimension)
+	}
+	if config.Name == "" {
+		return fmt.Errorf("collection name cannot be empty")
+	}
+	if config.Metric != api.Cosine && config.Metric != api.Euclidean && config.Metric != api.Manhattan && config.Metric != api.DotProduct {
+		return fmt.Errorf("invalid metric: got %d", int(config.Metric))
+	}
+
 	// Check if collection already exists
 	if _, exists := mm.manifest.Collections[config.Name]; exists {
 		return api.ErrCollectionExists

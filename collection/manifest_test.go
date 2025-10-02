@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -396,13 +397,26 @@ func TestManifestValidation(t *testing.T) {
 	})
 
 	t.Run("RepairManifest", func(t *testing.T) {
-		err := mm.RepairManifest(ctx)
+		// Create a new manifest manager for clean state
+		repairPath := filepath.Join(tempDir, "repair_manifest.json")
+		repairConfig := &ManifestConfig{
+			ManifestPath: repairPath,
+			AutoSave:     true,
+			SaveInterval: time.Second,
+		}
+		repairMM, err := NewManifestManager(repairConfig)
+		if err != nil {
+			t.Fatalf("Failed to create repair manifest manager: %v", err)
+		}
+		defer repairMM.Close(ctx)
+
+		err = repairMM.RepairManifest(ctx)
 		if err != nil {
 			t.Errorf("Failed to repair manifest: %v", err)
 		}
 
-		// Validate after repair
-		err = mm.ValidateManifest(ctx)
+		// Validate after repair - should pass with clean manifest
+		err = repairMM.ValidateManifest(ctx)
 		if err != nil {
 			t.Errorf("Manifest validation failed after repair: %v", err)
 		}

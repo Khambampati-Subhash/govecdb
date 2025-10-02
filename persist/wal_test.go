@@ -246,23 +246,33 @@ func TestWALReplay(t *testing.T) {
 		}
 	}
 
+	// Sync to ensure all data is written before stopping
+	if err := wal.Sync(); err != nil {
+		t.Errorf("Failed to sync WAL: %v", err)
+	}
+
 	// Stop WAL to flush all data
 	if err := wal.Stop(ctx); err != nil {
 		t.Errorf("Failed to stop WAL: %v", err)
 	}
 
-	// Create new WAL instance for replay
-	wal2, err := NewWAL(config)
+	// Create new WAL instance for replay (with same config)
+	replayConfig := DefaultWALConfig(tempDir)
+	wal2, err := NewWAL(replayConfig)
 	if err != nil {
 		t.Fatalf("Failed to create WAL for replay: %v", err)
 	}
 
-
+	// Start the second WAL instance (it needs to be started to read files)
+	if err := wal2.Start(ctx); err != nil {
+		t.Fatalf("Failed to start second WAL: %v", err)
+	}
+	defer wal2.Stop(ctx)
 
 	handler := &MockReplayHandler{}
 
-	// Replay from LSN 1
-	err = wal2.Replay(ctx, 1, handler)
+	// Replay from LSN 0 (start from beginning)
+	err = wal2.Replay(ctx, 0, handler)
 	if err != nil {
 		t.Errorf("Failed to replay WAL: %v", err)
 	}
