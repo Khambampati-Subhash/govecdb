@@ -81,6 +81,7 @@ type QueryCoordinatorStats struct {
 
 // ActiveQuery represents an active query execution
 type ActiveQuery struct {
+	mu           sync.RWMutex
 	ID           string                         `json:"id"`
 	Plan         *QueryPlan                     `json:"plan"`
 	Request      *api.SearchRequest             `json:"request"`
@@ -93,8 +94,6 @@ type ActiveQuery struct {
 	// Synchronization
 	ctx    context.Context
 	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	mu     sync.RWMutex
 }
 
 // QueryExecutionStatus represents the status of query execution
@@ -470,20 +469,22 @@ func (qc *QueryCoordinatorImpl) executeScatterPhase(activeQuery *ActiveQuery, ph
 
 			results, err := qc.network.SendQuery(activeQuery.ctx, node.Address, activeQuery.Request)
 			if err != nil {
-				// Try replicas if primary fails
+				success := false
 				for _, replicaID := range s.Replicas {
-					replicaNode, err := qc.clusterManager.GetNode(activeQuery.ctx, replicaID)
-					if err != nil {
+					replicaNode, replicaErr := qc.clusterManager.GetNode(activeQuery.ctx, replicaID)
+					if replicaErr != nil {
 						continue
 					}
-
-					results, err = qc.network.SendQuery(activeQuery.ctx, replicaNode.Address, activeQuery.Request)
-					if err == nil {
+					results, replicaErr = qc.network.SendQuery(activeQuery.ctx, replicaNode.Address, activeQuery.Request)
+					if replicaErr == nil {
+						success = true
+						err = nil
 						break
+					} else {
+						err = replicaErr
 					}
 				}
-
-				if err != nil {
+				if !success {
 					mu.Lock()
 					errors = append(errors, fmt.Errorf("failed to query shard %s: %w", s.ID, err))
 					mu.Unlock()
@@ -709,7 +710,6 @@ func abs(x float32) float32 {
 // QueryPlannerImpl implements the QueryPlanner interface
 type QueryPlannerImpl struct {
 	clusterManager ClusterManager
-	mu             sync.RWMutex
 }
 
 // NewQueryPlannerImpl creates a new query planner
