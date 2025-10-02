@@ -107,7 +107,7 @@ func (c *Config) Validate() error {
 		return errors.New("dimension must be positive")
 	}
 	if c.M <= 0 {
-		return errors.New("M must be positive")
+		return errors.New("m must be positive")
 	}
 	if c.EfConstruction <= 0 {
 		return errors.New("ef_construction must be positive")

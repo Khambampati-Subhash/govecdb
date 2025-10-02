@@ -120,12 +120,66 @@ func (m *MemoryStore) Put(ctx context.Context, vector *api.Vector) error {
 		return err
 	}
 
+	// Check if vector already exists - for Put operation, we don't allow overwrites
+	// Use a separate Update method if overwriting is needed
+	_, exists := m.vectors[vector.ID]
+	var sizeDelta int64
+
+	if exists {
+		// Return error for existing vector - Put should not overwrite
+		return api.ErrVectorExists
+	} else {
+		// New vector
+		sizeDelta = m.calculateVectorSize(vector)
+		m.metadata.VectorCount++
+	}
+
+	// Clone the vector to prevent external modifications
+	m.vectors[vector.ID] = vector.Clone()
+	m.metadata.SizeBytes += sizeDelta
+	m.metadata.UpdatedAt = time.Now()
+
+	// Update statistics
+	if m.config.EnableStats {
+		m.metadata.Stats.TotalPuts++
+	}
+
+	return nil
+}
+
+// Update modifies an existing vector or creates a new one if it doesn't exist
+func (m *MemoryStore) Update(ctx context.Context, vector *api.Vector) error {
+	if vector == nil {
+		return api.ErrEmptyVector
+	}
+
+	if err := vector.Validate(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.closed {
+		return api.ErrClosed
+	}
+
+	// Check context cancellation
+	if ctx.Err() != nil {
+		return api.ErrContextCanceled
+	}
+
+	// Check capacity limits
+	if err := m.checkCapacityLocked(vector); err != nil {
+		return err
+	}
+
 	// Check if vector already exists
 	existing, exists := m.vectors[vector.ID]
 	var sizeDelta int64
 
 	if exists {
-		// Calculate size difference
+		// Calculate size difference for update
 		oldSize := m.calculateVectorSize(existing)
 		newSize := m.calculateVectorSize(vector)
 		sizeDelta = newSize - oldSize
