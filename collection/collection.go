@@ -593,6 +593,7 @@ func (c *VectorCollection) startBackgroundOptimization() {
 	c.mu.Unlock()
 
 	go func() {
+		ticker := c.optimizeTicker // Capture ticker to avoid race condition
 		defer func() {
 			// Ensure ticker is stopped when goroutine exits
 			c.mu.Lock()
@@ -603,9 +604,13 @@ func (c *VectorCollection) startBackgroundOptimization() {
 			c.mu.Unlock()
 		}()
 
+		if ticker == nil {
+			return // Exit early if ticker is nil
+		}
+
 		for {
 			select {
-			case <-c.optimizeTicker.C:
+			case <-ticker.C:
 				// Perform optimization if the collection has had significant activity
 				if c.metadata.OperationCount > 1000 {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -727,12 +732,13 @@ func (a *IndexAdapter) Search(ctx context.Context, req *api.SearchRequest) ([]*a
 	// Convert results
 	apiResults := make([]*api.SearchResult, len(results))
 	for i, result := range results {
-		// Use the score from the index result directly
-		// Calculate distance as 1 - score for cosine similarity
-		distance := float32(1.0) - result.Score
-		if distance < 0 {
-			distance = 0
-		}
+		// For HNSW index, Score contains the actual distance value
+		// Score and Distance should be the same for distance-based metrics
+		distance := result.Score
+		score := result.Score
+
+		// For cosine similarity, score is typically 1 - distance
+		// But HNSW returns distances, so we keep it as is
 
 		apiResults[i] = &api.SearchResult{
 			Vector: &api.Vector{
@@ -740,7 +746,7 @@ func (a *IndexAdapter) Search(ctx context.Context, req *api.SearchRequest) ([]*a
 				Data:     result.Vector,
 				Metadata: result.Metadata,
 			},
-			Score:    result.Score,
+			Score:    score,
 			Distance: distance,
 		}
 	}

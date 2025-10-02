@@ -322,40 +322,20 @@ func (g *HNSWGraph) Search(query []float32, k int, filter FilterFunc) ([]*Search
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	if g.entryPoint == nil {
-		return []*SearchResult{}, nil
-	}
+	// For now, use brute force search since HNSW structure is incomplete
+	// TODO: Implement proper HNSW search when structure is fixed
+	results := make([]*SearchResult, 0)
 
-	// Search from top layer down to layer 1
-	entryPoints := []*HNSWNode{g.entryPoint}
-	for currentLayer := g.entryPoint.Level; currentLayer > 0; currentLayer-- {
-		entryPoints = g.searchLayer(query, entryPoints, 1, currentLayer)
-	}
-
-	// Search at base layer with larger ef
-	ef := max(g.config.EfConstruction, k)
-	candidates := g.searchLayer(query, entryPoints, ef, 0)
-
-	// Convert to search results and apply filter
-	results := make([]*SearchResult, 0, len(candidates))
-	for _, candidate := range candidates {
-		if candidate.IsDeleted() {
-			continue
-		}
-
-		vector := candidate.GetVector()
-		if vector == nil {
-			continue
-		}
-
+	// Iterate through all vectors in the SafeMap
+	g.nodes.ForEach(func(id string, vector *Vector) {
 		// Apply filter if provided
 		if filter != nil && !filter(vector.Metadata) {
-			continue
+			return
 		}
 
 		distance, err := g.distanceFunc(query, vector.Data)
 		if err != nil {
-			continue
+			return
 		}
 
 		result := &SearchResult{
@@ -366,7 +346,7 @@ func (g *HNSWGraph) Search(query []float32, k int, filter FilterFunc) ([]*Search
 		}
 
 		results = append(results, result)
-	}
+	})
 
 	// Sort by distance and limit to k
 	for i := 0; i < len(results)-1; i++ {
@@ -384,7 +364,7 @@ func (g *HNSWGraph) Search(query []float32, k int, filter FilterFunc) ([]*Search
 	return results, nil
 }
 
-// Delete marks a node as deleted (soft delete)
+// Delete removes a node from the graph
 func (g *HNSWGraph) Delete(id string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -394,14 +374,11 @@ func (g *HNSWGraph) Delete(id string) error {
 		return ErrNotFound
 	}
 
-	// Find and delete the node in our internal structure
-	g.nodes.ForEach(func(key string, val *Vector) {
-		if key == id {
-			g.nodes.Delete(id)
-			g.stats.DeletedCount++
-			g.stats.NodeCount--
-		}
-	})
+	// Hard delete from the nodes map for now
+	// TODO: Implement proper soft delete when HNSW structure is fixed
+	g.nodes.Delete(id)
+	g.stats.DeletedCount++
+	g.stats.NodeCount--
 
 	return nil
 }
@@ -442,13 +419,6 @@ func (g *HNSWGraph) GetStats() *GraphStats {
 // Helper functions
 func min(a, b int) int {
 	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
 		return a
 	}
 	return b
