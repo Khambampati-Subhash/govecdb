@@ -108,6 +108,47 @@ type SearchRequest struct {
 	MinScore    *float32   `json:"min_score,omitempty"`
 }
 
+// BatchRequest represents a batch operation request
+type BatchRequest struct {
+	Operations []BatchOperation `json:"operations"`
+	Timeout    *time.Duration   `json:"timeout,omitempty"`
+	Atomic     bool             `json:"atomic"` // All operations succeed or all fail
+}
+
+// BatchOperation represents a single operation in a batch
+type BatchOperation struct {
+	Type     BatchOperationType `json:"type"`
+	VectorID string             `json:"vector_id,omitempty"`
+	Vector   *Vector            `json:"vector,omitempty"`
+	Search   *SearchRequest     `json:"search,omitempty"`
+}
+
+// BatchOperationType represents the type of batch operation
+type BatchOperationType string
+
+const (
+	BatchOperationInsert BatchOperationType = "insert"
+	BatchOperationUpdate BatchOperationType = "update"
+	BatchOperationDelete BatchOperationType = "delete"
+	BatchOperationSearch BatchOperationType = "search"
+	BatchOperationGet    BatchOperationType = "get"
+)
+
+// BatchResponse represents a batch operation response
+type BatchResponse struct {
+	Results []BatchResult `json:"results"`
+	Success bool          `json:"success"`
+	Error   string        `json:"error,omitempty"`
+}
+
+// BatchResult represents the result of a single batch operation
+type BatchResult struct {
+	Success       bool            `json:"success"`
+	Error         string          `json:"error,omitempty"`
+	Vector        *Vector         `json:"vector,omitempty"`         // For get operations
+	SearchResults []*SearchResult `json:"search_results,omitempty"` // For search operations
+}
+
 // Validate checks if the search request is valid
 func (r *SearchRequest) Validate() error {
 	if len(r.Vector) == 0 {
