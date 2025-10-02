@@ -454,15 +454,13 @@ func (pc *PersistentVectorCollection) Close() error {
 // recoverIfNeeded performs recovery if the collection was not cleanly shut down
 func (pc *PersistentVectorCollection) recoverIfNeeded(ctx context.Context) error {
 	// Get recovery information from manifest
-	lastLSN, lastSnapshotID, recoveryState, err := pc.manifest.GetRecoveryInfo(ctx)
+	lastLSN, lastSnapshotID, _, err := pc.manifest.GetRecoveryInfo(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get recovery info: %w", err)
 	}
 
-	// If clean shutdown, no recovery needed
-	if recoveryState == "clean" {
-		return nil
-	}
+	// Always perform recovery to restore vectors from WAL
+	// Even "clean" shutdowns need to replay WAL to restore collection state
 
 	// Set recovery state
 	if err := pc.manifest.UpdateRecoveryState(ctx, lastLSN, lastSnapshotID, "recovering"); err != nil {

@@ -520,12 +520,7 @@ func (w *WAL) serializeRecord(record *WALRecord) ([]byte, error) {
 		return nil, fmt.Errorf("record size %d exceeds maximum %d", len(data), MaxRecordSize)
 	}
 
-	// Prepend length
-	result := make([]byte, 4+len(data))
-	binary.LittleEndian.PutUint32(result[:4], uint32(len(data)))
-	copy(result[4:], data)
-
-	return result, nil
+	return data, nil
 }
 
 // writeRecordData writes serialized record data to the current writer
@@ -767,17 +762,20 @@ func (w *WAL) replayFile(ctx context.Context, filePath string, fromLSN uint64, h
 	}
 	defer file.Close()
 
+	// Create reader first
+	reader := bufio.NewReader(file)
+
 	// Skip header
 	var headerLen uint32
-	if err := binary.Read(file, binary.LittleEndian, &headerLen); err != nil {
+	if err := binary.Read(reader, binary.LittleEndian, &headerLen); err != nil {
 		return err
 	}
 
-	if _, err := file.Seek(int64(headerLen), io.SeekCurrent); err != nil {
+	// Skip header data
+	headerData := make([]byte, headerLen)
+	if _, err := io.ReadFull(reader, headerData); err != nil {
 		return err
 	}
-
-	reader := bufio.NewReader(file)
 
 	for {
 		// Check context
