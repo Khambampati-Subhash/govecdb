@@ -42,6 +42,10 @@ func TestWAL(t *testing.T) {
 	defer wal.Stop(ctx)
 
 	t.Run("WriteRecord", func(t *testing.T) {
+		// Set shorter timeout for tests
+		ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
 		// Test writing a single record
 		record := &WALRecord{
 			Type: RecordTypeInsert,
@@ -55,7 +59,7 @@ func TestWAL(t *testing.T) {
 			TxnID: "txn-1",
 		}
 
-		err := wal.WriteRecord(ctx, record)
+		err := wal.WriteRecord(ctxTimeout, record)
 		if err != nil {
 			t.Errorf("Failed to write record: %v", err)
 		}
@@ -252,6 +256,8 @@ func TestWALReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create WAL for replay: %v", err)
 	}
+
+
 
 	handler := &MockReplayHandler{}
 

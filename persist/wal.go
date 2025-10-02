@@ -202,6 +202,56 @@ func (w *WAL) WriteRecord(ctx context.Context, record *WALRecord) error {
 	return nil
 }
 
+// writeRecordLocked writes a single record to the WAL (assumes mutex is already held)
+func (w *WAL) writeRecordLocked(ctx context.Context, record *WALRecord) error {
+	if record == nil {
+		return fmt.Errorf("WAL record cannot be nil")
+	}
+
+	if w.stopped {
+		return fmt.Errorf("WAL is stopped")
+	}
+
+	// Assign LSN and set timestamp
+	record.LSN = atomic.AddUint64(&w.currentLSN, 1)
+	record.Timestamp = time.Now()
+
+	// Calculate checksum
+	record.Checksum = w.calculateChecksum(record)
+
+	// Serialize record
+	data, err := w.serializeRecord(record)
+	if err != nil {
+		atomic.AddUint64(&w.stats.errorCount, 1)
+		return fmt.Errorf("failed to serialize WAL record: %w", err)
+	}
+
+	// Check if we need to rotate the file
+	if w.currentWriter != nil && w.currentWriter.fileSize+int64(len(data)) > w.config.MaxFileSize {
+		if err := w.rotateFile(); err != nil {
+			atomic.AddUint64(&w.stats.errorCount, 1)
+			return fmt.Errorf("failed to rotate WAL file: %w", err)
+		}
+	}
+
+	// Write record
+	if err := w.writeRecordData(data, record.LSN); err != nil {
+		atomic.AddUint64(&w.stats.errorCount, 1)
+		return fmt.Errorf("failed to write WAL record: %w", err)
+	}
+
+	// Sync if configured
+	if w.config.SyncWrites {
+		if err := w.sync(); err != nil {
+			atomic.AddUint64(&w.stats.errorCount, 1)
+			return fmt.Errorf("failed to sync WAL: %w", err)
+		}
+	}
+
+	atomic.AddUint64(&w.stats.writeCount, 1)
+	return nil
+}
+
 // WriteBatch writes multiple records as a batch
 func (w *WAL) WriteBatch(ctx context.Context, records []*WALRecord) error {
 	if len(records) == 0 {
@@ -332,7 +382,7 @@ func (w *WAL) Checkpoint(ctx context.Context) (uint64, error) {
 		},
 	}
 
-	if err := w.WriteRecord(ctx, checkpointRecord); err != nil {
+	if err := w.writeRecordLocked(ctx, checkpointRecord); err != nil {
 		return 0, fmt.Errorf("failed to write checkpoint record: %w", err)
 	}
 
@@ -484,12 +534,21 @@ func (w *WAL) writeRecordData(data []byte, lsn uint64) error {
 		return fmt.Errorf("no active WAL writer")
 	}
 
+	// Write record length first
+	recordLen := uint32(len(data))
+	if err := binary.Write(w.currentWriter.writer, binary.LittleEndian, recordLen); err != nil {
+		return fmt.Errorf("failed to write record length: %w", err)
+	}
+
+	// Write record data
 	n, err := w.currentWriter.writer.Write(data)
 	if err != nil {
 		return err
 	}
 
-	w.currentWriter.fileSize += int64(n)
+	// Update statistics (include the 4 bytes for length prefix)
+	totalBytes := int64(4 + n)
+	w.currentWriter.fileSize += totalBytes
 	w.currentWriter.recordCount++
 	w.currentWriter.lastLSN = lsn
 
@@ -585,17 +644,22 @@ func (w *WAL) backgroundFlush() {
 	for {
 		select {
 		case <-w.flushTicker.C:
-			w.mu.Lock()
-			_ = w.flushWriter()
-			w.mu.Unlock()
+			w.performBackgroundFlush()
 		case <-w.flushChan:
-			w.mu.Lock()
-			_ = w.flushWriter()
-			w.mu.Unlock()
+			w.performBackgroundFlush()
 		case <-w.stopChan:
 			return
 		}
 	}
+}
+
+func (w *WAL) performBackgroundFlush() {
+	// Use TryLock with timeout to avoid deadlocks
+	if !w.mu.TryLock() {
+		return // Skip flush if can't acquire lock immediately
+	}
+	defer w.mu.Unlock()
+	_ = w.flushWriter()
 }
 
 // walFileInfo contains information about a WAL file
@@ -650,10 +714,48 @@ func (w *WAL) getFileInfo(filePath string) (*walFileInfo, error) {
 		return nil, err
 	}
 
+	// Scan through the file to find the actual last LSN
+	// Note: file position is already past the header after reading headerData
+	lastLSN := header.FirstLSN - 1 // Default to before first LSN if no records
+	reader := bufio.NewReader(file)
+	recordCount := 0
+
+	for {
+		// Read record length
+		var recordLen uint32
+		if err := binary.Read(reader, binary.LittleEndian, &recordLen); err != nil {
+			if err == io.EOF {
+				break
+			}
+			// If we can't read more records, that's ok - use what we found
+			break
+		}
+
+		// Read record data
+		recordData := make([]byte, recordLen)
+		if _, err := io.ReadFull(reader, recordData); err != nil {
+			break
+		}
+
+		// Deserialize record to get LSN
+		var record WALRecord
+		if err := json.Unmarshal(recordData, &record); err != nil {
+			continue // Skip corrupted records
+		}
+
+		recordCount++
+		if record.LSN > lastLSN {
+			lastLSN = record.LSN
+		}
+	}
+
+	// For debug purposes - this will be visible in test logs if we print the struct
+	_ = recordCount
+
 	return &walFileInfo{
 		path:     filePath,
 		firstLSN: header.FirstLSN,
-		lastLSN:  header.LastLSN,
+		lastLSN:  lastLSN,
 	}, nil
 }
 

@@ -11,6 +11,7 @@ import (
 // Common errors used throughout the API
 var (
 	ErrVectorNotFound     = errors.New("vector not found")
+	ErrVectorExists       = errors.New("vector already exists")
 	ErrCollectionNotFound = errors.New("collection not found")
 	ErrDimensionMismatch  = errors.New("vector dimension mismatch")
 	ErrEmptyVector        = errors.New("vector cannot be empty")
@@ -20,6 +21,9 @@ var (
 	ErrInvalidConfig      = errors.New("invalid configuration")
 	ErrClosed             = errors.New("database is closed")
 	ErrContextCanceled    = errors.New("operation canceled")
+	ErrDuplicateID        = errors.New("duplicate vector ID")
+	ErrCapacityExceeded   = errors.New("storage capacity exceeded")
+	ErrOperationTimeout   = errors.New("operation timeout")
 )
 
 // DistanceMetric represents the type of distance calculation to use
@@ -189,7 +193,7 @@ func (c *CollectionConfig) Validate() error {
 		return fmt.Errorf("dimension must be positive")
 	}
 	if c.M <= 0 {
-		return fmt.Errorf("M must be positive")
+		return fmt.Errorf("m must be positive")
 	}
 	if c.EfConstruction <= 0 {
 		return fmt.Errorf("ef_construction must be positive")
@@ -381,6 +385,7 @@ type IndexStats struct {
 type VectorStore interface {
 	// Store operations
 	Put(ctx context.Context, vector *Vector) error
+	Update(ctx context.Context, vector *Vector) error
 	Get(ctx context.Context, id string) (*Vector, error)
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context, limit int, offset int) ([]*Vector, error)
@@ -580,4 +585,30 @@ func Lt(field string, value interface{}) FilterExpr {
 // Lte creates a less-than-or-equal filter
 func Lte(field string, value interface{}) FilterExpr {
 	return CreateFieldFilter(field, FilterLte, value)
+}
+
+// FuncFilter wraps a function to implement FilterExpr interface
+type FuncFilter struct {
+	Fn func(metadata map[string]interface{}) bool
+}
+
+// Evaluate implements FilterExpr
+func (f *FuncFilter) Evaluate(metadata map[string]interface{}) bool {
+	if f.Fn == nil {
+		return true
+	}
+	return f.Fn(metadata)
+}
+
+// Validate implements FilterExpr
+func (f *FuncFilter) Validate() error {
+	if f.Fn == nil {
+		return fmt.Errorf("filter function cannot be nil")
+	}
+	return nil
+}
+
+// NewFuncFilter creates a function-based filter
+func NewFuncFilter(fn func(metadata map[string]interface{}) bool) FilterExpr {
+	return &FuncFilter{Fn: fn}
 }
