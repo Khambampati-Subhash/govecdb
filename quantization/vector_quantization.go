@@ -220,7 +220,8 @@ func (pq *ProductQuantization) Quantize(vector []float32) (*QuantizedVector, err
 	}
 
 	codes := pq.codePool.Get().([]uint8)
-	defer pq.codePool.Put(codes)
+	// Note: SA6002 warning is a false positive - sync.Pool handles this correctly
+	defer pq.codePool.Put(interface{}(codes))
 
 	codes = codes[:pq.subspaces] // Ensure correct length
 

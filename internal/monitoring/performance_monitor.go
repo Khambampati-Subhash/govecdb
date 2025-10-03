@@ -32,7 +32,6 @@ type PerformanceMonitor struct {
 
 	// Error metrics
 	errorCount    int64
-	errorRate     float64
 	lastErrorTime time.Time
 
 	// Configuration

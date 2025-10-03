@@ -221,6 +221,7 @@ func BenchmarkFloat32Pool(b *testing.B) {
 			for j := 0; j < 100; j++ {
 				slice = append(slice, float32(j))
 			}
+			_ = slice // Use the slice to avoid SA4010
 		}
 	})
 }

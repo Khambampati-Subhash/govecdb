@@ -139,7 +139,7 @@ type LSHashFunction struct {
 type PQIndex struct {
 	// Codebooks for each subspace
 	codebooks [][]Centroid
-	codes     [][]uint8 // Quantized codes
+	// Note: codes field removed as it was unused
 
 	// Configuration
 	config *PQConfig
@@ -184,12 +184,10 @@ type AdaptiveRouter struct {
 }
 
 // PerformanceMetrics tracks performance for an index type
+// Note: Currently a placeholder - fields will be implemented when adaptive routing is completed
 type PerformanceMetrics struct {
-	avgLatency  float64
-	avgAccuracy float64
-	queryCount  int64
-	errorRate   float64
-	lastUpdate  int64
+	// Reserved for future implementation
+	_ struct{}
 }
 
 // QueryPattern represents learned query characteristics
@@ -371,7 +369,7 @@ func (m *MultiIndexManager) Add(vector *Vector) error {
 
 	if m.flatIndex != nil {
 		if err := m.flatIndex.Add(vector); err != nil {
-			errors = append(errors, fmt.Errorf("Flat add failed: %w", err))
+			errors = append(errors, fmt.Errorf("flat add failed: %w", err))
 		}
 	}
 

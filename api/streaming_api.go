@@ -24,7 +24,6 @@ type StreamingAPI struct {
 	config *StreamConfig
 
 	// Metrics
-	activeStreams  int64
 	totalRequests  int64
 	streamingBytes int64
 }
@@ -253,7 +252,7 @@ func (api *StreamingAPI) executeBatch(ctx context.Context, req *BatchRequest) (*
 	startTime := time.Now()
 	requestID := generateRequestID()
 
-	results := make([]OperationResult, len(req.Operations))
+	var results []OperationResult
 	var errors []BatchError
 	var successCount, failCount int
 	var totalDuration time.Duration

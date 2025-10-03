@@ -8,15 +8,15 @@ import (
 func getOptimizedDistanceFunc(metric DistanceMetric) OptimizedDistanceFunc {
 	switch metric {
 	case Cosine:
-		return OptimizedCosineDistance
+		return CosineSIMD
 	case Euclidean:
-		return OptimizedEuclideanDistance
+		return EuclideanSIMD8 // Use enhanced 8-element vectorization
 	case Manhattan:
-		return OptimizedManhattanDistance
+		return ManhattanSIMD
 	case DotProduct:
-		return OptimizedDotProductDistance
+		return DotProductSIMD
 	default:
-		return OptimizedCosineDistance
+		return EuclideanSIMD8
 	}
 }
 

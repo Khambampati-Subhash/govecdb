@@ -62,10 +62,6 @@ type NumericNode struct {
 	next *NumericNode
 	prev *NumericNode
 
-	// Statistics
-	accessCount  int64
-	lastAccessed time.Time
-
 	// Thread safety
 	mu sync.RWMutex
 }

@@ -788,7 +788,6 @@ type CompactionWorker struct {
 	currentTask *CompactionTask
 	mu          sync.RWMutex
 	stopChan    chan struct{}
-	wg          sync.WaitGroup
 }
 
 // CompactionStats provides statistics about compaction operations

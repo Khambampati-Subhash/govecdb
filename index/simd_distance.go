@@ -149,10 +149,10 @@ func ManhattanSIMD(a, b []float32) float32 {
 
 	// Process 4 elements at a time
 	for i < len(a)-3 {
-		sum1 += abs32(a[i] - b[i])
-		sum2 += abs32(a[i+1] - b[i+1])
-		sum3 += abs32(a[i+2] - b[i+2])
-		sum4 += abs32(a[i+3] - b[i+3])
+		sum1 += simdAbs32(a[i] - b[i])
+		sum2 += simdAbs32(a[i+1] - b[i+1])
+		sum3 += simdAbs32(a[i+2] - b[i+2])
+		sum4 += simdAbs32(a[i+3] - b[i+3])
 		i += 4
 	}
 
@@ -186,6 +186,110 @@ func GetSIMDDistanceFunc(metric string) SIMDDistanceFunc {
 	default:
 		return EuclideanSIMD
 	}
+}
+
+// Enhanced batch distance functions for better throughput
+type BatchDistanceCalculator struct {
+	metric     DistanceMetric
+	distFunc   OptimizedDistanceFunc
+	vectorPool *VectorPool
+}
+
+// NewBatchDistanceCalculator creates a new batch distance calculator
+func NewBatchDistanceCalculator(metric DistanceMetric) *BatchDistanceCalculator {
+	return &BatchDistanceCalculator{
+		metric:     metric,
+		distFunc:   getOptimizedDistanceFunc(metric),
+		vectorPool: NewVectorPool(),
+	}
+}
+
+// CalculateBatchDistances computes distances between a query and multiple vectors efficiently
+func (bdc *BatchDistanceCalculator) CalculateBatchDistances(query []float32, vectors [][]float32, results []float32) {
+	if len(results) != len(vectors) {
+		panic("results slice must have same length as vectors slice")
+	}
+
+	// Process in batches for better cache locality
+	const batchSize = 8
+
+	for i := 0; i < len(vectors); i += batchSize {
+		end := i + batchSize
+		if end > len(vectors) {
+			end = len(vectors)
+		}
+
+		// Process batch
+		for j := i; j < end; j++ {
+			results[j] = bdc.distFunc(query, vectors[j])
+		}
+	}
+}
+
+// BatchEuclideanSIMD computes multiple Euclidean distances simultaneously
+func BatchEuclideanSIMD(query []float32, vectors [][]float32, results []float32) {
+	if len(results) != len(vectors) {
+		return
+	}
+
+	for i, vec := range vectors {
+		results[i] = EuclideanSIMD(query, vec)
+	}
+}
+
+// Enhanced SIMD functions with 8-element vectorization
+func EuclideanSIMD8(a, b []float32) float32 {
+	if len(a) != len(b) {
+		return float32(math.Inf(1))
+	}
+
+	var sum1, sum2, sum3, sum4, sum5, sum6, sum7, sum8 float32
+	i := 0
+
+	// Process 8 elements at a time for better SIMD utilization
+	for i < len(a)-7 {
+		diff1 := a[i] - b[i]
+		diff2 := a[i+1] - b[i+1]
+		diff3 := a[i+2] - b[i+2]
+		diff4 := a[i+3] - b[i+3]
+		diff5 := a[i+4] - b[i+4]
+		diff6 := a[i+5] - b[i+5]
+		diff7 := a[i+6] - b[i+6]
+		diff8 := a[i+7] - b[i+7]
+
+		sum1 += diff1 * diff1
+		sum2 += diff2 * diff2
+		sum3 += diff3 * diff3
+		sum4 += diff4 * diff4
+		sum5 += diff5 * diff5
+		sum6 += diff6 * diff6
+		sum7 += diff7 * diff7
+		sum8 += diff8 * diff8
+
+		i += 8
+	}
+
+	// Handle remaining elements with 4-element vectorization
+	var sum float32 = sum1 + sum2 + sum3 + sum4 + sum5 + sum6 + sum7 + sum8
+
+	for i < len(a)-3 {
+		diff1 := a[i] - b[i]
+		diff2 := a[i+1] - b[i+1]
+		diff3 := a[i+2] - b[i+2]
+		diff4 := a[i+3] - b[i+3]
+
+		sum += diff1*diff1 + diff2*diff2 + diff3*diff3 + diff4*diff4
+		i += 4
+	}
+
+	// Handle final elements
+	for i < len(a) {
+		diff := a[i] - b[i]
+		sum += diff * diff
+		i++
+	}
+
+	return float32(math.Sqrt(float64(sum)))
 }
 
 // VectorNormalization provides optimized vector normalization
