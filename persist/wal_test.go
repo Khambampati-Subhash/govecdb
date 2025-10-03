@@ -514,13 +514,11 @@ func TestSnapshotCleanup(t *testing.T) {
 		},
 	}
 
-	var snapshots []*SnapshotMetadata
 	for i := 0; i < 5; i++ {
-		metadata, err := sm.CreateSnapshot(ctx, uint64(i+1), snapshotData)
+		_, err := sm.CreateSnapshot(ctx, uint64(i+1), snapshotData)
 		if err != nil {
 			t.Errorf("Failed to create snapshot %d: %v", i, err)
 		}
-		snapshots = append(snapshots, metadata)
 		time.Sleep(10 * time.Millisecond) // Ensure different timestamps
 	}
 

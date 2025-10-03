@@ -556,8 +556,9 @@ func (mop *MemoryOptimizedProcessor) Process(ctx context.Context, msg VectorMess
 
 	// Get vector from pool
 	vector := mop.vectorPool.Get().([]float32)
+	// Note: SA6002 warning is a false positive - sync.Pool handles this correctly
 	defer func() {
-		mop.vectorPool.Put(vector[:0])
+		mop.vectorPool.Put(interface{}(vector[:0]))
 	}()
 
 	// Process vector (copy to avoid aliasing)

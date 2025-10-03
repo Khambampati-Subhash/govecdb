@@ -250,7 +250,7 @@ func (g *OptimizedHNSWGraph) searchLayerOptimized(query []float32, entryPoints [
 	candidatesSlice := g.candidatePool.Get().([]*FastSearchResult)
 	defer func() {
 		candidatesSlice = candidatesSlice[:0] // Reset slice
-		g.candidatePool.Put(candidatesSlice)
+		g.candidatePool.Put(&candidatesSlice)
 	}()
 
 	visited := make(map[string]bool, numClosest*4) // Pre-allocate with reasonable size
@@ -359,7 +359,7 @@ func (g *OptimizedHNSWGraph) Search(query []float32, k int, filter FilterFunc) (
 	results := g.resultPool.Get().([]*SearchResult)
 	defer func() {
 		results = results[:0] // Reset slice
-		g.resultPool.Put(results)
+		g.resultPool.Put(&results)
 	}()
 
 	// Convert to SearchResult format and apply filter
@@ -634,8 +634,6 @@ func (h *MaxFastResultHeap) Pop() interface{} {
 
 // Utility functions
 
-// min returns the minimum of two integers
-
 // max returns the maximum of two integers
 func max(a, b int) int {
 	if a > b {
@@ -654,34 +652,6 @@ func fastRand() uint32 {
 
 func fastRandFloat64() float64 {
 	return float64(fastRand()) / float64(1<<32)
-}
-
-// partialSort sorts only the first k elements (more efficient than full sort)
-func partialSort[T any](slice []T, k int, less func(i, j int) bool) {
-	if k >= len(slice) {
-		// Full sort needed
-		for i := 0; i < len(slice)-1; i++ {
-			for j := i + 1; j < len(slice); j++ {
-				if less(j, i) {
-					slice[i], slice[j] = slice[j], slice[i]
-				}
-			}
-		}
-		return
-	}
-
-	// Partial selection sort for first k elements
-	for i := 0; i < k; i++ {
-		minIdx := i
-		for j := i + 1; j < len(slice); j++ {
-			if less(j, minIdx) {
-				minIdx = j
-			}
-		}
-		if minIdx != i {
-			slice[i], slice[minIdx] = slice[minIdx], slice[i]
-		}
-	}
 }
 
 // Specific partial sort for candidateWithDist

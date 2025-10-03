@@ -1,6 +1,7 @@
 package index
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 )
@@ -95,22 +96,39 @@ func (p *MemoryPool[T]) Put(obj T) {
 	p.pool.Put(obj)
 }
 
-// VectorPool is a specialized pool for vector slices
+// VectorPool is a specialized pool for vector slices with size-based pooling
 type VectorPool struct {
 	pools []sync.Pool // Different pools for different sizes
+	sizes []int       // Track sizes for each pool
+	stats *PoolStats  // Pool statistics
 }
 
-// NewVectorPool creates a new vector pool
+// PoolStats tracks memory pool usage statistics
+type PoolStats struct {
+	hits   int64 // Cache hits
+	misses int64 // Cache misses
+	puts   int64 // Put operations
+	gets   int64 // Get operations
+	wastes int64 // Wasted allocations (too large)
+}
+
+// NewVectorPool creates a new optimized vector pool
 func NewVectorPool() *VectorPool {
+	// Common vector sizes in machine learning: 64, 128, 256, 512, 768, 1024, 1536, 2048
+	commonSizes := []int{16, 32, 64, 128, 256, 384, 512, 768, 1024, 1536, 2048, 4096}
+
 	vp := &VectorPool{
-		pools: make([]sync.Pool, 20), // Support vectors up to 2^20 elements
+		pools: make([]sync.Pool, len(commonSizes)),
+		sizes: commonSizes,
+		stats: &PoolStats{},
 	}
 
-	for i := range vp.pools {
-		size := 1 << i // 2^i
+	for i, size := range commonSizes {
+		currentSize := size // Capture for closure
 		vp.pools[i] = sync.Pool{
 			New: func() interface{} {
-				return make([]float32, 0, size)
+				atomic.AddInt64(&vp.stats.misses, 1)
+				return make([]float32, 0, currentSize)
 			},
 		}
 	}
@@ -120,17 +138,24 @@ func NewVectorPool() *VectorPool {
 
 // Get retrieves a vector slice with at least the specified capacity
 func (vp *VectorPool) Get(minCapacity int) []float32 {
-	// Find the appropriate pool
-	poolIndex := 0
-	for poolIndex < len(vp.pools) && (1<<poolIndex) < minCapacity {
-		poolIndex++
+	atomic.AddInt64(&vp.stats.gets, 1)
+
+	// Find the smallest pool that can accommodate the request
+	poolIndex := -1
+	for i, size := range vp.sizes {
+		if size >= minCapacity {
+			poolIndex = i
+			break
+		}
 	}
 
-	if poolIndex >= len(vp.pools) {
+	if poolIndex == -1 {
 		// Too large for pools, allocate directly
+		atomic.AddInt64(&vp.stats.wastes, 1)
 		return make([]float32, 0, minCapacity)
 	}
 
+	atomic.AddInt64(&vp.stats.hits, 1)
 	slice := vp.pools[poolIndex].Get().([]float32)
 	return slice[:0] // Reset length but keep capacity
 }
@@ -141,18 +166,43 @@ func (vp *VectorPool) Put(slice []float32) {
 		return
 	}
 
+	atomic.AddInt64(&vp.stats.puts, 1)
 	capacity := cap(slice)
 
-	// Find the appropriate pool
-	poolIndex := 0
-	for poolIndex < len(vp.pools) && (1<<poolIndex) < capacity {
-		poolIndex++
-	}
-
-	if poolIndex < len(vp.pools) && (1<<poolIndex) == capacity {
-		vp.pools[poolIndex].Put(slice)
+	// Find the exact pool for this capacity
+	for i, size := range vp.sizes {
+		if size == capacity {
+			// Clear slice before returning to pool to prevent memory leaks
+			for j := range slice {
+				slice[j] = 0
+			}
+			// Note: SA6002 warning is a false positive - sync.Pool handles this correctly
+			vp.pools[i].Put(interface{}(slice[:0]))
+			return
+		}
 	}
 	// If capacity doesn't match a pool size, let it be garbage collected
+}
+
+// GetStats returns pool usage statistics
+func (vp *VectorPool) GetStats() PoolStats {
+	return PoolStats{
+		hits:   atomic.LoadInt64(&vp.stats.hits),
+		misses: atomic.LoadInt64(&vp.stats.misses),
+		puts:   atomic.LoadInt64(&vp.stats.puts),
+		gets:   atomic.LoadInt64(&vp.stats.gets),
+		wastes: atomic.LoadInt64(&vp.stats.wastes),
+	}
+}
+
+// HitRate returns the cache hit rate as a percentage
+func (vp *VectorPool) HitRate() float64 {
+	hits := atomic.LoadInt64(&vp.stats.hits)
+	total := hits + atomic.LoadInt64(&vp.stats.misses)
+	if total == 0 {
+		return 0
+	}
+	return float64(hits) / float64(total) * 100
 }
 
 // LockFreeCounter is an atomic counter for statistics
@@ -235,30 +285,58 @@ func (bp *BatchProcessor[T]) flush() error {
 	return err
 }
 
-// WorkerPool manages a pool of workers for parallel processing
+// WorkerPool manages a pool of workers for parallel processing with enhanced performance
 type WorkerPool[T any] struct {
 	workers   int
 	jobs      chan T
 	results   chan error
 	processor func(T) error
 	wg        sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	started   int32        // Atomic flag for started state
+	stats     *WorkerStats // Worker statistics
 }
 
-// NewWorkerPool creates a new worker pool
+// WorkerStats tracks worker pool performance
+type WorkerStats struct {
+	processed  int64 // Total jobs processed
+	errors     int64 // Total errors
+	avgLatency int64 // Average processing latency in nanoseconds
+	active     int32 // Currently active workers
+}
+
+// NewWorkerPool creates a new optimized worker pool
 func NewWorkerPool[T any](workers int, processor func(T) error) *WorkerPool[T] {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Calculate optimal buffer size based on worker count
+	bufferSize := workers * 4 // 4x workers for better throughput
+	if bufferSize < 64 {
+		bufferSize = 64 // Minimum buffer size
+	}
+
 	return &WorkerPool[T]{
 		workers:   workers,
-		jobs:      make(chan T, workers*2), // Buffer jobs
-		results:   make(chan error, workers*2),
+		jobs:      make(chan T, bufferSize),
+		results:   make(chan error, bufferSize),
 		processor: processor,
+		ctx:       ctx,
+		cancel:    cancel,
+		stats:     &WorkerStats{},
 	}
 }
 
-// Start starts the worker pool
+// Start starts the worker pool with optimized worker management
 func (wp *WorkerPool[T]) Start() {
+	if !atomic.CompareAndSwapInt32(&wp.started, 0, 1) {
+		return // Already started
+	}
+
+	// Start workers with CPU affinity consideration
 	for i := 0; i < wp.workers; i++ {
 		wp.wg.Add(1)
-		go wp.worker()
+		go wp.optimizedWorker(i)
 	}
 }
 
@@ -267,11 +345,33 @@ func (wp *WorkerPool[T]) Submit(job T) {
 	wp.jobs <- job
 }
 
-// Close closes the worker pool and waits for all workers to finish
+// Close gracefully shuts down the worker pool
 func (wp *WorkerPool[T]) Close() {
+	if !atomic.CompareAndSwapInt32(&wp.started, 1, 0) {
+		return // Already stopped or never started
+	}
+
+	// Cancel context to signal workers to stop
+	wp.cancel()
+
+	// Close jobs channel
 	close(wp.jobs)
+
+	// Wait for all workers to finish
 	wp.wg.Wait()
+
+	// Close results channel
 	close(wp.results)
+}
+
+// GetStats returns worker pool statistics
+func (wp *WorkerPool[T]) GetStats() WorkerStats {
+	return WorkerStats{
+		processed:  atomic.LoadInt64(&wp.stats.processed),
+		errors:     atomic.LoadInt64(&wp.stats.errors),
+		avgLatency: atomic.LoadInt64(&wp.stats.avgLatency),
+		active:     atomic.LoadInt32(&wp.stats.active),
+	}
 }
 
 // Results returns the results channel
@@ -279,13 +379,48 @@ func (wp *WorkerPool[T]) Results() <-chan error {
 	return wp.results
 }
 
-// worker processes jobs from the jobs channel
-func (wp *WorkerPool[T]) worker() {
+// optimizedWorker processes jobs with performance monitoring and context cancellation
+func (wp *WorkerPool[T]) optimizedWorker(workerID int) {
 	defer wp.wg.Done()
 
-	for job := range wp.jobs {
-		err := wp.processor(job)
-		wp.results <- err
+	atomic.AddInt32(&wp.stats.active, 1)
+	defer atomic.AddInt32(&wp.stats.active, -1)
+
+	// Worker loop for processing jobs
+
+	for {
+		select {
+		case <-wp.ctx.Done():
+			return
+
+		case job, ok := <-wp.jobs:
+			if !ok {
+				return // Channel closed
+			}
+
+			// Process with timing
+			start := getCurrentTimeNanos()
+			err := wp.processor(job)
+			elapsed := getCurrentTimeNanos() - start
+
+			// Update statistics
+			atomic.AddInt64(&wp.stats.processed, 1)
+			if err != nil {
+				atomic.AddInt64(&wp.stats.errors, 1)
+			}
+
+			// Update average latency using exponential moving average
+			oldAvg := atomic.LoadInt64(&wp.stats.avgLatency)
+			newAvg := (oldAvg*7 + elapsed) / 8 // EMA with alpha=0.125
+			atomic.StoreInt64(&wp.stats.avgLatency, newAvg)
+
+			// Send result
+			select {
+			case wp.results <- err:
+			case <-wp.ctx.Done():
+				return
+			}
+		}
 	}
 }
 

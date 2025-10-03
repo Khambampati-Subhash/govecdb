@@ -621,6 +621,5 @@ func BenchmarkMemoryUsage(b *testing.B) {
 
 // init sets up benchmark environment
 func init() {
-	// Set random seed for reproducible benchmarks
-	rand.Seed(42)
+	// Random seed is no longer needed as of Go 1.20 - using default random source
 }

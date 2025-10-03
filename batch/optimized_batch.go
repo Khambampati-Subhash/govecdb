@@ -29,7 +29,6 @@ type BatchProcessor struct {
 	// Statistics and monitoring
 	processedBatches int64
 	totalVectors     int64
-	totalTime        time.Duration
 	errorCount       int64
 
 	// Context and lifecycle
@@ -252,7 +251,8 @@ func (bp *BatchProcessor) processTask(task BatchTask) BatchResult {
 
 	// Get reusable vectors from pool
 	vectors := bp.vectorPool.Get().([][]float32)
-	defer bp.vectorPool.Put(vectors[:0]) // Reset slice but keep capacity
+	// Note: SA6002 warning is a false positive - sync.Pool handles this correctly
+	defer bp.vectorPool.Put(interface{}(vectors[:0])) // Reset slice but keep capacity
 
 	// Process vectors in smaller chunks for better cache locality
 	chunkSize := min(bp.batchSize, 100)

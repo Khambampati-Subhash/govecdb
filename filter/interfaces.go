@@ -6,7 +6,6 @@ package filter
 import (
 	"context"
 	"errors"
-	"sync"
 
 	"github.com/khambampati-subhash/govecdb/api"
 )
@@ -155,23 +154,6 @@ type QueryOptimizer interface {
 
 // ConcurrentFilterEngine provides thread-safe filtering operations
 type ConcurrentFilterEngine struct {
-	// Index storage
-	indexes map[string]MetadataIndex
-
-	// Synchronization
-	mu sync.RWMutex
-
-	// Query optimizer
-	optimizer QueryOptimizer
-
-	// Configuration
-	config *FilterEngineConfig
-
-	// Statistics
-	stats *FilterEngineStats
-
-	// Lifecycle
-	closed bool
 }
 
 // FilterEngineConfig holds configuration for the filter engine

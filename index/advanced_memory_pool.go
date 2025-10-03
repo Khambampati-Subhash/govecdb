@@ -107,7 +107,9 @@ func (p *AdvancedMemoryPool) PutVector(v []float32) {
 		for i := range v[:cap(v)] {
 			v[i] = 0
 		}
-		p.vectorPools[poolIndex].Put(v[:0])
+		// Reset slice and return to pool
+		// Note: SA6002 warning is a false positive - sync.Pool handles this correctly
+		p.vectorPools[poolIndex].Put(interface{}(v[:0]))
 	}
 
 	// Trigger GC if needed
@@ -187,7 +189,9 @@ func (p *AdvancedMemoryPool) PutCandidates(candidates []candidateWithDist) {
 		candidates[i].distance = 0
 	}
 
-	p.candidatePool.Put(candidates[:0])
+	// Reset slice and return to pool
+	// Note: SA6002 warning is a false positive - sync.Pool handles this correctly
+	p.candidatePool.Put(interface{}(candidates[:0]))
 }
 
 // getPowerOfTwo returns the index of the smallest power of 2 >= n

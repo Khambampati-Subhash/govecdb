@@ -30,15 +30,6 @@ type AdvancedQuantizer struct {
 // AdvancedProductQuantization extends PQ with optimizations
 type AdvancedProductQuantization struct {
 	*ProductQuantization
-
-	// Advanced features
-	residualPQ       *ProductQuantization // For multi-stage quantization
-	adaptiveClusters bool
-	learningRate     float64
-
-	// Optimization caches
-	distanceCache sync.Map
-	clusterCache  sync.Map
 }
 
 // NewAdvancedQuantizer creates a new advanced quantizer

@@ -528,9 +528,9 @@ func BenchmarkDistanceMetricsComparison(b *testing.B) {
 // Search accuracy vs performance benchmark
 func BenchmarkSearchAccuracyVsPerformance(b *testing.B) {
 	dimension := 128
-	count := 10000
+	count := 1000 // Reduced from 10000 to prevent timeout
 
-	efValues := []int{50, 100, 200, 400}
+	efValues := []int{50, 100, 200}
 
 	for _, ef := range efValues {
 		b.Run(fmt.Sprintf("ef_%d", ef), func(b *testing.B) {

@@ -19,10 +19,6 @@ type InternalBenchmarkSuite struct {
 
 	// Results storage
 	results []*BenchmarkResult
-
-	// Test data
-	testVectors  [][]float32
-	queryVectors [][]float32
 }
 
 // BenchmarkConfig configures the benchmark suite
