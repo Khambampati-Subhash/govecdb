@@ -447,18 +447,18 @@ func BenchmarkClusterPerformance(b *testing.B) {
 
 	b.Run("BatchQueries", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			operations := make([]api.BatchOperation, 10)
-			for j := range operations {
-				operations[j] = api.BatchOperation{
-					Type: api.BatchOperationSearch,
-					Search: &api.SearchRequest{
-						Vector: []float32{float32(j) * 0.1, float32(j) * 0.2, float32(j) * 0.3, float32(j) * 0.4},
-						K:      5,
-					},
-				}
+		operations := make([]api.Operation, 10)
+		for j := range operations {
+			operations[j] = api.Operation{
+				Type: api.BatchOperationSearch,
+				Search: &api.SearchRequest{
+					Vector: []float32{float32(j) * 0.1, float32(j) * 0.2, float32(j) * 0.3, float32(j) * 0.4},
+					K:      5,
+				},
 			}
+		}
 
-			req := &api.BatchRequest{Operations: operations}
+		req := &api.BatchRequest{Operations: operations}
 			_, err := qc.ExecuteBatch(ctx, req)
 			if err != nil {
 				b.Errorf("Batch query failed: %v", err)

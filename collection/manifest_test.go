@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -447,12 +448,12 @@ func BenchmarkManifestOperations(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			config := &api.CollectionConfig{
-				Name:      fmt.Sprintf("bench-collection-%d", i),
+				Name:      fmt.Sprintf("bench-collection-%d-%d", time.Now().UnixNano(), i),
 				Dimension: 384,
 				Metric:    api.Cosine,
 			}
 			err := mm.CreateCollection(ctx, config)
-			if err != nil {
+			if err != nil && !strings.Contains(err.Error(), "already exists") {
 				b.Errorf("Failed to create collection: %v", err)
 			}
 		}

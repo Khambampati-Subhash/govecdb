@@ -645,7 +645,7 @@ func TestQueryCoordinator(t *testing.T) {
 
 		// Create batch request
 		batchReq := &api.BatchRequest{
-			Operations: []api.BatchOperation{
+			Operations: []api.Operation{
 				{
 					Type: api.BatchOperationSearch,
 					Search: &api.SearchRequest{
@@ -654,8 +654,8 @@ func TestQueryCoordinator(t *testing.T) {
 					},
 				},
 				{
-					Type:     api.BatchOperationGet,
-					VectorID: "test-vector-1",
+					Type: api.BatchOperationGet,
+					ID:   "test-vector-1",
 				},
 			},
 		}

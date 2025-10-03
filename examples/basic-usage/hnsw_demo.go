@@ -223,5 +223,5 @@ func main() {
 	fmt.Printf("Index created at: %s\n", finalStats.CreatedAt.Format(time.RFC3339))
 	fmt.Printf("Last updated at: %s\n", finalStats.LastUpdateAt.Format(time.RFC3339))
 
-	fmt.Println("\n🎉 Demo completed successfully!")
+	fmt.Println("\n🎉 HNSW Index Demo completed successfully!")
 }
