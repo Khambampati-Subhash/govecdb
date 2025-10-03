@@ -174,7 +174,7 @@ func (c *EnhancedVectorCollection) Add(ctx context.Context, vector *api.Vector) 
 	}
 
 	// Add to filter indexes for metadata search
-	if vector.Metadata != nil && len(vector.Metadata) > 0 {
+	if len(vector.Metadata) > 0 {
 		if err := c.filterEngine.AddDocument(vector.ID, vector.Metadata); err != nil {
 			// Rollback previous operations
 			_ = c.vectorIndex.Remove(ctx, vector.ID)
@@ -235,7 +235,7 @@ func (c *EnhancedVectorCollection) Delete(ctx context.Context, id string) error 
 	}
 
 	// Remove from filter indexes
-	if vector.Metadata != nil && len(vector.Metadata) > 0 {
+	if len(vector.Metadata) > 0 {
 		if err := c.filterEngine.RemoveDocument(id, vector.Metadata); err != nil {
 			// Log warning but continue with deletion
 			fmt.Printf("Warning: failed to remove from filter indexes: %v\n", err)
@@ -449,7 +449,7 @@ func (c *EnhancedVectorCollection) AddBatch(ctx context.Context, vectors []*api.
 
 	// Add to filter indexes
 	for _, vector := range vectors {
-		if vector.Metadata != nil && len(vector.Metadata) > 0 {
+		if len(vector.Metadata) > 0 {
 			if err := c.filterEngine.AddDocument(vector.ID, vector.Metadata); err != nil {
 				// Log warning but continue with batch
 				fmt.Printf("Warning: failed to index metadata for vector %s: %v\n", vector.ID, err)
@@ -510,7 +510,7 @@ func (c *EnhancedVectorCollection) DeleteBatch(ctx context.Context, ids []string
 
 	// Remove from filter indexes
 	for _, vector := range vectors {
-		if vector.Metadata != nil && len(vector.Metadata) > 0 {
+		if len(vector.Metadata) > 0 {
 			if err := c.filterEngine.RemoveDocument(vector.ID, vector.Metadata); err != nil {
 				fmt.Printf("Warning: failed to remove from filter indexes: %v\n", err)
 			}

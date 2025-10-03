@@ -711,8 +711,9 @@ func newIndexAdapter(hnswIndex *index.HNSWIndex) *IndexAdapter {
 // Add implements VectorIndex.Add
 func (a *IndexAdapter) Add(ctx context.Context, vector *api.Vector) error {
 	indexVector := &index.Vector{
-		ID:   vector.ID,
-		Data: vector.Data,
+		ID:       vector.ID,
+		Data:     vector.Data,
+		Metadata: vector.Metadata,
 	}
 	return a.index.Add(indexVector)
 }
@@ -758,8 +759,9 @@ func (a *IndexAdapter) Search(ctx context.Context, req *api.SearchRequest) ([]*a
 func (a *IndexAdapter) AddBatch(ctx context.Context, vectors []*api.Vector) error {
 	for _, vector := range vectors {
 		indexVector := &index.Vector{
-			ID:   vector.ID,
-			Data: vector.Data,
+			ID:       vector.ID,
+			Data:     vector.Data,
+			Metadata: vector.Metadata,
 		}
 		if err := a.index.Add(indexVector); err != nil {
 			return err
