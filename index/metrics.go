@@ -4,20 +4,66 @@ import (
 	"math"
 )
 
-// GetDistanceFunc returns the appropriate distance function for the given metric
+// GetDistanceFunc returns the appropriate SIMD-optimized distance function for the given metric
 func GetDistanceFunc(metric DistanceMetric) DistanceFunc {
 	switch metric {
 	case Cosine:
-		return CosineDistance
+		return CosineDistanceSIMD
 	case Euclidean:
-		return EuclideanDistance
+		return EuclideanDistanceSIMD
 	case Manhattan:
-		return ManhattanDistance
+		return ManhattanDistanceSIMD
 	case DotProduct:
-		return DotProductDistance
+		return DotProductDistanceSIMD
 	default:
-		return CosineDistance
+		return CosineDistanceSIMD
 	}
+}
+
+// SIMD-optimized distance function wrappers that match DistanceFunc signature
+
+// CosineDistanceSIMD wraps the SIMD cosine distance function
+func CosineDistanceSIMD(a, b []float32) (float32, error) {
+	if len(a) != len(b) {
+		return 0, ErrDimensionMismatch
+	}
+	if len(a) == 0 {
+		return 0, ErrEmptyVector
+	}
+	return CosineSIMD(a, b), nil
+}
+
+// EuclideanDistanceSIMD wraps the SIMD Euclidean distance function
+func EuclideanDistanceSIMD(a, b []float32) (float32, error) {
+	if len(a) != len(b) {
+		return 0, ErrDimensionMismatch
+	}
+	if len(a) == 0 {
+		return 0, ErrEmptyVector
+	}
+	return EuclideanSIMD(a, b), nil
+}
+
+// ManhattanDistanceSIMD wraps the SIMD Manhattan distance function
+func ManhattanDistanceSIMD(a, b []float32) (float32, error) {
+	if len(a) != len(b) {
+		return 0, ErrDimensionMismatch
+	}
+	if len(a) == 0 {
+		return 0, ErrEmptyVector
+	}
+	return ManhattanSIMD(a, b), nil
+}
+
+// DotProductDistanceSIMD wraps the SIMD dot product distance function
+func DotProductDistanceSIMD(a, b []float32) (float32, error) {
+	if len(a) != len(b) {
+		return 0, ErrDimensionMismatch
+	}
+	if len(a) == 0 {
+		return 0, ErrEmptyVector
+	}
+	return DotProductSIMD(a, b), nil
 }
 
 // CosineDistance calculates the cosine distance between two vectors

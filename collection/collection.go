@@ -757,17 +757,22 @@ func (a *IndexAdapter) Search(ctx context.Context, req *api.SearchRequest) ([]*a
 
 // AddBatch implements VectorIndex.AddBatch
 func (a *IndexAdapter) AddBatch(ctx context.Context, vectors []*api.Vector) error {
-	for _, vector := range vectors {
-		indexVector := &index.Vector{
+	if len(vectors) == 0 {
+		return nil
+	}
+
+	// Convert to index vectors
+	indexVectors := make([]*index.Vector, len(vectors))
+	for i, vector := range vectors {
+		indexVectors[i] = &index.Vector{
 			ID:       vector.ID,
 			Data:     vector.Data,
 			Metadata: vector.Metadata,
 		}
-		if err := a.index.Add(indexVector); err != nil {
-			return err
-		}
 	}
-	return nil
+
+	// Use the HNSW index's native AddBatch if available
+	return a.index.AddBatch(indexVectors)
 }
 
 // RemoveBatch implements VectorIndex.RemoveBatch
