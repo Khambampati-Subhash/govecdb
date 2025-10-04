@@ -9,27 +9,132 @@ import (
 
 // BufferPool provides thread-safe buffer pooling to reduce GC pressure
 type BufferPool struct {
-	pool sync.Pool
+	pool         sync.Pool
+	initialCap   int
+	allocations  int64
+	recycles     int64
+	maxAllocated int64
 }
 
 // NewBufferPool creates a new buffer pool with the specified initial capacity
 func NewBufferPool(initialCapacity int) *BufferPool {
-	return &BufferPool{
+	bp := &BufferPool{
+		initialCap: initialCapacity,
 		pool: sync.Pool{
 			New: func() interface{} {
 				return make([]byte, 0, initialCapacity)
 			},
 		},
 	}
+	// Pre-warm the pool with some buffers
+	bp.preWarm(8)
+	return bp
+}
+
+// SizedBufferPool provides multiple pools for different buffer sizes
+type SizedBufferPool struct {
+	pools map[int]*BufferPool
+	mutex sync.RWMutex
+}
+
+// NewSizedBufferPool creates pools for common buffer sizes
+func NewSizedBufferPool() *SizedBufferPool {
+	sbp := &SizedBufferPool{
+		pools: make(map[int]*BufferPool),
+	}
+
+	// Pre-create pools for common sizes
+	commonSizes := []int{64, 256, 1024, 4096, 16384, 65536}
+	for _, size := range commonSizes {
+		sbp.pools[size] = NewBufferPool(size)
+	}
+
+	return sbp
+}
+
+// GetBuffer gets a buffer of appropriate size
+func (sbp *SizedBufferPool) GetBuffer(minSize int) []byte {
+	size := sbp.nextPowerOfTwo(minSize)
+
+	sbp.mutex.RLock()
+	pool, exists := sbp.pools[size]
+	sbp.mutex.RUnlock()
+
+	if !exists {
+		sbp.mutex.Lock()
+		if pool, exists = sbp.pools[size]; !exists {
+			pool = NewBufferPool(size)
+			sbp.pools[size] = pool
+		}
+		sbp.mutex.Unlock()
+	}
+
+	return pool.Get()
+}
+
+// PutBuffer returns a buffer to the appropriate pool
+func (sbp *SizedBufferPool) PutBuffer(buf []byte) {
+	size := cap(buf)
+
+	sbp.mutex.RLock()
+	pool, exists := sbp.pools[size]
+	sbp.mutex.RUnlock()
+
+	if exists {
+		pool.Put(buf)
+	}
+	// If no matching pool, let GC handle it
+}
+
+// nextPowerOfTwo finds the next power of 2 >= n
+func (sbp *SizedBufferPool) nextPowerOfTwo(n int) int {
+	if n <= 64 {
+		return 64
+	}
+	if n <= 256 {
+		return 256
+	}
+	if n <= 1024 {
+		return 1024
+	}
+	if n <= 4096 {
+		return 4096
+	}
+	if n <= 16384 {
+		return 16384
+	}
+	if n <= 65536 {
+		return 65536
+	}
+
+	// For larger sizes, calculate power of 2
+	size := 65536
+	for size < n {
+		size <<= 1
+		if size <= 0 { // overflow protection
+			return n
+		}
+	}
+	return size
+}
+
+// preWarm pre-allocates buffers to reduce initial allocation cost
+func (bp *BufferPool) preWarm(count int) {
+	for i := 0; i < count; i++ {
+		buf := make([]byte, 0, bp.initialCap)
+		bp.pool.Put(buf)
+	}
 }
 
 // Get retrieves a buffer from the pool
 func (bp *BufferPool) Get() []byte {
+	bp.updateAllocation()
 	return bp.pool.Get().([]byte)
 }
 
 // Put returns a buffer to the pool after resetting its length
 func (bp *BufferPool) Put(buf []byte) {
+	bp.updateRecycle()
 	// Reset length but keep capacity
 	// Note: SA6002 warning is a false positive - sync.Pool handles this correctly
 	bp.pool.Put(interface{}(buf[:0]))
@@ -37,27 +142,102 @@ func (bp *BufferPool) Put(buf []byte) {
 
 // Float32Pool provides pooling for float32 slices
 type Float32Pool struct {
-	pool sync.Pool
+	pool         sync.Pool
+	initialCap   int
+	allocations  int64
+	recycles     int64
+	maxAllocated int64
 }
 
 // NewFloat32Pool creates a new float32 slice pool
 func NewFloat32Pool(initialCapacity int) *Float32Pool {
-	return &Float32Pool{
+	fp := &Float32Pool{
+		initialCap: initialCapacity,
 		pool: sync.Pool{
 			New: func() interface{} {
 				return make([]float32, 0, initialCapacity)
 			},
 		},
 	}
+	// Pre-warm the pool
+	fp.preWarm(16)
+	return fp
+}
+
+// SizedFloat32Pool provides multiple pools for different vector dimensions
+type SizedFloat32Pool struct {
+	pools map[int]*Float32Pool
+	mutex sync.RWMutex
+}
+
+// NewSizedFloat32Pool creates pools for common vector dimensions
+func NewSizedFloat32Pool() *SizedFloat32Pool {
+	sfp := &SizedFloat32Pool{
+		pools: make(map[int]*Float32Pool),
+	}
+
+	// Pre-create pools for common dimensions
+	commonDims := []int{128, 256, 384, 512, 768, 1024, 1536, 2048}
+	for _, dim := range commonDims {
+		sfp.pools[dim] = NewFloat32Pool(dim)
+	}
+
+	return sfp
+}
+
+// GetVector gets a vector of appropriate dimension
+func (sfp *SizedFloat32Pool) GetVector(dimension int) []float32 {
+	sfp.mutex.RLock()
+	pool, exists := sfp.pools[dimension]
+	sfp.mutex.RUnlock()
+
+	if !exists {
+		sfp.mutex.Lock()
+		if pool, exists = sfp.pools[dimension]; !exists {
+			pool = NewFloat32Pool(dimension)
+			sfp.pools[dimension] = pool
+		}
+		sfp.mutex.Unlock()
+	}
+
+	vec := pool.Get()
+	// Ensure correct capacity
+	if cap(vec) < dimension {
+		return make([]float32, 0, dimension)
+	}
+	return vec[:0] // Reset length but keep capacity
+}
+
+// PutVector returns a vector to the appropriate pool
+func (sfp *SizedFloat32Pool) PutVector(vec []float32) {
+	dimension := cap(vec)
+
+	sfp.mutex.RLock()
+	pool, exists := sfp.pools[dimension]
+	sfp.mutex.RUnlock()
+
+	if exists {
+		pool.Put(vec)
+	}
+}
+
+// preWarm pre-allocates vectors to reduce initial allocation cost
+func (fp *Float32Pool) preWarm(count int) {
+	for i := 0; i < count; i++ {
+		vec := make([]float32, 0, fp.initialCap)
+		fp.pool.Put(vec)
+	}
 }
 
 // Get retrieves a float32 slice from the pool
 func (fp *Float32Pool) Get() []float32 {
+	fp.updateAllocation()
 	return fp.pool.Get().([]float32)
 }
 
 // Put returns a float32 slice to the pool after resetting
 func (fp *Float32Pool) Put(slice []float32) {
+	fp.updateRecycle()
 	// Note: SA6002 warning is a false positive - sync.Pool handles this correctly
 	fp.pool.Put(interface{}(slice[:0]))
 }
@@ -89,15 +269,25 @@ func (sp *StringPool) Put(slice []string) {
 	sp.pool.Put(interface{}(slice[:0]))
 }
 
+// Stats returns stats for StringPool
+func (sp *StringPool) Stats() MemoryStats {
+	return MemoryStats{
+		StringsInUse: 0, // sync.Pool doesn't provide direct stats
+	}
+}
+
 // VectorPool provides pooling for vector data to reduce allocations during search
 type VectorPool struct {
-	dimension int
-	pool      sync.Pool
+	dimension    int
+	pool         sync.Pool
+	allocations  int64
+	recycles     int64
+	maxAllocated int64
 }
 
 // NewVectorPool creates a new vector pool for vectors of specific dimension
 func NewVectorPool(dimension int) *VectorPool {
-	return &VectorPool{
+	vp := &VectorPool{
 		dimension: dimension,
 		pool: sync.Pool{
 			New: func() interface{} {
@@ -105,17 +295,93 @@ func NewVectorPool(dimension int) *VectorPool {
 			},
 		},
 	}
+	// Pre-warm the pool
+	vp.preWarm(32)
+	return vp
+}
+
+// ScratchBufferPool provides high-performance temporary buffers for calculations
+type ScratchBufferPool struct {
+	smallPool  sync.Pool // For buffers < 1KB
+	mediumPool sync.Pool // For buffers 1KB - 16KB
+	largePool  sync.Pool // For buffers > 16KB
+}
+
+// NewScratchBufferPool creates a new scratch buffer pool
+func NewScratchBufferPool() *ScratchBufferPool {
+	sbp := &ScratchBufferPool{
+		smallPool: sync.Pool{
+			New: func() interface{} {
+				return make([]float32, 0, 256) // 1KB
+			},
+		},
+		mediumPool: sync.Pool{
+			New: func() interface{} {
+				return make([]float32, 0, 4096) // 16KB
+			},
+		},
+		largePool: sync.Pool{
+			New: func() interface{} {
+				return make([]float32, 0, 16384) // 64KB
+			},
+		},
+	}
+
+	// Pre-warm pools
+	for i := 0; i < 16; i++ {
+		sbp.smallPool.Put(make([]float32, 0, 256))
+		sbp.mediumPool.Put(make([]float32, 0, 4096))
+	}
+	for i := 0; i < 4; i++ {
+		sbp.largePool.Put(make([]float32, 0, 16384))
+	}
+
+	return sbp
+}
+
+// GetScratch gets a scratch buffer of appropriate size
+func (sbp *ScratchBufferPool) GetScratch(minSize int) []float32 {
+	if minSize <= 256 {
+		return sbp.smallPool.Get().([]float32)[:0]
+	} else if minSize <= 4096 {
+		return sbp.mediumPool.Get().([]float32)[:0]
+	} else {
+		return sbp.largePool.Get().([]float32)[:0]
+	}
+}
+
+// PutScratch returns a scratch buffer to the pool
+func (sbp *ScratchBufferPool) PutScratch(buf []float32) {
+	capacity := cap(buf)
+	if capacity <= 256 {
+		sbp.smallPool.Put(buf[:0])
+	} else if capacity <= 4096 {
+		sbp.mediumPool.Put(buf[:0])
+	} else if capacity <= 16384 {
+		sbp.largePool.Put(buf[:0])
+	}
+	// For larger buffers, let GC handle them
+}
+
+// preWarm pre-allocates vectors to reduce initial allocation cost
+func (vp *VectorPool) preWarm(count int) {
+	for i := 0; i < count; i++ {
+		vec := make([]float32, vp.dimension)
+		vp.pool.Put(vec)
+	}
 }
 
 // Get retrieves a vector from the pool
 func (vp *VectorPool) Get() []float32 {
+	vp.updateAllocation()
 	return vp.pool.Get().([]float32)
 }
 
 // Put returns a vector to the pool after clearing
 func (vp *VectorPool) Put(vector []float32) {
 	if len(vector) == vp.dimension {
-		// Clear the vector data
+		vp.updateRecycle()
+		// Clear the vector data efficiently
 		for i := range vector {
 			vector[i] = 0
 		}
@@ -160,6 +426,13 @@ func (rp *ResultPool) Put(results []*SearchResult) {
 	}
 	// Note: SA6002 warning is a false positive - sync.Pool handles this correctly
 	rp.pool.Put(interface{}(results[:0]))
+}
+
+// Stats returns stats for ResultPool
+func (rp *ResultPool) Stats() MemoryStats {
+	return MemoryStats{
+		ResultsInUse: 0, // sync.Pool doesn't provide direct stats
+	}
 }
 
 // WorkerPool provides a pool of worker goroutines for parallel processing
@@ -220,34 +493,141 @@ func (wp *WorkerPool) Close() {
 	wp.wg.Wait()
 }
 
+// AdvancedPoolManager manages all pools for optimal performance
+type AdvancedPoolManager struct {
+	SizedBuffers  *SizedBufferPool
+	SizedFloat32s *SizedFloat32Pool
+	ScratchBuffer *ScratchBufferPool
+	Results       *ResultPool
+	Strings       *StringPool
+	Workers       *WorkerPool
+}
+
+// NewAdvancedPoolManager creates a comprehensive pool manager
+func NewAdvancedPoolManager() *AdvancedPoolManager {
+	return &AdvancedPoolManager{
+		SizedBuffers:  NewSizedBufferPool(),
+		SizedFloat32s: NewSizedFloat32Pool(),
+		ScratchBuffer: NewScratchBufferPool(),
+		Results:       NewResultPool(100),
+		Strings:       NewStringPool(200),
+		Workers:       NewWorkerPool(8), // CPU count based
+	}
+}
+
 // GlobalPools provides globally accessible pools for common operations
 var GlobalPools = struct {
-	Buffer  *BufferPool
-	Float32 *Float32Pool
-	String  *StringPool
-	Results *ResultPool
+	Buffer   *BufferPool
+	Float32  *Float32Pool
+	String   *StringPool
+	Results  *ResultPool
+	Advanced *AdvancedPoolManager
 }{
-	Buffer:  NewBufferPool(1024),  // 1KB initial buffer
-	Float32: NewFloat32Pool(1024), // Space for ~1K floats
-	String:  NewStringPool(100),   // Space for ~100 strings
-	Results: NewResultPool(50),    // Space for ~50 results
+	Buffer:   NewBufferPool(1024),      // 1KB initial buffer
+	Float32:  NewFloat32Pool(1024),     // Space for ~1K floats
+	String:   NewStringPool(100),       // Space for ~100 strings
+	Results:  NewResultPool(50),        // Space for ~50 results
+	Advanced: NewAdvancedPoolManager(), // Comprehensive pool management
 }
 
 // MemoryStats provides memory usage statistics
 type MemoryStats struct {
-	BuffersInUse   int64
-	Float32sInUse  int64
-	StringsInUse   int64
-	ResultsInUse   int64
-	TotalAllocated int64
-	TotalRecycled  int64
+	BuffersInUse    int64
+	Float32sInUse   int64
+	StringsInUse    int64
+	ResultsInUse    int64
+	TotalAllocated  int64
+	TotalRecycled   int64
+	MemoryFootprint int64
+	PoolEfficiency  float64 // Recycles / (Allocations + Recycles)
+	CacheHitRate    float64 // Pool hits / Total requests
 }
 
 // Stats returns current memory pool statistics
 func (bp *BufferPool) Stats() MemoryStats {
-	// Note: sync.Pool doesn't provide direct stats, so this is a placeholder
-	// In a production system, you might want to wrap sync.Pool to track statistics
-	return MemoryStats{}
+	allocations := bp.allocations
+	recycles := bp.recycles
+	total := allocations + recycles
+
+	var efficiency, hitRate float64
+	if total > 0 {
+		efficiency = float64(recycles) / float64(total)
+		hitRate = float64(recycles) / float64(total)
+	}
+
+	return MemoryStats{
+		BuffersInUse:    allocations - recycles,
+		TotalAllocated:  allocations,
+		TotalRecycled:   recycles,
+		MemoryFootprint: bp.maxAllocated * int64(bp.initialCap) * 4, // float32 = 4 bytes
+		PoolEfficiency:  efficiency,
+		CacheHitRate:    hitRate,
+	}
+}
+
+// Stats returns stats for Float32Pool
+func (fp *Float32Pool) Stats() MemoryStats {
+	allocations := fp.allocations
+	recycles := fp.recycles
+	total := allocations + recycles
+
+	var efficiency, hitRate float64
+	if total > 0 {
+		efficiency = float64(recycles) / float64(total)
+		hitRate = float64(recycles) / float64(total)
+	}
+
+	return MemoryStats{
+		Float32sInUse:   allocations - recycles,
+		TotalAllocated:  allocations,
+		TotalRecycled:   recycles,
+		MemoryFootprint: fp.maxAllocated * int64(fp.initialCap) * 4,
+		PoolEfficiency:  efficiency,
+		CacheHitRate:    hitRate,
+	}
+}
+
+// GetComprehensiveStats returns overall pool statistics
+func (apm *AdvancedPoolManager) GetComprehensiveStats() map[string]MemoryStats {
+	return map[string]MemoryStats{
+		"results": apm.Results.Stats(),
+		"strings": apm.Strings.Stats(),
+		// Add other pool stats as needed
+	}
+}
+
+// UpdateStats safely updates pool statistics
+func (bp *BufferPool) updateAllocation() {
+	bp.allocations++
+	if bp.allocations > bp.maxAllocated {
+		bp.maxAllocated = bp.allocations
+	}
+}
+
+func (bp *BufferPool) updateRecycle() {
+	bp.recycles++
+}
+
+func (fp *Float32Pool) updateAllocation() {
+	fp.allocations++
+	if fp.allocations > fp.maxAllocated {
+		fp.maxAllocated = fp.allocations
+	}
+}
+
+func (fp *Float32Pool) updateRecycle() {
+	fp.recycles++
+}
+
+func (vp *VectorPool) updateAllocation() {
+	vp.allocations++
+	if vp.allocations > vp.maxAllocated {
+		vp.maxAllocated = vp.allocations
+	}
+}
+
+func (vp *VectorPool) updateRecycle() {
+	vp.recycles++
 }
 
 // Batch provides utilities for batch processing

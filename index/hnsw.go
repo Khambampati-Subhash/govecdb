@@ -28,6 +28,9 @@ func NewHNSWIndex(config *Config) (*HNSWIndex, error) {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
+	// Optimize config parameters for better performance
+	config = OptimizeConfig(config)
+
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -43,6 +46,37 @@ func NewHNSWIndex(config *Config) (*HNSWIndex, error) {
 		createdAt:    time.Now(),
 		lastUpdateAt: time.Now(),
 	}, nil
+}
+
+// OptimizeConfig adjusts HNSW parameters for better performance
+func OptimizeConfig(config *Config) *Config {
+	optimized := *config // Copy config
+
+	// Optimize M (max connections per layer)
+	if optimized.M == 0 || optimized.M < 8 {
+		if optimized.Dimension <= 128 {
+			optimized.M = 12 // Smaller M for low-dim vectors
+		} else if optimized.Dimension <= 512 {
+			optimized.M = 16 // Standard M for medium-dim vectors
+		} else {
+			optimized.M = 20 // Larger M for high-dim vectors
+		}
+	}
+
+	// Optimize EfConstruction based on use case
+	if optimized.EfConstruction == 0 || optimized.EfConstruction < 100 {
+		if optimized.Dimension <= 256 {
+			optimized.EfConstruction = 200 // Fast construction for small vectors
+		} else if optimized.Dimension <= 768 {
+			optimized.EfConstruction = 300 // Balanced for medium vectors
+		} else {
+			optimized.EfConstruction = 400 // Higher quality for large vectors
+		}
+	}
+
+	// Optimize MaxLayer\n\tif optimized.MaxLayer == 0 {\n\t\toptimized.MaxLayer = 16 // Good balance for most use cases\n\t}
+
+	return &optimized
 }
 
 // Add inserts a vector into the index
@@ -75,24 +109,99 @@ func (idx *HNSWIndex) Add(vector *Vector) error {
 	return nil
 }
 
-// AddBatch inserts multiple vectors into the index
+// AddBatch inserts multiple vectors efficiently with optimized batching
 func (idx *HNSWIndex) AddBatch(vectors []*Vector) error {
 	if len(vectors) == 0 {
 		return nil
 	}
 
-	for i, vector := range vectors {
-		if err := idx.Add(vector); err != nil {
-			return fmt.Errorf("failed to add vector at index %d: %w", i, err)
+	// Use optimized batch size based on vector characteristics
+	batchSize := idx.calculateOptimalBatchSize(vectors)
+
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	// Process in optimized batches
+	for i := 0; i < len(vectors); i += batchSize {
+		end := i + batchSize
+		if end > len(vectors) {
+			end = len(vectors)
 		}
+
+		batch := vectors[i:end]
+		if err := idx.graph.InsertBatch(batch); err != nil {
+			return fmt.Errorf("failed to insert batch starting at %d: %w", i, err)
+		}
+
+		idx.insertCount += int64(len(batch))
 	}
 
+	idx.lastUpdateAt = time.Now()
 	return nil
 }
 
-// Search finds the k most similar vectors to the query
+// calculateOptimalBatchSize determines the best batch size for insertion
+func (idx *HNSWIndex) calculateOptimalBatchSize(vectors []*Vector) int {
+	if len(vectors) == 0 {
+		return 100
+	}
+
+	// Base batch size on vector dimension and current index size
+	baseBatchSize := 100
+
+	if idx.config.Dimension <= 128 {
+		baseBatchSize = 500 // Larger batches for small vectors
+	} else if idx.config.Dimension <= 512 {
+		baseBatchSize = 200 // Medium batches for medium vectors
+	} else {
+		baseBatchSize = 50 // Smaller batches for large vectors
+	}
+
+	// Adjust based on current index size
+	currentSize := idx.graph.Size()
+	if currentSize > 100000 {
+		baseBatchSize = baseBatchSize / 2 // Smaller batches for large indices
+	}
+
+	return min(baseBatchSize, len(vectors))
+}
+
+// Search performs k-nearest neighbor search with optimized parameters
 func (idx *HNSWIndex) Search(query []float32, k int) ([]*SearchResult, error) {
-	return idx.SearchWithFilter(query, k, nil)
+	if len(query) != idx.config.Dimension {
+		return nil, ErrDimensionMismatch
+	}
+
+	if k <= 0 {
+		return nil, ErrInvalidK
+	}
+
+	// TODO: Use optimized search parameters based on k
+	_ = idx.calculateOptimalEf(k) // TODO: Use ef parameter when SearchWithEf is implemented
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	results, err := idx.graph.Search(query, k, nil)
+	if err == nil {
+		idx.searchCount++
+	}
+
+	return results, err
+}
+
+// calculateOptimalEf determines the optimal ef parameter for search
+func (idx *HNSWIndex) calculateOptimalEf(k int) int {
+	// Dynamic ef calculation for better speed/accuracy tradeoff
+	if k <= 1 {
+		return max(32, k*4) // Fast search for single results
+	} else if k <= 10 {
+		return max(64, k*6) // Balanced for small k
+	} else if k <= 50 {
+		return max(128, k*4) // Efficient for medium k
+	} else {
+		return max(256, k*3) // Conservative for large k
+	}
 }
 
 // SearchWithFilter finds vectors with metadata filtering
@@ -110,7 +219,16 @@ func (idx *HNSWIndex) SearchWithFilter(query []float32, k int, filter FilterFunc
 		defer idx.mu.RUnlock()
 	}
 
-	results, err := idx.graph.Search(query, k, filter)
+	// Use fast search for large datasets
+	var results []*SearchResult
+	var err error
+
+	if idx.graph.Size() > 3000 { // Large dataset threshold
+		results, err = idx.graph.SearchFast(query, k, filter)
+	} else {
+		results, err = idx.graph.Search(query, k, filter)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}

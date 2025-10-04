@@ -199,6 +199,17 @@ func (sm *SafeMap) Size() int {
 	return len(sm.data)
 }
 
+// GetUnsafe retrieves a value without locking (caller must hold lock)
+func (sm *SafeMap) GetUnsafe(key string) (*Vector, bool) {
+	val, ok := sm.data[key]
+	return val, ok
+}
+
+// SetUnsafe stores a value without locking (caller must hold lock)
+func (sm *SafeMap) SetUnsafe(key string, value *Vector) {
+	sm.data[key] = value
+}
+
 // Keys returns all keys in the map
 func (sm *SafeMap) Keys() []string {
 	sm.mu.RLock()
