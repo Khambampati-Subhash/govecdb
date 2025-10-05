@@ -50,14 +50,14 @@ func main() {
 	fmt.Printf("⏰ Started: %s\n", startTime.Format("2006-01-02 15:04:05"))
 	fmt.Println()
 
-	// Quick test with smaller dimensions and vector counts
+	// Quick test with larger dimensions and vector counts for better performance testing
 	testConfigs := []struct {
 		dimension int
 		vectors   int
 	}{
-		{128, 1000},
-		{256, 2000},
-		{512, 1000},
+		{128, 5000},
+		{256, 10000},
+		{512, 5000},
 	}
 
 	results := []BenchmarkResult1{}
@@ -134,8 +134,9 @@ func runQuickBenchmark(dim, numVectors int) []BenchmarkResult1 {
 	// Test Search
 	fmt.Print("  🔍 Search test... ")
 	searchTimes := []time.Duration{}
-	for i := 0; i < 10; i++ {
-		query := vectors[i].Data
+	numSearches := 100 // More searches for better timing
+	for i := 0; i < numSearches; i++ {
+		query := vectors[i%len(vectors)].Data // Use different queries
 		start := time.Now()
 		_, err := coll.Search(ctx, &api.SearchRequest{
 			Vector: query,
@@ -154,14 +155,15 @@ func runQuickBenchmark(dim, numVectors int) []BenchmarkResult1 {
 			totalSearch += t
 		}
 		avgSearch := totalSearch / time.Duration(len(searchTimes))
-		fmt.Printf("✅ (%.2fms avg)\n", float64(avgSearch.Microseconds())/1000.0)
+		searchThroughput := float64(len(searchTimes)) / totalSearch.Seconds()
+		fmt.Printf("✅ (%.2fms avg, %.0f QPS)\n", float64(avgSearch.Microseconds())/1000.0, searchThroughput)
 
 		results = append(results, BenchmarkResult1{
 			Dimension:  dim,
 			NumVectors: len(searchTimes),
 			Operation:  "search",
 			AvgTime:    avgSearch,
-			Throughput: float64(len(searchTimes)) / totalSearch.Seconds(),
+			Throughput: searchThroughput,
 		})
 	}
 
