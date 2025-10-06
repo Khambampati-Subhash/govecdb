@@ -493,7 +493,7 @@ def main():
     print()
 
     # Test configuration
-    dimensions = [2, 8, 16, 32, 64, 128, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6120]
+    dimensions = [512, 768, 1024]
     vector_counts = [1000, 2000, 3000, 4000, 5000]
     search_k = 10
     num_searches = 100

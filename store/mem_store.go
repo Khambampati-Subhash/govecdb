@@ -354,7 +354,8 @@ func (m *MemoryStore) PutBatch(ctx context.Context, vectors []*api.Vector) error
 	}
 
 	// Validate all vectors first
-	for i, vector := range vectors {
+	seen := make(map[string]struct{}, len(vectors))
+	for _, vector := range vectors {
 		if vector == nil {
 			return api.ErrEmptyVector
 		}
@@ -362,12 +363,11 @@ func (m *MemoryStore) PutBatch(ctx context.Context, vectors []*api.Vector) error
 			return err
 		}
 
-		// Check for duplicates within the batch
-		for j := i + 1; j < len(vectors); j++ {
-			if vectors[j] != nil && vector.ID == vectors[j].ID {
-				return api.ErrCollectionExists // Reusing error for duplicate IDs
-			}
+		// Check for duplicates within the batch using a hash set for O(n) detection
+		if _, exists := seen[vector.ID]; exists {
+			return api.ErrCollectionExists // Reusing error for duplicate IDs
 		}
+		seen[vector.ID] = struct{}{}
 	}
 
 	m.mu.Lock()
