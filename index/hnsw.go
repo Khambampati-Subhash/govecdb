@@ -176,13 +176,13 @@ func (idx *HNSWIndex) Search(query []float32, k int) ([]*SearchResult, error) {
 		return nil, ErrInvalidK
 	}
 
-	// TODO: Use optimized search parameters based on k
-	_ = idx.calculateOptimalEf(k) // TODO: Use ef parameter when SearchWithEf is implemented
+	// Use optimized search parameters based on k
+	ef := idx.calculateOptimalEf(k)
 
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	results, err := idx.graph.Search(query, k, nil)
+	results, err := idx.graph.SearchWithEf(query, k, ef, nil)
 	if err == nil {
 		idx.searchCount++
 	}

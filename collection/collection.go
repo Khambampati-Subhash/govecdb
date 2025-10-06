@@ -10,6 +10,7 @@ import (
 	"github.com/khambampati-subhash/govecdb/api"
 	"github.com/khambampati-subhash/govecdb/index"
 	"github.com/khambampati-subhash/govecdb/store"
+	"github.com/khambampati-subhash/govecdb/utils"
 )
 
 // VectorCollection implements the Collection interface by combining
@@ -80,7 +81,7 @@ func NewVectorCollection(config *api.CollectionConfig, storeConfig *store.StoreC
 	// Create the collection
 	collection := &VectorCollection{
 		store:  memStore,
-		index:  newIndexAdapter(hnswIndex),
+		index:  newIndexAdapter(hnswIndex, config.Metric == api.Cosine),
 		config: config,
 		metadata: &CollectionMetadata{
 			CreatedAt:       time.Now(),
@@ -241,8 +242,37 @@ func (c *VectorCollection) Search(ctx context.Context, req *api.SearchRequest) (
 	// Apply distance and score filters
 	results = c.applyDistanceFilters(results, req.MaxDistance, req.MinScore)
 
-	// If we don't need the full data, remove it to save bandwidth
-	if !req.IncludeData {
+	if req.IncludeData {
+		idMap := make(map[string]*api.Vector, len(results))
+		ids := make([]string, 0, len(results))
+		for _, result := range results {
+			if result.Vector != nil {
+				ids = append(ids, result.Vector.ID)
+			}
+		}
+
+		if len(ids) > 0 {
+			storedVectors, err := c.store.GetBatch(ctx, ids)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load vectors from store: %w", err)
+			}
+			for _, v := range storedVectors {
+				if v != nil {
+					idMap[v.ID] = v
+				}
+			}
+
+			for _, result := range results {
+				if result.Vector == nil {
+					continue
+				}
+				if stored, ok := idMap[result.Vector.ID]; ok {
+					result.Vector.Data = stored.Data
+					result.Vector.Metadata = stored.Metadata
+				}
+			}
+		}
+	} else {
 		for _, result := range results {
 			if result.Vector != nil {
 				result.Vector.Data = nil
@@ -537,7 +567,7 @@ func (c *VectorCollection) Clear(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to recreate HNSW index: %w", err)
 	}
-	c.index = newIndexAdapter(hnswIndex)
+	c.index = newIndexAdapter(hnswIndex, c.config.Metric == api.Cosine)
 
 	c.metadata.UpdatedAt = time.Now()
 	c.metadata.OperationCount = 0
@@ -700,22 +730,21 @@ func convertDistanceMetric(metric api.DistanceMetric) index.DistanceMetric {
 
 // IndexAdapter adapts the HNSW index to implement the VectorIndex interface
 type IndexAdapter struct {
-	index *index.HNSWIndex
+	index     *index.HNSWIndex
+	normalize bool
 }
 
 // newIndexAdapter creates a new index adapter
-func newIndexAdapter(hnswIndex *index.HNSWIndex) *IndexAdapter {
-	return &IndexAdapter{index: hnswIndex}
+func newIndexAdapter(idx *index.HNSWIndex, normalize bool) *IndexAdapter {
+	return &IndexAdapter{
+		index:     idx,
+		normalize: normalize,
+	}
 }
 
 // Add implements VectorIndex.Add
 func (a *IndexAdapter) Add(ctx context.Context, vector *api.Vector) error {
-	indexVector := &index.Vector{
-		ID:       vector.ID,
-		Data:     vector.Data,
-		Metadata: vector.Metadata,
-	}
-	return a.index.Add(indexVector)
+	return a.index.Add(a.prepareIndexVector(vector))
 }
 
 // Remove implements VectorIndex.Remove
@@ -725,7 +754,12 @@ func (a *IndexAdapter) Remove(ctx context.Context, id string) error {
 
 // Search implements VectorIndex.Search
 func (a *IndexAdapter) Search(ctx context.Context, req *api.SearchRequest) ([]*api.SearchResult, error) {
-	results, err := a.index.Search(req.Vector, req.K)
+	query := req.Vector
+	if a.normalize {
+		query = utils.CloneAndNormalizeVector(req.Vector)
+	}
+
+	results, err := a.index.Search(query, req.K)
 	if err != nil {
 		return nil, err
 	}
@@ -764,11 +798,7 @@ func (a *IndexAdapter) AddBatch(ctx context.Context, vectors []*api.Vector) erro
 	// Convert to index vectors
 	indexVectors := make([]*index.Vector, len(vectors))
 	for i, vector := range vectors {
-		indexVectors[i] = &index.Vector{
-			ID:       vector.ID,
-			Data:     vector.Data,
-			Metadata: vector.Metadata,
-		}
+		indexVectors[i] = a.prepareIndexVector(vector)
 	}
 
 	// Use the HNSW index's native AddBatch if available
@@ -814,4 +844,19 @@ func (a *IndexAdapter) Optimize(ctx context.Context) error {
 func (a *IndexAdapter) Close() error {
 	// HNSW index doesn't need explicit closing
 	return nil
+}
+
+func (a *IndexAdapter) prepareIndexVector(vector *api.Vector) *index.Vector {
+	data := make([]float32, len(vector.Data))
+	copy(data, vector.Data)
+
+	if a.normalize {
+		utils.NormalizeVectorInPlace(data)
+	}
+
+	return &index.Vector{
+		ID:       vector.ID,
+		Data:     data,
+		Metadata: vector.Metadata,
+	}
 }

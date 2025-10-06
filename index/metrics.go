@@ -6,8 +6,16 @@ import (
 
 // GetDistanceFunc returns the appropriate SIMD-optimized distance function for the given metric
 func GetDistanceFunc(metric DistanceMetric) DistanceFunc {
+	return GetDistanceFuncWithOptions(metric, false)
+}
+
+// GetDistanceFuncWithOptions returns a distance function with additional tuning options.
+func GetDistanceFuncWithOptions(metric DistanceMetric, normalized bool) DistanceFunc {
 	switch metric {
 	case Cosine:
+		if normalized {
+			return CosineDistanceNormalized
+		}
 		return CosineDistanceSIMD
 	case Euclidean:
 		return EuclideanDistanceSIMD
@@ -176,6 +184,44 @@ func DotProductDistance(a, b []float32) (float32, error) {
 	}
 
 	return float32(-dotProduct), nil
+}
+
+// CosineDistanceNormalized computes cosine distance for pre-normalized vectors.
+func CosineDistanceNormalized(a, b []float32) (float32, error) {
+	if len(a) != len(b) {
+		return 0, ErrDimensionMismatch
+	}
+	if len(a) == 0 {
+		return 0, ErrEmptyVector
+	}
+
+	var dot float32
+	i := 0
+
+	for i < len(a)-7 {
+		dot += a[i]*b[i] +
+			a[i+1]*b[i+1] +
+			a[i+2]*b[i+2] +
+			a[i+3]*b[i+3] +
+			a[i+4]*b[i+4] +
+			a[i+5]*b[i+5] +
+			a[i+6]*b[i+6] +
+			a[i+7]*b[i+7]
+		i += 8
+	}
+
+	for i < len(a) {
+		dot += a[i] * b[i]
+		i++
+	}
+
+	if dot > 1 {
+		dot = 1
+	} else if dot < -1 {
+		dot = -1
+	}
+
+	return 1 - dot, nil
 }
 
 // Normalize normalizes a vector to unit length (in-place)
