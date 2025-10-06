@@ -3,6 +3,7 @@ package index
 import (
 	"container/heap"
 	"math/rand"
+	"sort"
 	"sync"
 )
 
@@ -47,7 +48,7 @@ func NewHNSWGraph(config *Config) (*HNSWGraph, error) {
 
 	graph := &HNSWGraph{
 		config:       config,
-		distanceFunc: GetDistanceFunc(config.Metric),
+		distanceFunc: GetDistanceFuncWithOptions(config.Metric, config.Metric == Cosine),
 		nodes:        NewSafeMap(),
 		rng:          rand.New(rand.NewSource(config.Seed)),
 		stats:        &GraphStats{},
@@ -350,11 +351,17 @@ func (g *HNSWGraph) searchLayer(query []float32, entryPoints []*HNSWNode, numClo
 		exploredCount++
 
 		// Explore neighbors with limited scope for better scaling
-		connections := current.Node.GetConnections(layer)
-		maxNeighborsToCheck := g.getOptimalNeighborLimit(len(connections)) // Dynamic neighbor limit
+		current.Node.mu.RLock()
+		if layer >= len(current.Node.connections) || len(current.Node.connections[layer]) == 0 {
+			current.Node.mu.RUnlock()
+			continue
+		}
+
+		layerConnections := current.Node.connections[layer]
+		maxNeighborsToCheck := g.getOptimalNeighborLimit(len(layerConnections)) // Dynamic neighbor limit
 
 		checkedCount := 0
-		for _, neighbor := range connections {
+		for _, neighbor := range layerConnections {
 			if checkedCount >= maxNeighborsToCheck {
 				break // Limit exploration scope
 			}
@@ -398,6 +405,7 @@ func (g *HNSWGraph) searchLayer(query []float32, entryPoints []*HNSWNode, numClo
 				}
 			}
 		}
+		current.Node.mu.RUnlock()
 	}
 
 	// Convert heap to slice
@@ -467,14 +475,9 @@ func (g *HNSWGraph) selectNeighbors(query []float32, candidates []*HNSWNode, m i
 		candidateList = append(candidateList, candidate{node: node, distance: distance})
 	}
 
-	// Sort by distance (ascending)
-	for i := 0; i < len(candidateList)-1; i++ {
-		for j := i + 1; j < len(candidateList); j++ {
-			if candidateList[i].distance > candidateList[j].distance {
-				candidateList[i], candidateList[j] = candidateList[j], candidateList[i]
-			}
-		}
-	}
+	sort.Slice(candidateList, func(i, j int) bool {
+		return candidateList[i].distance < candidateList[j].distance
+	})
 
 	// Select top m candidates
 	result := make([]*HNSWNode, 0, m)
@@ -571,14 +574,9 @@ func (g *HNSWGraph) pruneConnections(node *HNSWNode, layer int) {
 		connList = append(connList, connWithDist{node: conn, distance: distance})
 	}
 
-	// Sort by distance (ascending - keep closest)
-	for i := 0; i < len(connList)-1; i++ {
-		for j := i + 1; j < len(connList); j++ {
-			if connList[i].distance > connList[j].distance {
-				connList[i], connList[j] = connList[j], connList[i]
-			}
-		}
-	}
+	sort.Slice(connList, func(i, j int) bool {
+		return connList[i].distance < connList[j].distance
+	})
 
 	// Remove excess connections (furthest ones)
 	for i := maxConnections; i < len(connList); i++ {
@@ -692,13 +690,9 @@ func (g *HNSWGraph) SearchFast(query []float32, k int, filter FilterFunc) ([]*Se
 	}
 
 	// Sort by distance
-	for i := 0; i < len(results)-1; i++ {
-		for j := i + 1; j < len(results); j++ {
-			if results[i].Score > results[j].Score {
-				results[i], results[j] = results[j], results[i]
-			}
-		}
-	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score < results[j].Score
+	})
 
 	if len(results) > k {
 		results = results[:k]
@@ -771,25 +765,17 @@ func (g *HNSWGraph) searchLayerFast(query []float32, entryPoints []*HNSWNode, nu
 		// Keep only best candidates to prevent memory growth
 		if len(candidates) > numClosest*3 {
 			// Sort and keep top candidates
-			for i := 0; i < len(candidates)-1; i++ {
-				for j := i + 1; j < len(candidates); j++ {
-					if candidates[i].Distance > candidates[j].Distance {
-						candidates[i], candidates[j] = candidates[j], candidates[i]
-					}
-				}
-			}
+			sort.Slice(candidates, func(i, j int) bool {
+				return candidates[i].Distance < candidates[j].Distance
+			})
 			candidates = candidates[:numClosest*2]
 		}
 	}
 
 	// Sort final candidates and return top ones
-	for i := 0; i < len(candidates)-1; i++ {
-		for j := i + 1; j < len(candidates); j++ {
-			if candidates[i].Distance > candidates[j].Distance {
-				candidates[i], candidates[j] = candidates[j], candidates[i]
-			}
-		}
-	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Distance < candidates[j].Distance
+	})
 
 	limit := minInt(len(candidates), numClosest)
 	result := make([]*HNSWNode, limit)
