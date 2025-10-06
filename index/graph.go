@@ -587,15 +587,8 @@ func (g *HNSWGraph) pruneConnections(node *HNSWNode, layer int) {
 	}
 }
 
-// Search performs k-NN search in the graph using proper HNSW algorithm
+// Search performs k-NN search in the graph
 func (g *HNSWGraph) Search(query []float32, k int, filter FilterFunc) ([]*SearchResult, error) {
-	// Use default ef based on k
-	ef := max(k, g.config.EfConstruction)
-	return g.SearchWithEf(query, k, ef, filter)
-}
-
-// SearchWithEf performs k-NN search with specified ef parameter
-func (g *HNSWGraph) SearchWithEf(query []float32, k int, ef int, filter FilterFunc) ([]*SearchResult, error) {
 	if len(query) != g.config.Dimension {
 		return nil, ErrDimensionMismatch
 	}
@@ -607,48 +600,43 @@ func (g *HNSWGraph) SearchWithEf(query []float32, k int, ef int, filter FilterFu
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	// If no entry point, return empty results
-	if g.entryPoint == nil {
-		return []*SearchResult{}, nil
-	}
+	// For now, use brute force search since HNSW structure is incomplete
+	// TODO: Implement proper HNSW search when structure is fixed
+	results := make([]*SearchResult, 0)
 
-	// Start search from the top layer
-	currentLayer := g.entryPoint.Level
-	entryPoints := []*HNSWNode{g.entryPoint}
-
-	// Search from top layer down to layer 1
-	for currentLayer > 0 {
-		entryPoints = g.searchLayer(query, entryPoints, 1, currentLayer)
-		currentLayer--
-	}
-
-	// Search at base layer (layer 0) with specified ef
-	candidates := g.searchLayer(query, entryPoints, ef, 0)
-
-	// Convert candidates to results, applying filter if provided
-	results := make([]*SearchResult, 0, min(k, len(candidates)))
-	for _, node := range candidates {
-		if len(results) >= k {
-			break
+	// Iterate through all vectors in the SafeMap
+	g.nodes.ForEach(func(id string, vector *Vector) {
+		// Apply filter if provided
+		if filter != nil && !filter(vector.Metadata) {
+			return
 		}
 
-		if filter != nil && !filter(node.Vector.Metadata) {
-			continue
-		}
-
-		distance, err := g.distanceFunc(query, node.Vector.Data)
+		distance, err := g.distanceFunc(query, vector.Data)
 		if err != nil {
-			continue
+			return
 		}
 
 		result := &SearchResult{
-			ID:       node.Vector.ID,
-			Vector:   node.Vector.Data,
+			ID:       vector.ID,
+			Vector:   vector.Data,
 			Score:    distance,
-			Metadata: node.Vector.Metadata,
+			Metadata: vector.Metadata,
 		}
 
 		results = append(results, result)
+	})
+
+	// Sort by distance and limit to k
+	for i := 0; i < len(results)-1; i++ {
+		for j := i + 1; j < len(results); j++ {
+			if results[i].Score > results[j].Score {
+				results[i], results[j] = results[j], results[i]
+			}
+		}
+	}
+
+	if len(results) > k {
+		results = results[:k]
 	}
 
 	return results, nil
