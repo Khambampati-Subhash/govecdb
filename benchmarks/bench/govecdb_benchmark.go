@@ -95,8 +95,8 @@ func main() {
 	// Start with a smaller test first, then uncomment the full config
 	// 2, 16, 32, 64, 128, 256, 384,
 	config := TestConfig{
-		Dimensions:   []int{512, 768, 1024, 1536, 2048, 3072, 4096, 6120}, // Small test first
-		VectorCounts: []int{1000, 2000, 3000, 4000, 5000},                 // Small test first
+		Dimensions:   []int{1024, 1536, 2048, 3072, 4096, 6120}, // Small test first
+		VectorCounts: []int{1000, 2000, 3000, 4000, 5000},       // Small test first
 		SearchK:      10,
 		NumSearches:  100, // Reduced for faster testing
 	}
@@ -218,6 +218,14 @@ func runBenchmark(dim, numVectors, searchK, numSearches int) []BenchmarkResult {
 		fmt.Printf("❌ (failed)\n")
 	}
 
+	// Benchmark: Exact Search (MUST run before Single Insert to avoid ID collisions)
+	fmt.Print("    🔍 Exact search (k=1)... ")
+	exactSearchResult := benchmarkExactSearch(ctx, coll, vectors, 1, numSearches)
+	results = append(results, exactSearchResult)
+	fmt.Printf("✅ (%.3fms avg, recall: %.2f%%)\n",
+		float64(exactSearchResult.AvgTime.Microseconds())/1000.0,
+		exactSearchResult.Recall*100)
+
 	// Benchmark: Single Insert (subset)
 	if numVectors <= 10000 {
 		fmt.Print("    ⏱️  Single insert... ")
@@ -226,14 +234,6 @@ func runBenchmark(dim, numVectors, searchK, numSearches int) []BenchmarkResult {
 		fmt.Printf("✅ (%.3fms avg)\n",
 			float64(singleInsertResult.AvgTime.Microseconds())/1000.0)
 	}
-
-	// Benchmark: Exact Search
-	fmt.Print("    🔍 Exact search (k=1)... ")
-	exactSearchResult := benchmarkExactSearch(ctx, coll, vectors, 1, numSearches)
-	results = append(results, exactSearchResult)
-	fmt.Printf("✅ (%.3fms avg, recall: %.2f%%)\n",
-		float64(exactSearchResult.AvgTime.Microseconds())/1000.0,
-		exactSearchResult.Recall*100)
 
 	// Benchmark: KNN Search (this is what our Search method does)
 	fmt.Print("    🔍 KNN search (k=10)... ")

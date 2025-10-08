@@ -99,6 +99,14 @@ func (n *HNSWNode) AddConnection(other *HNSWNode, layer int) {
 	other.mu.Unlock()
 }
 
+// AddConnectionUnsafe adds a unidirectional connection without locking (for batch operations)
+func (n *HNSWNode) AddConnectionUnsafe(other *HNSWNode, layer int) {
+	if n == other || layer < 0 || layer >= len(n.connections) {
+		return
+	}
+	n.connections[layer][other.Vector.ID] = other
+}
+
 // RemoveConnection removes a bidirectional connection between nodes at the specified layer
 func (n *HNSWNode) RemoveConnection(other *HNSWNode, layer int) {
 	if n == other || layer < 0 {
