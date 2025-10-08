@@ -146,35 +146,26 @@ func (g *HNSWGraph) Insert(vector *Vector) error {
 	return nil
 }
 
-// InsertBatch inserts multiple vectors with a single lock acquisition for better performance
+// InsertBatch adds multiple vectors in batch
 func (g *HNSWGraph) InsertBatch(vectors []*Vector) error {
 	if len(vectors) == 0 {
 		return nil
 	}
 
-	// Validate all vectors first
-	for _, vector := range vectors {
-		if len(vector.Data) != g.config.Dimension {
-			return ErrDimensionMismatch
-		}
-	}
-
-	// Acquire lock ONCE for entire batch
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	// Use flat batch inserter for maximum throughput (3000+ vec/sec)
-	// This matches ChromaDB's approach: defer HNSW construction, use flat index initially
-	inserter := NewFlatBatchInserter(g)
-	return inserter.InsertBatch(vectors)
+	// For production RAG systems, we need 100% accuracy
+	// Use proper HNSW construction with parallel optimization
+	return g.insertBatchOptimized(vectors)
 }
 
 // insertBatchOptimized uses a simplified strategy for large batches
 func (g *HNSWGraph) insertBatchOptimized(vectors []*Vector) error {
-	// Reduce EfConstruction for batch operations to speed up insertion
-	originalEf := g.config.EfConstruction
-	g.config.EfConstruction = minInt(g.config.EfConstruction/2, 50) // Reduce search effort
-	defer func() { g.config.EfConstruction = originalEf }()
+	// Production-grade batch insertion for RAG systems
+	// Goal: 100% accuracy with maximum speed
+	// Strategy: Use proper HNSW algorithm with lock optimization only
+
+	// Acquire write lock once for entire batch (this is the main optimization)
+	g.mu.Lock()
+	defer g.mu.Unlock()
 
 	for _, vector := range vectors {
 		// Check if node already exists
@@ -194,29 +185,38 @@ func (g *HNSWGraph) insertBatchOptimized(vectors []*Vector) error {
 			continue
 		}
 
-		// Simplified insertion: only search base layer for batch operations
-		// This trades some accuracy for significant speed improvement
+		// FULL HNSW insertion for production quality
 		entryPoints := []*HNSWNode{g.entryPoint}
 
-		// Only search to find entry points at target level (skip layer-by-layer descent)
-		if level < g.entryPoint.Level {
-			entryPoints = g.searchLayer(vector.Data, entryPoints, 1, level)
+		// Layer-by-layer search from top to target level
+		for lc := g.entryPoint.Level; lc > level; lc-- {
+			entryPoints = g.searchLayer(vector.Data, entryPoints, 1, lc)
 		}
 
-		// Connect only at base layer (layer 0) for batch operations
-		candidates := g.searchLayer(vector.Data, entryPoints, g.config.EfConstruction, 0)
+		// Connect at ALL layers from level down to 0 (proper HNSW)
+		for lc := level; lc >= 0; lc-- {
+			candidates := g.searchLayer(vector.Data, entryPoints, g.config.EfConstruction, lc)
 
-		// Use reduced M for faster connection establishment
-		m := minInt(g.config.M/2, 8) // Fewer connections for batch operations
-		selectedNeighbors := g.selectNeighborsFast(vector.Data, candidates, m)
+			// Use proper M value for production quality
+			m := g.config.M
+			if lc > 0 {
+				m = g.config.M // Same M for all layers
+			}
 
-		// Add bidirectional connections only at base layer
-		for _, neighbor := range selectedNeighbors {
-			newNode.AddConnection(neighbor, 0)
-			g.stats.EdgeCount++
+			selectedNeighbors := g.selectNeighbors(vector.Data, candidates, m)
 
-			// Skip pruning for batch operations to save time
-			// This may result in slightly more connections but much faster insertion
+			// Add bidirectional connections at this layer
+			for _, neighbor := range selectedNeighbors {
+				newNode.AddConnection(neighbor, lc)
+				neighbor.AddConnection(newNode, lc)
+				g.stats.EdgeCount += 2
+
+				// Prune neighbors if needed to maintain M
+				g.pruneConnections(neighbor, lc)
+			}
+
+			// Update entry points for next layer
+			entryPoints = candidates
 		}
 
 		// Update entry point if the new node has a higher level
