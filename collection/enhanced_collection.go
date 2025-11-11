@@ -107,7 +107,7 @@ func NewEnhancedVectorCollection(config *api.CollectionConfig) (*EnhancedVectorC
 	// Create the enhanced collection
 	collection := &EnhancedVectorCollection{
 		segments:     segmentManager,
-		vectorIndex:  newIndexAdapter(hnswIndex),
+		vectorIndex:  newIndexAdapter(hnswIndex, config.Metric == api.Cosine),
 		filterEngine: filterEngine,
 		config:       config,
 		metadata: &CollectionMetadata{
@@ -304,8 +304,38 @@ func (c *EnhancedVectorCollection) Search(ctx context.Context, req *api.SearchRe
 	// Apply distance and score filters
 	results = c.applyDistanceFilters(results, req.MaxDistance, req.MinScore)
 
-	// If we don't need the full data, remove it to save bandwidth
-	if !req.IncludeData {
+	if req.IncludeData {
+		idMap := make(map[string]*api.Vector, len(results))
+		ids := make([]string, 0, len(results))
+		for _, result := range results {
+			if result.Vector != nil {
+				ids = append(ids, result.Vector.ID)
+			}
+		}
+
+		if len(ids) > 0 {
+			stored, err := c.segments.GetBatch(ctx, ids)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load vectors from segments: %w", err)
+			}
+			for _, v := range stored {
+				if v != nil {
+					idMap[v.ID] = v
+				}
+			}
+
+			for _, result := range results {
+				if result.Vector == nil {
+					continue
+				}
+				if original, ok := idMap[result.Vector.ID]; ok {
+					result.Vector.Data = original.Data
+					result.Vector.Metadata = original.Metadata
+				}
+			}
+		}
+	} else {
+		// If we don't need the full data, remove it to save bandwidth
 		for _, result := range results {
 			if result.Vector != nil {
 				result.Vector.Data = nil
@@ -761,7 +791,7 @@ func (c *EnhancedVectorCollection) Clear(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to recreate HNSW index: %w", err)
 	}
-	c.vectorIndex = newIndexAdapter(hnswIndex)
+	c.vectorIndex = newIndexAdapter(hnswIndex, c.config.Metric == api.Cosine)
 
 	c.metadata.UpdatedAt = time.Now()
 	c.metadata.OperationCount = 0

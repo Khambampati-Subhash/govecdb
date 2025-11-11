@@ -178,7 +178,7 @@ func (vp *VectorPool) Put(slice []float32) {
 			}
 			// Note: SA6002 warning is a false positive - sync.Pool handles this correctly
 			slice = slice[:0]
-			vp.pools[i].Put(&slice)
+			vp.pools[i].Put(slice)
 			return
 		}
 	}

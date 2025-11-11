@@ -3,6 +3,7 @@ package index
 import (
 	"container/heap"
 	"math/rand"
+	"sort"
 	"sync"
 )
 
@@ -47,7 +48,7 @@ func NewHNSWGraph(config *Config) (*HNSWGraph, error) {
 
 	graph := &HNSWGraph{
 		config:       config,
-		distanceFunc: GetDistanceFunc(config.Metric),
+		distanceFunc: GetDistanceFuncWithOptions(config.Metric, config.Metric == Cosine),
 		nodes:        NewSafeMap(),
 		rng:          rand.New(rand.NewSource(config.Seed)),
 		stats:        &GraphStats{},
@@ -145,41 +146,26 @@ func (g *HNSWGraph) Insert(vector *Vector) error {
 	return nil
 }
 
-// InsertBatch inserts multiple vectors with a single lock acquisition for better performance
+// InsertBatch adds multiple vectors in batch
 func (g *HNSWGraph) InsertBatch(vectors []*Vector) error {
 	if len(vectors) == 0 {
 		return nil
 	}
 
-	// Validate all vectors first
-	for _, vector := range vectors {
-		if len(vector.Data) != g.config.Dimension {
-			return ErrDimensionMismatch
-		}
-	}
-
-	// Acquire lock ONCE for entire batch
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	// Optimized batch insertion strategy
-	batchSize := len(vectors)
-
-	// For large batches, use simplified insertion strategy
-	if batchSize > 100 {
-		return g.insertBatchOptimized(vectors)
-	}
-
-	// For smaller batches, use standard insertion
-	return g.insertBatchStandard(vectors)
+	// For production RAG systems, we need 100% accuracy
+	// Use proper HNSW construction with parallel optimization
+	return g.insertBatchOptimized(vectors)
 }
 
 // insertBatchOptimized uses a simplified strategy for large batches
 func (g *HNSWGraph) insertBatchOptimized(vectors []*Vector) error {
-	// Reduce EfConstruction for batch operations to speed up insertion
-	originalEf := g.config.EfConstruction
-	g.config.EfConstruction = minInt(g.config.EfConstruction/2, 50) // Reduce search effort
-	defer func() { g.config.EfConstruction = originalEf }()
+	// Production-grade batch insertion for RAG systems
+	// Goal: 100% accuracy with maximum speed
+	// Strategy: Use proper HNSW algorithm with lock optimization only
+
+	// Acquire write lock once for entire batch (this is the main optimization)
+	g.mu.Lock()
+	defer g.mu.Unlock()
 
 	for _, vector := range vectors {
 		// Check if node already exists
@@ -199,29 +185,38 @@ func (g *HNSWGraph) insertBatchOptimized(vectors []*Vector) error {
 			continue
 		}
 
-		// Simplified insertion: only search base layer for batch operations
-		// This trades some accuracy for significant speed improvement
+		// FULL HNSW insertion for production quality
 		entryPoints := []*HNSWNode{g.entryPoint}
 
-		// Only search to find entry points at target level (skip layer-by-layer descent)
-		if level < g.entryPoint.Level {
-			entryPoints = g.searchLayer(vector.Data, entryPoints, 1, level)
+		// Layer-by-layer search from top to target level
+		for lc := g.entryPoint.Level; lc > level; lc-- {
+			entryPoints = g.searchLayer(vector.Data, entryPoints, 1, lc)
 		}
 
-		// Connect only at base layer (layer 0) for batch operations
-		candidates := g.searchLayer(vector.Data, entryPoints, g.config.EfConstruction, 0)
+		// Connect at ALL layers from level down to 0 (proper HNSW)
+		for lc := level; lc >= 0; lc-- {
+			candidates := g.searchLayer(vector.Data, entryPoints, g.config.EfConstruction, lc)
 
-		// Use reduced M for faster connection establishment
-		m := minInt(g.config.M/2, 8) // Fewer connections for batch operations
-		selectedNeighbors := g.selectNeighborsFast(vector.Data, candidates, m)
+			// Use proper M value for production quality
+			m := g.config.M
+			if lc > 0 {
+				m = g.config.M // Same M for all layers
+			}
 
-		// Add bidirectional connections only at base layer
-		for _, neighbor := range selectedNeighbors {
-			newNode.AddConnection(neighbor, 0)
-			g.stats.EdgeCount++
+			selectedNeighbors := g.selectNeighbors(vector.Data, candidates, m)
 
-			// Skip pruning for batch operations to save time
-			// This may result in slightly more connections but much faster insertion
+			// Add bidirectional connections at this layer
+			for _, neighbor := range selectedNeighbors {
+				newNode.AddConnection(neighbor, lc)
+				neighbor.AddConnection(newNode, lc)
+				g.stats.EdgeCount += 2
+
+				// Prune neighbors if needed to maintain M
+				g.pruneConnections(neighbor, lc)
+			}
+
+			// Update entry points for next layer
+			entryPoints = candidates
 		}
 
 		// Update entry point if the new node has a higher level
@@ -350,11 +345,17 @@ func (g *HNSWGraph) searchLayer(query []float32, entryPoints []*HNSWNode, numClo
 		exploredCount++
 
 		// Explore neighbors with limited scope for better scaling
-		connections := current.Node.GetConnections(layer)
-		maxNeighborsToCheck := g.getOptimalNeighborLimit(len(connections)) // Dynamic neighbor limit
+		current.Node.mu.RLock()
+		if layer >= len(current.Node.connections) || len(current.Node.connections[layer]) == 0 {
+			current.Node.mu.RUnlock()
+			continue
+		}
+
+		layerConnections := current.Node.connections[layer]
+		maxNeighborsToCheck := g.getOptimalNeighborLimit(len(layerConnections)) // Dynamic neighbor limit
 
 		checkedCount := 0
-		for _, neighbor := range connections {
+		for _, neighbor := range layerConnections {
 			if checkedCount >= maxNeighborsToCheck {
 				break // Limit exploration scope
 			}
@@ -398,6 +399,7 @@ func (g *HNSWGraph) searchLayer(query []float32, entryPoints []*HNSWNode, numClo
 				}
 			}
 		}
+		current.Node.mu.RUnlock()
 	}
 
 	// Convert heap to slice
@@ -467,14 +469,9 @@ func (g *HNSWGraph) selectNeighbors(query []float32, candidates []*HNSWNode, m i
 		candidateList = append(candidateList, candidate{node: node, distance: distance})
 	}
 
-	// Sort by distance (ascending)
-	for i := 0; i < len(candidateList)-1; i++ {
-		for j := i + 1; j < len(candidateList); j++ {
-			if candidateList[i].distance > candidateList[j].distance {
-				candidateList[i], candidateList[j] = candidateList[j], candidateList[i]
-			}
-		}
-	}
+	sort.Slice(candidateList, func(i, j int) bool {
+		return candidateList[i].distance < candidateList[j].distance
+	})
 
 	// Select top m candidates
 	result := make([]*HNSWNode, 0, m)
@@ -571,14 +568,9 @@ func (g *HNSWGraph) pruneConnections(node *HNSWNode, layer int) {
 		connList = append(connList, connWithDist{node: conn, distance: distance})
 	}
 
-	// Sort by distance (ascending - keep closest)
-	for i := 0; i < len(connList)-1; i++ {
-		for j := i + 1; j < len(connList); j++ {
-			if connList[i].distance > connList[j].distance {
-				connList[i], connList[j] = connList[j], connList[i]
-			}
-		}
-	}
+	sort.Slice(connList, func(i, j int) bool {
+		return connList[i].distance < connList[j].distance
+	})
 
 	// Remove excess connections (furthest ones)
 	for i := maxConnections; i < len(connList); i++ {
@@ -587,8 +579,15 @@ func (g *HNSWGraph) pruneConnections(node *HNSWNode, layer int) {
 	}
 }
 
-// Search performs k-NN search in the graph
+// Search performs k-NN search in the graph using proper HNSW algorithm
 func (g *HNSWGraph) Search(query []float32, k int, filter FilterFunc) ([]*SearchResult, error) {
+	// Use default ef based on k
+	ef := max(k, g.config.EfConstruction)
+	return g.SearchWithEf(query, k, ef, filter)
+}
+
+// SearchWithEf performs k-NN search with specified ef parameter
+func (g *HNSWGraph) SearchWithEf(query []float32, k int, ef int, filter FilterFunc) ([]*SearchResult, error) {
 	if len(query) != g.config.Dimension {
 		return nil, ErrDimensionMismatch
 	}
@@ -600,43 +599,48 @@ func (g *HNSWGraph) Search(query []float32, k int, filter FilterFunc) ([]*Search
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	// For now, use brute force search since HNSW structure is incomplete
-	// TODO: Implement proper HNSW search when structure is fixed
-	results := make([]*SearchResult, 0)
+	// If no entry point, return empty results
+	if g.entryPoint == nil {
+		return []*SearchResult{}, nil
+	}
 
-	// Iterate through all vectors in the SafeMap
-	g.nodes.ForEach(func(id string, vector *Vector) {
-		// Apply filter if provided
-		if filter != nil && !filter(vector.Metadata) {
-			return
+	// Start search from the top layer
+	currentLayer := g.entryPoint.Level
+	entryPoints := []*HNSWNode{g.entryPoint}
+
+	// Search from top layer down to layer 1
+	for currentLayer > 0 {
+		entryPoints = g.searchLayer(query, entryPoints, 1, currentLayer)
+		currentLayer--
+	}
+
+	// Search at base layer (layer 0) with specified ef
+	candidates := g.searchLayer(query, entryPoints, ef, 0)
+
+	// Convert candidates to results, applying filter if provided
+	results := make([]*SearchResult, 0, min(k, len(candidates)))
+	for _, node := range candidates {
+		if len(results) >= k {
+			break
 		}
 
-		distance, err := g.distanceFunc(query, vector.Data)
+		if filter != nil && !filter(node.Vector.Metadata) {
+			continue
+		}
+
+		distance, err := g.distanceFunc(query, node.Vector.Data)
 		if err != nil {
-			return
+			continue
 		}
 
 		result := &SearchResult{
-			ID:       vector.ID,
-			Vector:   vector.Data,
+			ID:       node.Vector.ID,
+			Vector:   node.Vector.Data,
 			Score:    distance,
-			Metadata: vector.Metadata,
+			Metadata: node.Vector.Metadata,
 		}
 
 		results = append(results, result)
-	})
-
-	// Sort by distance and limit to k
-	for i := 0; i < len(results)-1; i++ {
-		for j := i + 1; j < len(results); j++ {
-			if results[i].Score > results[j].Score {
-				results[i], results[j] = results[j], results[i]
-			}
-		}
-	}
-
-	if len(results) > k {
-		results = results[:k]
 	}
 
 	return results, nil
@@ -680,13 +684,9 @@ func (g *HNSWGraph) SearchFast(query []float32, k int, filter FilterFunc) ([]*Se
 	}
 
 	// Sort by distance
-	for i := 0; i < len(results)-1; i++ {
-		for j := i + 1; j < len(results); j++ {
-			if results[i].Score > results[j].Score {
-				results[i], results[j] = results[j], results[i]
-			}
-		}
-	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score < results[j].Score
+	})
 
 	if len(results) > k {
 		results = results[:k]
@@ -759,25 +759,17 @@ func (g *HNSWGraph) searchLayerFast(query []float32, entryPoints []*HNSWNode, nu
 		// Keep only best candidates to prevent memory growth
 		if len(candidates) > numClosest*3 {
 			// Sort and keep top candidates
-			for i := 0; i < len(candidates)-1; i++ {
-				for j := i + 1; j < len(candidates); j++ {
-					if candidates[i].Distance > candidates[j].Distance {
-						candidates[i], candidates[j] = candidates[j], candidates[i]
-					}
-				}
-			}
+			sort.Slice(candidates, func(i, j int) bool {
+				return candidates[i].Distance < candidates[j].Distance
+			})
 			candidates = candidates[:numClosest*2]
 		}
 	}
 
 	// Sort final candidates and return top ones
-	for i := 0; i < len(candidates)-1; i++ {
-		for j := i + 1; j < len(candidates); j++ {
-			if candidates[i].Distance > candidates[j].Distance {
-				candidates[i], candidates[j] = candidates[j], candidates[i]
-			}
-		}
-	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Distance < candidates[j].Distance
+	})
 
 	limit := minInt(len(candidates), numClosest)
 	result := make([]*HNSWNode, limit)
