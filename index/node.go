@@ -59,6 +59,22 @@ func (n *HNSWNode) GetConnections(layer int) map[string]*HNSWNode {
 	return connections
 }
 
+// VisitConnections iterates over connections at the specified layer without allocation
+func (n *HNSWNode) VisitConnections(layer int, fn func(*HNSWNode) bool) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	if layer < 0 || layer >= len(n.connections) {
+		return
+	}
+
+	for _, node := range n.connections[layer] {
+		if !fn(node) {
+			break
+		}
+	}
+}
+
 // GetConnectionsList returns connections as a slice (thread-safe)
 func (n *HNSWNode) GetConnectionsList(layer int) []*HNSWNode {
 	connections := n.GetConnections(layer)
@@ -253,42 +269,4 @@ func (n *HNSWNode) String() string {
 type NodeCandidate struct {
 	Node     *HNSWNode
 	Distance float32
-}
-
-// NodeCandidateHeap implements a min-heap for NodeCandidate
-type NodeCandidateHeap []*NodeCandidate
-
-func (h NodeCandidateHeap) Len() int           { return len(h) }
-func (h NodeCandidateHeap) Less(i, j int) bool { return h[i].Distance < h[j].Distance }
-func (h NodeCandidateHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-
-func (h *NodeCandidateHeap) Push(x interface{}) {
-	*h = append(*h, x.(*NodeCandidate))
-}
-
-func (h *NodeCandidateHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
-}
-
-// MaxNodeCandidateHeap implements a max-heap for NodeCandidate
-type MaxNodeCandidateHeap []*NodeCandidate
-
-func (h MaxNodeCandidateHeap) Len() int           { return len(h) }
-func (h MaxNodeCandidateHeap) Less(i, j int) bool { return h[i].Distance > h[j].Distance }
-func (h MaxNodeCandidateHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-
-func (h *MaxNodeCandidateHeap) Push(x interface{}) {
-	*h = append(*h, x.(*NodeCandidate))
-}
-
-func (h *MaxNodeCandidateHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
 }

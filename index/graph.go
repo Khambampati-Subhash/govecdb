@@ -1,7 +1,6 @@
 package index
 
 import (
-	"container/heap"
 	"math/rand"
 	"sync"
 )
@@ -105,13 +104,16 @@ func (g *HNSWGraph) Insert(vector *Vector) error {
 	entryPoints := []*HNSWNode{g.entryPoint}
 
 	// Search from top layer down to level+1
+	ctx := GetSearchContext()
+	defer PutSearchContext(ctx)
+
 	for currentLayer := g.entryPoint.Level; currentLayer > level; currentLayer-- {
-		entryPoints = g.searchLayer(vector.Data, entryPoints, 1, currentLayer)
+		entryPoints = g.searchLayer(vector.Data, entryPoints, 1, currentLayer, ctx)
 	}
 
 	// Search and connect at each layer from level down to 0
 	for currentLayer := min(level, g.entryPoint.Level); currentLayer >= 0; currentLayer-- {
-		candidates := g.searchLayer(vector.Data, entryPoints, g.config.EfConstruction, currentLayer)
+		candidates := g.searchLayer(vector.Data, entryPoints, g.config.EfConstruction, currentLayer, ctx)
 
 		// Select M neighbors to connect to
 		m := g.config.M
@@ -204,12 +206,14 @@ func (g *HNSWGraph) insertBatchOptimized(vectors []*Vector) error {
 		entryPoints := []*HNSWNode{g.entryPoint}
 
 		// Only search to find entry points at target level (skip layer-by-layer descent)
+		ctx := GetSearchContext()
 		if level < g.entryPoint.Level {
-			entryPoints = g.searchLayer(vector.Data, entryPoints, 1, level)
+			entryPoints = g.searchLayer(vector.Data, entryPoints, 1, level, ctx)
 		}
 
 		// Connect only at base layer (layer 0) for batch operations
-		candidates := g.searchLayer(vector.Data, entryPoints, g.config.EfConstruction, 0)
+		candidates := g.searchLayer(vector.Data, entryPoints, g.config.EfConstruction, 0, ctx)
+		PutSearchContext(ctx)
 
 		// Use reduced M for faster connection establishment
 		m := minInt(g.config.M/2, 8) // Fewer connections for batch operations
@@ -261,13 +265,14 @@ func (g *HNSWGraph) insertBatchStandard(vectors []*Vector) error {
 		entryPoints := []*HNSWNode{g.entryPoint}
 
 		// Search from top layer down to level+1
+		ctx := GetSearchContext()
 		for currentLayer := g.entryPoint.Level; currentLayer > level; currentLayer-- {
-			entryPoints = g.searchLayer(vector.Data, entryPoints, 1, currentLayer)
+			entryPoints = g.searchLayer(vector.Data, entryPoints, 1, currentLayer, ctx)
 		}
 
 		// Search and connect at each layer from level down to 0
 		for currentLayer := min(level, g.entryPoint.Level); currentLayer >= 0; currentLayer-- {
-			candidates := g.searchLayer(vector.Data, entryPoints, g.config.EfConstruction, currentLayer)
+			candidates := g.searchLayer(vector.Data, entryPoints, g.config.EfConstruction, currentLayer, ctx)
 
 			// Select M neighbors to connect to
 			m := g.config.M
@@ -288,6 +293,7 @@ func (g *HNSWGraph) insertBatchStandard(vectors []*Vector) error {
 
 			entryPoints = selectedNeighbors
 		}
+		PutSearchContext(ctx)
 
 		// Update entry point if the new node has a higher level
 		if level > g.entryPoint.Level {
@@ -303,13 +309,32 @@ func (g *HNSWGraph) insertBatchStandard(vectors []*Vector) error {
 }
 
 // searchLayer performs a greedy search at a specific layer with optimizations
-func (g *HNSWGraph) searchLayer(query []float32, entryPoints []*HNSWNode, numClosest int, layer int) []*HNSWNode {
-	visited := make(map[string]bool)
-	candidates := &NodeCandidateHeap{}
-	dynamic := &MaxNodeCandidateHeap{}
+func (g *HNSWGraph) searchLayer(query []float32, entryPoints []*HNSWNode, numClosest int, layer int, ctx *SearchContext) []*HNSWNode {
+	visited := ctx.visited
+	candidates := ctx.candidates
+	dynamic := ctx.dynamic
 
-	heap.Init(candidates)
-	heap.Init(dynamic)
+	// Reset heaps for this layer (visited is shared across layers? No, usually per search but here per layer call?
+	// Actually visited set should be per search if we want to avoid re-visiting globally, but standard HNSW is per layer greedy.
+	// Wait, HNSW paper says "visited" is for the current greedy search.
+	// So we should clear them. But ctx.visited is cleared in GetSearchContext.
+	// If we reuse ctx across layers in the same Search call, we need to clear it between layers?
+	// Standard HNSW: search at layer L uses entry points from L+1.
+	// The search at layer L is a fresh greedy search.
+	// So yes, we should clear visited for each layer search, OR use a new context, OR just clear it here.
+	// Clearing a large map is expensive.
+	// Better to use a generation ID or just clear it.
+	// For now, let's clear it here efficiently.
+
+	// Actually, let's just clear it here since we pass ctx from Search.
+	for k := range visited {
+		delete(visited, k)
+	}
+	candidates.Reset()
+	dynamic.Reset()
+
+	// heap.Init(candidates) // Not needed, Reset() handles it
+	// heap.Init(dynamic)
 
 	// Initialize with entry points
 	for _, ep := range entryPoints {
@@ -323,8 +348,8 @@ func (g *HNSWGraph) searchLayer(query []float32, entryPoints []*HNSWNode, numClo
 		}
 
 		candidate := &NodeCandidate{Node: ep, Distance: distance}
-		heap.Push(candidates, candidate)
-		heap.Push(dynamic, candidate)
+		candidates.Push(candidate)
+		dynamic.Push(candidate)
 		visited[ep.Vector.ID] = true
 	}
 
@@ -332,11 +357,11 @@ func (g *HNSWGraph) searchLayer(query []float32, entryPoints []*HNSWNode, numClo
 	maxExplored := g.getOptimalSearchLimit(numClosest) // Dynamic limit based on graph size
 
 	for candidates.Len() > 0 && exploredCount < maxExplored {
-		current := heap.Pop(candidates).(*NodeCandidate)
+		current := candidates.Pop()
 
 		// Early termination: stop if current distance is much worse than the furthest in dynamic list
 		if dynamic.Len() >= numClosest {
-			worstDynamicDistance := (*dynamic)[0].Distance
+			worstDynamicDistance := dynamic.Peek().Distance
 			// More aggressive early termination for large graphs
 			toleranceFactor := float32(1.1) // 10% tolerance (reduced from 20%)
 			if g.stats.NodeCount > 3000 {
@@ -350,25 +375,28 @@ func (g *HNSWGraph) searchLayer(query []float32, entryPoints []*HNSWNode, numClo
 		exploredCount++
 
 		// Explore neighbors with limited scope for better scaling
-		connections := current.Node.GetConnections(layer)
-		maxNeighborsToCheck := g.getOptimalNeighborLimit(len(connections)) // Dynamic neighbor limit
+		// connections := current.Node.GetConnections(layer) // Removed allocation
+		// maxNeighborsToCheck := g.getOptimalNeighborLimit(len(connections)) // Dynamic neighbor limit
 
+		// Optimization: VisitConnections avoids map allocation
 		checkedCount := 0
-		for _, neighbor := range connections {
+		maxNeighborsToCheck := 50 // Hard limit for now, or use ConnectionCount if needed but that locks again
+
+		current.Node.VisitConnections(layer, func(neighbor *HNSWNode) bool {
 			if checkedCount >= maxNeighborsToCheck {
-				break // Limit exploration scope
+				return false // Stop iteration
 			}
 			checkedCount++
 
 			if neighbor.IsDeleted() || visited[neighbor.Vector.ID] {
-				continue
+				return true // Continue iteration
 			}
 
 			visited[neighbor.Vector.ID] = true
 
 			distance, err := g.distanceFunc(query, neighbor.Vector.Data)
 			if err != nil {
-				continue
+				return true
 			}
 
 			// More aggressive pruning: only add if significantly better
@@ -376,7 +404,7 @@ func (g *HNSWGraph) searchLayer(query []float32, entryPoints []*HNSWNode, numClo
 			if dynamic.Len() < numClosest {
 				shouldAdd = true
 			} else {
-				worstDistance := (*dynamic)[0].Distance
+				worstDistance := dynamic.Peek().Distance
 				// Scale pruning aggressiveness with graph size
 				improvementRequired := float32(0.95) // Default: must be 5% better
 				if g.stats.NodeCount > 3000 {
@@ -389,21 +417,22 @@ func (g *HNSWGraph) searchLayer(query []float32, entryPoints []*HNSWNode, numClo
 
 			if shouldAdd {
 				candidate := &NodeCandidate{Node: neighbor, Distance: distance}
-				heap.Push(candidates, candidate)
-				heap.Push(dynamic, candidate)
+				candidates.Push(candidate)
+				dynamic.Push(candidate)
 
 				// Remove furthest if we have too many
 				if dynamic.Len() > numClosest {
-					heap.Pop(dynamic)
+					dynamic.Pop()
 				}
 			}
-		}
+			return true
+		})
 	}
 
 	// Convert heap to slice
 	result := make([]*HNSWNode, dynamic.Len())
 	for i := dynamic.Len() - 1; i >= 0; i-- {
-		result[i] = heap.Pop(dynamic).(*NodeCandidate).Node
+		result[i] = dynamic.Pop().Node
 	}
 
 	return result
@@ -600,33 +629,50 @@ func (g *HNSWGraph) Search(query []float32, k int, filter FilterFunc) ([]*Search
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	// For now, use brute force search since HNSW structure is incomplete
-	// TODO: Implement proper HNSW search when structure is fixed
-	results := make([]*SearchResult, 0)
+	if g.entryPoint == nil {
+		return []*SearchResult{}, nil
+	}
 
-	// Iterate through all vectors in the SafeMap
-	g.nodes.ForEach(func(id string, vector *Vector) {
-		// Apply filter if provided
-		if filter != nil && !filter(vector.Metadata) {
-			return
+	// Start search from the top layer
+	ctx := GetSearchContext()
+	defer PutSearchContext(ctx)
+
+	entryPoints := []*HNSWNode{g.entryPoint}
+	for layer := g.entryPoint.Level; layer > 0; layer-- {
+		entryPoints = g.searchLayer(query, entryPoints, 1, layer, ctx)
+	}
+
+	// Search at the base layer (layer 0)
+	// Use optimized ef for search, not construction ef
+	ef := k * 4
+	if ef < 100 {
+		ef = 100
+	}
+	candidates := g.searchLayer(query, entryPoints, ef, 0, ctx)
+
+	// Collect results
+	results := make([]*SearchResult, 0, k)
+	for _, node := range candidates {
+		if filter != nil && !filter(node.Vector.Metadata) {
+			continue
 		}
 
-		distance, err := g.distanceFunc(query, vector.Data)
+		distance, err := g.distanceFunc(query, node.Vector.Data)
 		if err != nil {
-			return
+			continue
 		}
 
 		result := &SearchResult{
-			ID:       vector.ID,
-			Vector:   vector.Data,
+			ID:       node.Vector.ID,
+			Vector:   node.Vector.Data,
 			Score:    distance,
-			Metadata: vector.Metadata,
+			Metadata: node.Vector.Metadata,
 		}
 
 		results = append(results, result)
-	})
+	}
 
-	// Sort by distance and limit to k
+	// Sort by distance
 	for i := 0; i < len(results)-1; i++ {
 		for j := i + 1; j < len(results); j++ {
 			if results[i].Score > results[j].Score {

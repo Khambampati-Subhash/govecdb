@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package vecdb;
+
+option go_package = "github.com/khambampati-subhash/govecdb/proto";
+
+service VectorService {
+  // Put inserts a vector into the database
+  rpc Put(PutRequest) returns (PutResponse);
+
+  // Get retrieves a vector by ID
+  rpc Get(GetRequest) returns (GetResponse);
+
+  // Search finds the nearest neighbors for a given vector
+  rpc Search(SearchRequest) returns (SearchResponse);
+}
+
+message Vector {
+  string id = 1;
+  repeated float data = 2;
+}
+
+message PutRequest {
+  Vector vector = 1;
+  bool is_replication = 2;
+}
+
+message PutResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetRequest {
+  string id = 1;
+}
+
+message GetResponse {
+  Vector vector = 1;
+  string error = 2;
+}
+
+message SearchRequest {
+  repeated float vector = 1;
+  int32 k = 2;
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+  string error = 2;
+}
+
+message SearchResult {
+  string id = 1;
+  float score = 2;
+}
