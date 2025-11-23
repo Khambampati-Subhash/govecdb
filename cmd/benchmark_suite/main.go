@@ -14,9 +14,10 @@ import (
 )
 
 var (
-	addr = flag.String("addr", "localhost:8080", "Server address")
-	n    = flag.Int("n", 1000, "Number of vectors")
-	dim  = flag.Int("dim", 128, "Vector dimension")
+	addr     = flag.String("addr", "localhost:8080", "Server address")
+	n        = flag.Int("n", 1000, "Number of vectors")
+	dim      = flag.Int("dim", 128, "Vector dimension")
+	duration = flag.Duration("duration", 5*time.Second, "Duration of search benchmark")
 )
 
 func main() {
@@ -49,20 +50,26 @@ func main() {
 			end = *n
 		}
 
+		// Prepare batch
+		batchVectors := make([]client.VectorData, end-i)
+		for j := i; j < end; j++ {
+			batchVectors[j-i] = client.VectorData{
+				ID:   fmt.Sprintf("vec-%d", j),
+				Data: vectors[j],
+			}
+		}
+
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(startIdx, endIdx int) {
+		go func(batch []client.VectorData) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			for j := startIdx; j < endIdx; j++ {
-				id := fmt.Sprintf("vec-%d", j)
-				err := c.Put(context.Background(), id, vectors[j])
-				if err != nil {
-					log.Printf("Put failed: %v", err)
-				}
+			err := c.BatchPut(context.Background(), batch)
+			if err != nil {
+				log.Printf("BatchPut failed: %v", err)
 			}
-		}(i, end)
+		}(batchVectors)
 	}
 	wg.Wait()
 	insertDuration := time.Since(start)
@@ -105,22 +112,23 @@ func main() {
 
 	// 3. Benchmark Search Performance (QPS) - Concurrent
 	// Run for 5 seconds or fixed number of queries
-	searchDuration := 5 * time.Second
-	fmt.Printf("Benchmarking Search QPS (duration=%v, concurrency=%d)...\n", searchDuration, concurrency)
+	fmt.Printf("Benchmarking Search QPS (duration=%v, concurrency=1)...\n", *duration)
 
 	var searchOps int64
 	searchStart := time.Now()
-	done := make(chan struct{})
-	time.AfterFunc(searchDuration, func() { close(done) })
 
-	var searchWg sync.WaitGroup
-	for i := 0; i < concurrency; i++ {
-		searchWg.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), *duration)
+	defer cancel()
+
+	var wgSearch sync.WaitGroup
+	searchConcurrency := 1 // Changed concurrency to 1 for this benchmark
+	for i := 0; i < searchConcurrency; i++ {
+		wgSearch.Add(1)
 		go func() {
-			defer searchWg.Done()
+			defer wgSearch.Done()
 			for {
 				select {
-				case <-done:
+				case <-ctx.Done():
 					return
 				default:
 					queryIdx := rand.Intn(*n)
@@ -134,7 +142,7 @@ func main() {
 			}
 		}()
 	}
-	searchWg.Wait()
+	wgSearch.Wait()
 	actualDuration := time.Since(searchStart)
 
 	fmt.Printf("Search QPS: %.2f\n", float64(searchOps)/actualDuration.Seconds())

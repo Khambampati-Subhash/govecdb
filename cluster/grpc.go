@@ -41,6 +41,21 @@ func (s *GRPCServer) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutRespon
 	return &pb.PutResponse{Success: true}, nil
 }
 
+// BatchPut handles batch insert requests
+func (s *GRPCServer) BatchPut(ctx context.Context, req *pb.BatchPutRequest) (*pb.BatchPutResponse, error) {
+	if len(req.Vectors) == 0 {
+		return &pb.BatchPutResponse{Success: true, Count: 0}, nil
+	}
+
+	// Call Node.BatchPut
+	err := s.node.BatchPut(req.Vectors)
+	if err != nil {
+		return &pb.BatchPutResponse{Success: false, Error: err.Error()}, nil
+	}
+
+	return &pb.BatchPutResponse{Success: true, Count: int32(len(req.Vectors))}, nil
+}
+
 // Get handles retrieval requests
 func (s *GRPCServer) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
 	// Directly get from local store

@@ -25,6 +25,7 @@ type Vector struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Data          []float32              `protobuf:"fixed32,2,rep,packed,name=data,proto3" json:"data,omitempty"`
+	Metadata      map[string]string      `protobuf:"bytes,3,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -69,6 +70,13 @@ func (x *Vector) GetId() string {
 func (x *Vector) GetData() []float32 {
 	if x != nil {
 		return x.Data
+	}
+	return nil
+}
+
+func (x *Vector) GetMetadata() map[string]string {
+	if x != nil {
+		return x.Metadata
 	}
 	return nil
 }
@@ -177,6 +185,110 @@ func (x *PutResponse) GetError() string {
 	return ""
 }
 
+type BatchPutRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Vectors       []*Vector              `protobuf:"bytes,1,rep,name=vectors,proto3" json:"vectors,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BatchPutRequest) Reset() {
+	*x = BatchPutRequest{}
+	mi := &file_proto_vecdb_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchPutRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchPutRequest) ProtoMessage() {}
+
+func (x *BatchPutRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_vecdb_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchPutRequest.ProtoReflect.Descriptor instead.
+func (*BatchPutRequest) Descriptor() ([]byte, []int) {
+	return file_proto_vecdb_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *BatchPutRequest) GetVectors() []*Vector {
+	if x != nil {
+		return x.Vectors
+	}
+	return nil
+}
+
+type BatchPutResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	Count         int32                  `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BatchPutResponse) Reset() {
+	*x = BatchPutResponse{}
+	mi := &file_proto_vecdb_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchPutResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchPutResponse) ProtoMessage() {}
+
+func (x *BatchPutResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_vecdb_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchPutResponse.ProtoReflect.Descriptor instead.
+func (*BatchPutResponse) Descriptor() ([]byte, []int) {
+	return file_proto_vecdb_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *BatchPutResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *BatchPutResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *BatchPutResponse) GetCount() int32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
 type GetRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -186,7 +298,7 @@ type GetRequest struct {
 
 func (x *GetRequest) Reset() {
 	*x = GetRequest{}
-	mi := &file_proto_vecdb_proto_msgTypes[3]
+	mi := &file_proto_vecdb_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -198,7 +310,7 @@ func (x *GetRequest) String() string {
 func (*GetRequest) ProtoMessage() {}
 
 func (x *GetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_vecdb_proto_msgTypes[3]
+	mi := &file_proto_vecdb_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -211,7 +323,7 @@ func (x *GetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRequest.ProtoReflect.Descriptor instead.
 func (*GetRequest) Descriptor() ([]byte, []int) {
-	return file_proto_vecdb_proto_rawDescGZIP(), []int{3}
+	return file_proto_vecdb_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GetRequest) GetId() string {
@@ -231,7 +343,7 @@ type GetResponse struct {
 
 func (x *GetResponse) Reset() {
 	*x = GetResponse{}
-	mi := &file_proto_vecdb_proto_msgTypes[4]
+	mi := &file_proto_vecdb_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -243,7 +355,7 @@ func (x *GetResponse) String() string {
 func (*GetResponse) ProtoMessage() {}
 
 func (x *GetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_vecdb_proto_msgTypes[4]
+	mi := &file_proto_vecdb_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -256,7 +368,7 @@ func (x *GetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResponse.ProtoReflect.Descriptor instead.
 func (*GetResponse) Descriptor() ([]byte, []int) {
-	return file_proto_vecdb_proto_rawDescGZIP(), []int{4}
+	return file_proto_vecdb_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetResponse) GetVector() *Vector {
@@ -283,7 +395,7 @@ type SearchRequest struct {
 
 func (x *SearchRequest) Reset() {
 	*x = SearchRequest{}
-	mi := &file_proto_vecdb_proto_msgTypes[5]
+	mi := &file_proto_vecdb_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -295,7 +407,7 @@ func (x *SearchRequest) String() string {
 func (*SearchRequest) ProtoMessage() {}
 
 func (x *SearchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_vecdb_proto_msgTypes[5]
+	mi := &file_proto_vecdb_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -308,7 +420,7 @@ func (x *SearchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchRequest.ProtoReflect.Descriptor instead.
 func (*SearchRequest) Descriptor() ([]byte, []int) {
-	return file_proto_vecdb_proto_rawDescGZIP(), []int{5}
+	return file_proto_vecdb_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *SearchRequest) GetVector() []float32 {
@@ -335,7 +447,7 @@ type SearchResponse struct {
 
 func (x *SearchResponse) Reset() {
 	*x = SearchResponse{}
-	mi := &file_proto_vecdb_proto_msgTypes[6]
+	mi := &file_proto_vecdb_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -347,7 +459,7 @@ func (x *SearchResponse) String() string {
 func (*SearchResponse) ProtoMessage() {}
 
 func (x *SearchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_vecdb_proto_msgTypes[6]
+	mi := &file_proto_vecdb_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -360,7 +472,7 @@ func (x *SearchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResponse.ProtoReflect.Descriptor instead.
 func (*SearchResponse) Descriptor() ([]byte, []int) {
-	return file_proto_vecdb_proto_rawDescGZIP(), []int{6}
+	return file_proto_vecdb_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *SearchResponse) GetResults() []*SearchResult {
@@ -387,7 +499,7 @@ type SearchResult struct {
 
 func (x *SearchResult) Reset() {
 	*x = SearchResult{}
-	mi := &file_proto_vecdb_proto_msgTypes[7]
+	mi := &file_proto_vecdb_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -399,7 +511,7 @@ func (x *SearchResult) String() string {
 func (*SearchResult) ProtoMessage() {}
 
 func (x *SearchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_vecdb_proto_msgTypes[7]
+	mi := &file_proto_vecdb_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -412,7 +524,7 @@ func (x *SearchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResult.ProtoReflect.Descriptor instead.
 func (*SearchResult) Descriptor() ([]byte, []int) {
-	return file_proto_vecdb_proto_rawDescGZIP(), []int{7}
+	return file_proto_vecdb_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *SearchResult) GetId() string {
@@ -433,17 +545,27 @@ var File_proto_vecdb_proto protoreflect.FileDescriptor
 
 const file_proto_vecdb_proto_rawDesc = "" +
 	"\n" +
-	"\x11proto/vecdb.proto\x12\x05vecdb\",\n" +
+	"\x11proto/vecdb.proto\x12\x05vecdb\"\xa2\x01\n" +
 	"\x06Vector\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
-	"\x04data\x18\x02 \x03(\x02R\x04data\"Z\n" +
+	"\x04data\x18\x02 \x03(\x02R\x04data\x127\n" +
+	"\bmetadata\x18\x03 \x03(\v2\x1b.vecdb.Vector.MetadataEntryR\bmetadata\x1a;\n" +
+	"\rMetadataEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"Z\n" +
 	"\n" +
 	"PutRequest\x12%\n" +
 	"\x06vector\x18\x01 \x01(\v2\r.vecdb.VectorR\x06vector\x12%\n" +
 	"\x0eis_replication\x18\x02 \x01(\bR\risReplication\"=\n" +
 	"\vPutResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\"\x1c\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\":\n" +
+	"\x0fBatchPutRequest\x12'\n" +
+	"\avectors\x18\x01 \x03(\v2\r.vecdb.VectorR\avectors\"X\n" +
+	"\x10BatchPutResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12\x14\n" +
+	"\x05count\x18\x03 \x01(\x05R\x05count\"\x1c\n" +
 	"\n" +
 	"GetRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"J\n" +
@@ -458,9 +580,10 @@ const file_proto_vecdb_proto_rawDesc = "" +
 	"\x05error\x18\x02 \x01(\tR\x05error\"4\n" +
 	"\fSearchResult\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
-	"\x05score\x18\x02 \x01(\x02R\x05score2\xa2\x01\n" +
+	"\x05score\x18\x02 \x01(\x02R\x05score2\xdf\x01\n" +
 	"\rVectorService\x12,\n" +
-	"\x03Put\x12\x11.vecdb.PutRequest\x1a\x12.vecdb.PutResponse\x12,\n" +
+	"\x03Put\x12\x11.vecdb.PutRequest\x1a\x12.vecdb.PutResponse\x12;\n" +
+	"\bBatchPut\x12\x16.vecdb.BatchPutRequest\x1a\x17.vecdb.BatchPutResponse\x12,\n" +
 	"\x03Get\x12\x11.vecdb.GetRequest\x1a\x12.vecdb.GetResponse\x125\n" +
 	"\x06Search\x12\x14.vecdb.SearchRequest\x1a\x15.vecdb.SearchResponseB.Z,github.com/khambampati-subhash/govecdb/protob\x06proto3"
 
@@ -476,32 +599,39 @@ func file_proto_vecdb_proto_rawDescGZIP() []byte {
 	return file_proto_vecdb_proto_rawDescData
 }
 
-var file_proto_vecdb_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_proto_vecdb_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_proto_vecdb_proto_goTypes = []any{
-	(*Vector)(nil),         // 0: vecdb.Vector
-	(*PutRequest)(nil),     // 1: vecdb.PutRequest
-	(*PutResponse)(nil),    // 2: vecdb.PutResponse
-	(*GetRequest)(nil),     // 3: vecdb.GetRequest
-	(*GetResponse)(nil),    // 4: vecdb.GetResponse
-	(*SearchRequest)(nil),  // 5: vecdb.SearchRequest
-	(*SearchResponse)(nil), // 6: vecdb.SearchResponse
-	(*SearchResult)(nil),   // 7: vecdb.SearchResult
+	(*Vector)(nil),           // 0: vecdb.Vector
+	(*PutRequest)(nil),       // 1: vecdb.PutRequest
+	(*PutResponse)(nil),      // 2: vecdb.PutResponse
+	(*BatchPutRequest)(nil),  // 3: vecdb.BatchPutRequest
+	(*BatchPutResponse)(nil), // 4: vecdb.BatchPutResponse
+	(*GetRequest)(nil),       // 5: vecdb.GetRequest
+	(*GetResponse)(nil),      // 6: vecdb.GetResponse
+	(*SearchRequest)(nil),    // 7: vecdb.SearchRequest
+	(*SearchResponse)(nil),   // 8: vecdb.SearchResponse
+	(*SearchResult)(nil),     // 9: vecdb.SearchResult
+	nil,                      // 10: vecdb.Vector.MetadataEntry
 }
 var file_proto_vecdb_proto_depIdxs = []int32{
-	0, // 0: vecdb.PutRequest.vector:type_name -> vecdb.Vector
-	0, // 1: vecdb.GetResponse.vector:type_name -> vecdb.Vector
-	7, // 2: vecdb.SearchResponse.results:type_name -> vecdb.SearchResult
-	1, // 3: vecdb.VectorService.Put:input_type -> vecdb.PutRequest
-	3, // 4: vecdb.VectorService.Get:input_type -> vecdb.GetRequest
-	5, // 5: vecdb.VectorService.Search:input_type -> vecdb.SearchRequest
-	2, // 6: vecdb.VectorService.Put:output_type -> vecdb.PutResponse
-	4, // 7: vecdb.VectorService.Get:output_type -> vecdb.GetResponse
-	6, // 8: vecdb.VectorService.Search:output_type -> vecdb.SearchResponse
-	6, // [6:9] is the sub-list for method output_type
-	3, // [3:6] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	10, // 0: vecdb.Vector.metadata:type_name -> vecdb.Vector.MetadataEntry
+	0,  // 1: vecdb.PutRequest.vector:type_name -> vecdb.Vector
+	0,  // 2: vecdb.BatchPutRequest.vectors:type_name -> vecdb.Vector
+	0,  // 3: vecdb.GetResponse.vector:type_name -> vecdb.Vector
+	9,  // 4: vecdb.SearchResponse.results:type_name -> vecdb.SearchResult
+	1,  // 5: vecdb.VectorService.Put:input_type -> vecdb.PutRequest
+	3,  // 6: vecdb.VectorService.BatchPut:input_type -> vecdb.BatchPutRequest
+	5,  // 7: vecdb.VectorService.Get:input_type -> vecdb.GetRequest
+	7,  // 8: vecdb.VectorService.Search:input_type -> vecdb.SearchRequest
+	2,  // 9: vecdb.VectorService.Put:output_type -> vecdb.PutResponse
+	4,  // 10: vecdb.VectorService.BatchPut:output_type -> vecdb.BatchPutResponse
+	6,  // 11: vecdb.VectorService.Get:output_type -> vecdb.GetResponse
+	8,  // 12: vecdb.VectorService.Search:output_type -> vecdb.SearchResponse
+	9,  // [9:13] is the sub-list for method output_type
+	5,  // [5:9] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_proto_vecdb_proto_init() }
@@ -515,7 +645,7 @@ func file_proto_vecdb_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_vecdb_proto_rawDesc), len(file_proto_vecdb_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

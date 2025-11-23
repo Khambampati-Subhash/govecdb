@@ -130,12 +130,21 @@ results, err := coordinator.Search(request)
 
 **Key Metrics** (tested on Apple M1 Pro / Intel i7):
 
-| Dimension | N | Insertion Rate (ops/s) | Search QPS | Avg Latency (µs) | Recall@10 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **256** | 10,000 | ~51,515 | **~55,682** | ~18 | ~0.60 |
-| **1024** | 10,000 | ~587 | **~8,669** | ~115 | ~0.61 |
-| **2048** | 10,000 | ~172 | **~3,340** | ~299 | ~0.42 |
-| **4096** | 10,000 | ~97 | **~2,050** | ~487 | ~0.07 |
+## Comprehensive Benchmarks (N=1000)
+
+| Dimension | Insertion Rate (ops/s) | Recall@10 | Search QPS | Avg Latency |
+|-----------|------------------------|-----------|------------|-------------|
+| 128       | ~2008                  | 0.66      | ~2813      | ~0.36ms     |
+| 256       | ~1646                  | 0.66      | ~2282      | ~0.44ms     |
+| 512       | ~1186                  | 0.63      | ~1763      | ~0.57ms     |
+| 1024      | ~785                   | 0.66      | ~1199      | ~0.83ms     |
+| 2048      | ~446                   | 0.65      | ~757       | ~1.32ms     |
+| 4096      | ~243                   | 0.65      | ~442       | ~2.26ms     |
+| 6000      | ~133                   | 0.66      | ~206       | ~4.85ms     |
+| 8192      | ~123                   | 0.55      | ~241       | ~4.15ms     |
+| 16384     | ~63                    | 0.35      | ~127       | ~7.84ms     |
+
+*Note: Search QPS measured with concurrency=1.*
 
 **Highlights**:
 - **SIMD Acceleration**: Hand-written Assembly (AVX2 for AMD64, NEON for ARM64) for DotProduct, Euclidean, and Cosine distance.

@@ -17,7 +17,15 @@ type Client struct {
 
 // NewClient creates a new client connected to the specified address
 func NewClient(address string) (*Client, error) {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Connect to the server
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(100*1024*1024), // 100MB
+			grpc.MaxCallSendMsgSize(100*1024*1024), // 100MB
+		),
+	}
+	conn, err := grpc.NewClient(address, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
@@ -50,7 +58,37 @@ func (c *Client) Put(ctx context.Context, id string, vector []float32) error {
 	return nil
 }
 
-// Get retrieves a vector from the database
+// BatchPut inserts multiple vectors into the database
+func (c *Client) BatchPut(ctx context.Context, vectors []VectorData) error {
+	pbVectors := make([]*pb.Vector, len(vectors))
+	for i, v := range vectors {
+		pbVectors[i] = &pb.Vector{
+			Id:       v.ID,
+			Data:     v.Data,
+			Metadata: v.Metadata,
+		}
+	}
+
+	resp, err := c.client.BatchPut(ctx, &pb.BatchPutRequest{
+		Vectors: pbVectors,
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("batch put failed: %s", resp.Error)
+	}
+	return nil
+}
+
+// VectorData represents a vector with ID and metadata
+type VectorData struct {
+	ID       string
+	Data     []float32
+	Metadata map[string]string
+}
+
+// Get retrieves a vector by IDfrom the database
 func (c *Client) Get(ctx context.Context, id string) ([]float32, error) {
 	resp, err := c.client.Get(ctx, &pb.GetRequest{Id: id})
 	if err != nil {

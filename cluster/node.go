@@ -12,6 +12,7 @@ import (
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
+	"github.com/khambampati-subhash/govecdb/index"
 	pb "github.com/khambampati-subhash/govecdb/proto"
 	"github.com/khambampati-subhash/govecdb/store"
 	"google.golang.org/grpc"
@@ -114,7 +115,10 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
-	n.grpcServer = grpc.NewServer()
+	n.grpcServer = grpc.NewServer(
+		grpc.MaxRecvMsgSize(100*1024*1024), // 100MB
+		grpc.MaxSendMsgSize(100*1024*1024), // 100MB
+	)
 	pb.RegisterVectorServiceServer(n.grpcServer, NewGRPCServer(n))
 
 	go func() {
@@ -163,7 +167,14 @@ func (n *Node) Join(peerID, peerAddr, peerRegion, peerZone string) error {
 	}
 
 	// Establish connection
-	conn, err := grpc.NewClient(peerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(100*1024*1024), // 100MB
+			grpc.MaxCallSendMsgSize(100*1024*1024), // 100MB
+		),
+	}
+	conn, err := grpc.NewClient(peerAddr, opts...)
 	if err != nil {
 		log.Printf("Failed to connect to peer %s: %v", peerID, err)
 		return err
@@ -227,6 +238,113 @@ func (n *Node) Put(id string, vector []float32) error {
 		}
 	}
 
+	return nil
+}
+
+// BatchPut inserts multiple vectors into the cluster
+func (n *Node) BatchPut(vectors []*pb.Vector) error {
+	// Group vectors by primary node
+	batches := make(map[string][]*pb.Vector)
+	for _, v := range vectors {
+		replicas := n.Ring.GetNodes(v.Id, 3)
+		if len(replicas) == 0 {
+			return fmt.Errorf("no nodes in ring")
+		}
+		primary := replicas[0]
+		batches[primary] = append(batches[primary], v)
+	}
+
+	// Process batches
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(batches))
+
+	for primaryID, batch := range batches {
+		if primaryID == n.ID {
+			// Local batch processing (we are primary)
+			wg.Add(1)
+			go func(vecs []*pb.Vector) {
+				defer wg.Done()
+				if err := n.processLocalBatch(vecs); err != nil {
+					errChan <- err
+				}
+			}(batch)
+		} else {
+			// Forward batch to primary
+			wg.Add(1)
+			go func(targetID string, vecs []*pb.Vector) {
+				defer wg.Done()
+				if err := n.forwardBatchPut(targetID, vecs); err != nil {
+					errChan <- err
+				}
+			}(primaryID, batch)
+		}
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	// Return first error if any
+	for err := range errChan {
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// processLocalBatch handles a batch where we are the primary
+func (n *Node) processLocalBatch(vectors []*pb.Vector) error {
+	// For simplicity in this iteration, we'll just insert locally and not replicate properly in batch
+	// (Replication would require grouping by replica sets which is complex)
+	// TODO: Implement proper batch replication
+
+	// Convert to internal vectors
+	internalVectors := make([]*index.Vector, len(vectors))
+	for i, v := range vectors {
+		// Convert metadata
+		var metadata map[string]interface{}
+		if v.Metadata != nil {
+			metadata = make(map[string]interface{}, len(v.Metadata))
+			for k, val := range v.Metadata {
+				metadata[k] = val
+			}
+		}
+
+		internalVectors[i] = &index.Vector{
+			ID:       v.Id,
+			Data:     v.Data,
+			Metadata: metadata,
+		}
+	}
+
+	// Insert into local store (WAL + Index)
+	return n.Store.BatchInsert(internalVectors)
+}
+
+// forwardBatchPut forwards a batch put request to another node
+func (n *Node) forwardBatchPut(targetNodeID string, vectors []*pb.Vector) error {
+	n.mu.RLock()
+	conn, ok := n.PeerConns[targetNodeID]
+	n.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("no connection to node %s", targetNodeID)
+	}
+
+	client := pb.NewVectorServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := client.BatchPut(ctx, &pb.BatchPutRequest{
+		Vectors: vectors,
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("remote batch put failed: %s", resp.Error)
+	}
 	return nil
 }
 

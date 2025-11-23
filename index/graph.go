@@ -179,8 +179,19 @@ func (g *HNSWGraph) InsertBatch(vectors []*Vector) error {
 // insertBatchOptimized uses a simplified strategy for large batches
 func (g *HNSWGraph) insertBatchOptimized(vectors []*Vector) error {
 	// Reduce EfConstruction for batch operations to speed up insertion
+	// BUT only if dimension is small. For high dimensions, we need accuracy.
 	originalEf := g.config.EfConstruction
-	g.config.EfConstruction = minInt(g.config.EfConstruction/2, 50) // Reduce search effort
+
+	// Dynamic tuning based on dimension
+	if g.config.Dimension < 1024 {
+		g.config.EfConstruction = minInt(g.config.EfConstruction/2, 50)
+	} else if g.config.Dimension >= 2048 {
+		// Aggressive boost for high recall (User Request)
+		// Trade insertion speed for graph quality
+		if g.config.EfConstruction < 800 {
+			g.config.EfConstruction = 800
+		}
+	}
 	defer func() { g.config.EfConstruction = originalEf }()
 
 	for _, vector := range vectors {
@@ -216,8 +227,24 @@ func (g *HNSWGraph) insertBatchOptimized(vectors []*Vector) error {
 		PutSearchContext(ctx)
 
 		// Use reduced M for faster connection establishment
-		m := minInt(g.config.M/2, 8) // Fewer connections for batch operations
-		selectedNeighbors := g.selectNeighborsFast(vector.Data, candidates, m)
+		// Again, be careful with high dimensions
+		m := g.config.M
+		if g.config.Dimension < 1024 {
+			m = minInt(g.config.M/2, 8)
+		} else {
+			// High M for better connectivity and recall
+			if m > 64 {
+				m = 64
+			}
+		}
+
+		var selectedNeighbors []*HNSWNode
+		// Use heuristic selection for high dimensions to improve quality
+		if g.config.Dimension >= 2048 {
+			selectedNeighbors = g.selectNeighbors(vector.Data, candidates, m)
+		} else {
+			selectedNeighbors = g.selectNeighborsFast(vector.Data, candidates, m)
+		}
 
 		// Add bidirectional connections only at base layer
 		for _, neighbor := range selectedNeighbors {
@@ -470,7 +497,7 @@ func (g *HNSWGraph) getOptimalNeighborLimit(connectionCount int) int {
 	}
 }
 
-// selectNeighbors selects the best neighbors using a simple heuristic
+// selectNeighbors selects the best neighbors using the HNSW heuristic (Robust Pruning)
 func (g *HNSWGraph) selectNeighbors(query []float32, candidates []*HNSWNode, m int) []*HNSWNode {
 	if len(candidates) <= m {
 		return candidates
@@ -505,10 +532,56 @@ func (g *HNSWGraph) selectNeighbors(query []float32, candidates []*HNSWNode, m i
 		}
 	}
 
-	// Select top m candidates
+	// Heuristic: Select neighbors that are closer to the query than to any already selected neighbor
 	result := make([]*HNSWNode, 0, m)
-	for i := 0; i < m && i < len(candidateList); i++ {
-		result = append(result, candidateList[i].node)
+
+	// Always add the closest one
+	if len(candidateList) > 0 {
+		result = append(result, candidateList[0].node)
+	}
+
+	for i := 1; i < len(candidateList) && len(result) < m; i++ {
+		cand := candidateList[i]
+		good := true
+
+		for _, resNode := range result {
+			distToRes, err := g.distanceFunc(cand.node.Vector.Data, resNode.Vector.Data)
+			if err != nil {
+				continue
+			}
+
+			// If candidate is closer to an existing neighbor than to the query, skip it
+			// This enforces diversity in the graph
+			if distToRes < cand.distance {
+				good = false
+				break
+			}
+		}
+
+		if good {
+			result = append(result, cand.node)
+		}
+	}
+
+	// If we still haven't filled m, fill with the remaining closest candidates
+	// This ensures we maintain connectivity even if the heuristic is too strict
+	if len(result) < m {
+		for i := 1; i < len(candidateList) && len(result) < m; i++ {
+			cand := candidateList[i]
+
+			// Check if already added
+			alreadyAdded := false
+			for _, r := range result {
+				if r == cand.node {
+					alreadyAdded = true
+					break
+				}
+			}
+
+			if !alreadyAdded {
+				result = append(result, cand.node)
+			}
+		}
 	}
 
 	return result
@@ -629,6 +702,12 @@ func (g *HNSWGraph) Search(query []float32, k int, filter FilterFunc) ([]*Search
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
+	defer func() {
+		if r := recover(); r != nil {
+			println("Recovered from panic in Search:", r)
+		}
+	}()
+
 	if g.entryPoint == nil {
 		return []*SearchResult{}, nil
 	}
@@ -645,13 +724,19 @@ func (g *HNSWGraph) Search(query []float32, k int, filter FilterFunc) ([]*Search
 	// Search at the base layer (layer 0)
 	// Use optimized ef for search, not construction ef
 	ef := k * 4
-	if ef < 100 {
+	if g.config.Dimension >= 2048 {
+		ef = k * 20 // Much higher ef for high recall
+		if ef < 400 {
+			ef = 400
+		}
+	} else if ef < 100 {
 		ef = 100
 	}
+
 	candidates := g.searchLayer(query, entryPoints, ef, 0, ctx)
 
 	// Collect results
-	results := make([]*SearchResult, 0, k)
+	results := make([]*SearchResult, 0, len(candidates))
 	for _, node := range candidates {
 		if filter != nil && !filter(node.Vector.Metadata) {
 			continue

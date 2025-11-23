@@ -62,6 +62,31 @@ func (s *Store) Insert(id string, vector []float32) error {
 	return s.Index.Add(vec)
 }
 
+// BatchInsert adds multiple vectors to the store
+func (s *Store) BatchInsert(vectors []*index.Vector) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 1. Prepare WAL entries
+	entries := make([][]byte, len(vectors))
+	for i, v := range vectors {
+		data := VectorData{ID: v.ID, Vector: v.Data}
+		bytes, err := json.Marshal(data)
+		if err != nil {
+			return err
+		}
+		entries[i] = bytes
+	}
+
+	// 2. Write to WAL in batch
+	if err := s.wal.BatchWriteEntry(RecordTypeInsert, entries); err != nil {
+		return err
+	}
+
+	// 3. Update Index
+	return s.Index.AddBatch(vectors)
+}
+
 // Delete removes a vector from the store
 func (s *Store) Delete(id string) error {
 	s.mu.Lock()

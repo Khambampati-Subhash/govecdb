@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	VectorService_Put_FullMethodName    = "/vecdb.VectorService/Put"
-	VectorService_Get_FullMethodName    = "/vecdb.VectorService/Get"
-	VectorService_Search_FullMethodName = "/vecdb.VectorService/Search"
+	VectorService_Put_FullMethodName      = "/vecdb.VectorService/Put"
+	VectorService_BatchPut_FullMethodName = "/vecdb.VectorService/BatchPut"
+	VectorService_Get_FullMethodName      = "/vecdb.VectorService/Get"
+	VectorService_Search_FullMethodName   = "/vecdb.VectorService/Search"
 )
 
 // VectorServiceClient is the client API for VectorService service.
@@ -30,6 +31,7 @@ const (
 type VectorServiceClient interface {
 	// Put inserts a vector into the database
 	Put(ctx context.Context, in *PutRequest, opts ...grpc.CallOption) (*PutResponse, error)
+	BatchPut(ctx context.Context, in *BatchPutRequest, opts ...grpc.CallOption) (*BatchPutResponse, error)
 	// Get retrieves a vector by ID
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
 	// Search finds the nearest neighbors for a given vector
@@ -48,6 +50,16 @@ func (c *vectorServiceClient) Put(ctx context.Context, in *PutRequest, opts ...g
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PutResponse)
 	err := c.cc.Invoke(ctx, VectorService_Put_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vectorServiceClient) BatchPut(ctx context.Context, in *BatchPutRequest, opts ...grpc.CallOption) (*BatchPutResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BatchPutResponse)
+	err := c.cc.Invoke(ctx, VectorService_BatchPut_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -80,6 +92,7 @@ func (c *vectorServiceClient) Search(ctx context.Context, in *SearchRequest, opt
 type VectorServiceServer interface {
 	// Put inserts a vector into the database
 	Put(context.Context, *PutRequest) (*PutResponse, error)
+	BatchPut(context.Context, *BatchPutRequest) (*BatchPutResponse, error)
 	// Get retrieves a vector by ID
 	Get(context.Context, *GetRequest) (*GetResponse, error)
 	// Search finds the nearest neighbors for a given vector
@@ -96,6 +109,9 @@ type UnimplementedVectorServiceServer struct{}
 
 func (UnimplementedVectorServiceServer) Put(context.Context, *PutRequest) (*PutResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Put not implemented")
+}
+func (UnimplementedVectorServiceServer) BatchPut(context.Context, *BatchPutRequest) (*BatchPutResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BatchPut not implemented")
 }
 func (UnimplementedVectorServiceServer) Get(context.Context, *GetRequest) (*GetResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Get not implemented")
@@ -138,6 +154,24 @@ func _VectorService_Put_Handler(srv interface{}, ctx context.Context, dec func(i
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(VectorServiceServer).Put(ctx, req.(*PutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VectorService_BatchPut_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BatchPutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VectorServiceServer).BatchPut(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VectorService_BatchPut_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VectorServiceServer).BatchPut(ctx, req.(*BatchPutRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -188,6 +222,10 @@ var VectorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Put",
 			Handler:    _VectorService_Put_Handler,
+		},
+		{
+			MethodName: "BatchPut",
+			Handler:    _VectorService_BatchPut_Handler,
 		},
 		{
 			MethodName: "Get",

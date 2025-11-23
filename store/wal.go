@@ -66,7 +66,35 @@ func (w *WAL) WriteEntry(typ RecordType, data []byte) error {
 		return err
 	}
 
-	// Flush if needed (or let OS handle it for speed)
+	return nil
+}
+
+// BatchWriteEntry writes multiple entries to the WAL with a single lock
+func (w *WAL) BatchWriteEntry(typ RecordType, entries [][]byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	for _, data := range entries {
+		// Calculate CRC
+		crc := crc32.ChecksumIEEE(data)
+
+		// Write Header
+		header := make([]byte, 9)
+		binary.LittleEndian.PutUint32(header[0:4], crc)
+		header[4] = byte(typ)
+		binary.LittleEndian.PutUint32(header[5:9], uint32(len(data)))
+
+		if _, err := w.writer.Write(header); err != nil {
+			return err
+		}
+
+		// Write Data
+		if _, err := w.writer.Write(data); err != nil {
+			return err
+		}
+	}
+
+	// Flush if needed
 	if w.sync {
 		if err := w.writer.Flush(); err != nil {
 			return err

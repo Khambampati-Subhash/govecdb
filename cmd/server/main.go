@@ -25,6 +25,7 @@ var (
 	dim       = flag.Int("dim", 128, "Vector dimension")
 )
 
+// Get handles get requests
 type VectorRequest struct {
 	ID     string    `json:"id"`
 	Vector []float32 `json:"vector"`
