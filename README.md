@@ -15,6 +15,79 @@ A high-performance, distributed vector database written in pure Go for productio
 - **Distributed** - Clustering with consistent hashing and Raft consensus
 - **Smart Filtering** - Complex metadata queries with vector search
 
+## What Is GoVecDB & Why It Exists
+
+AI models turn text, images, and audio into **embeddings** — lists of numbers where
+*things that mean similar things sit close together* in number-space. That reframes
+"find me content similar to this" into a geometry problem: **find the stored vectors
+nearest to my query vector** (nearest-neighbor search).
+
+The naive approach — compare the query against *every* stored vector — is `O(N)` and
+collapses at millions of vectors. **GoVecDB's purpose is to make that search fast,
+durable, and scalable**, in pure Go with no CGO so it stays embeddable:
+
+> Store millions of embeddings and answer *"what's most similar to this?"* in
+> sub-millisecond time, survive crashes, and scale across machines.
+
+This powers **semantic search**, **RAG** for LLMs, **recommendations**, and
+**anomaly detection**.
+
+## How It Works
+
+### The core trick: HNSW (skip brute force)
+
+Instead of scanning every vector, GoVecDB builds a **hierarchical graph** (HNSW —
+Hierarchical Navigable Small World). Think of finding a house in a country: you don't
+knock on every door — you take highways to the right region, then regional roads, then
+local streets. HNSW searches the same way, turning `O(N)` into roughly `O(log N)`.
+
+```mermaid
+flowchart TB
+    Q([Query vector]) --> TOP
+
+    subgraph TOP [Layer 2 · few nodes · long jumps]
+        direction LR
+        n1(( )) --- n2(( )) --- n3(( ))
+    end
+    subgraph MID [Layer 1 · more nodes · medium hops]
+        direction LR
+        m1(( )) --- m2(( )) --- m3(( )) --- m4(( ))
+    end
+    subgraph BOT [Layer 0 · every vector · short hops]
+        direction LR
+        b1(( )) --- b2(( )) --- b3(( )) --- b4(( )) --- b5(( ))
+    end
+
+    TOP -->|zoom into region| MID
+    MID -->|refine| BOT
+    BOT --> R([Nearest K results])
+```
+
+A search **enters at the sparse top layer, takes big jumps toward the right region,
+then drops layer by layer taking smaller steps** until it lands among the true nearest
+neighbors — visiting only a tiny fraction of all vectors. Two knobs trade speed for
+accuracy: `M` (connections per node) and `EfConstruction`/`ef` (how wide the search
+explores).
+
+### The layers that make it production-grade
+
+Each layer of the system solves one part of the problem:
+
+| Layer | Package | What it achieves |
+|-------|---------|------------------|
+| **Contract** | `api` | Interfaces & types (`Vector`, `SearchRequest`, `VectorIndex`, `VectorStore`) — everything below is swappable behind them |
+| **Orchestration** | `collection` | `VectorCollection` ties the index, storage, and filtering together with thread-safe lifecycle management |
+| **Speed** | `index` | HNSW graph — the approximate nearest-neighbor engine |
+| **Data** | `store` | Holds the actual vectors + metadata in memory |
+| **Durability** | `persist` | Write-Ahead Log (WAL) + snapshots so a crash doesn't lose data |
+| **Precision** | `filter` | Metadata queries combined with vector search (*similar* **AND** `category = tech`) |
+| **Scale** | `cluster` | Spreads data across nodes via consistent hashing + Raft consensus |
+
+**Distance metrics** (`Cosine`, `Euclidean`, `DotProduct`, `Manhattan`) define what
+"near" means and are selected per collection. A typical write flow is
+`Add → store the vector → insert into the HNSW graph → append to the WAL`; a read is
+`Search → HNSW descent → optional metadata filter → top-K results`.
+
 ## Quick Start
 
 ### Installation
@@ -29,25 +102,34 @@ go get github.com/khambampati-subhash/govecdb
 package main
 
 import (
+    "context"
     "log"
+
     "github.com/khambampati-subhash/govecdb/api"
     "github.com/khambampati-subhash/govecdb/collection"
+    "github.com/khambampati-subhash/govecdb/store"
 )
 
 func main() {
+    ctx := context.Background()
+
     // Create collection
     config := &api.CollectionConfig{
-        Name:      "documents",
-        Dimension: 384,
-        Metric:    api.Cosine,
+        Name:           "documents",
+        Dimension:      384,
+        Metric:         api.Cosine,
+        M:              16,
+        EfConstruction: 200,
+        MaxLayer:       16,
+        ThreadSafe:     true,
     }
-    
-    coll, err := collection.NewPersistentCollection(config, "./data")
+
+    coll, err := collection.NewVectorCollection(config, store.DefaultStoreConfig(config.Name))
     if err != nil {
         log.Fatal(err)
     }
     defer coll.Close()
-    
+
     // Add vectors
     vectors := []*api.Vector{
         {
@@ -59,23 +141,23 @@ func main() {
             },
         },
     }
-    
-    if err := coll.AddBatch(vectors); err != nil {
+
+    if err := coll.AddBatch(ctx, vectors); err != nil {
         log.Fatal(err)
     }
-    
+
     // Search
     query := make([]float32, 384) // Your query embedding
-    results, err := coll.Search(&api.SearchRequest{
+    results, err := coll.Search(ctx, &api.SearchRequest{
         Vector: query,
         K:      10,
     })
     if err != nil {
         log.Fatal(err)
     }
-    
+
     for _, result := range results {
-        log.Printf("ID: %s, Score: %.4f\n", result.ID, result.Score)
+        log.Printf("ID: %s, Score: %.4f\n", result.Vector.ID, result.Score)
     }
 }
 ```
@@ -85,22 +167,22 @@ func main() {
 ```go
 // Search with metadata filters
 filter := &api.LogicalFilter{
-    Operator: api.And,
-    Filters: []api.Filter{
+    Op: api.FilterAnd,
+    Filters: []api.FilterExpr{
         &api.FieldFilter{
-            Field:    "category",
-            Operator: api.Equals,
-            Value:    "technology",
+            Field: "category",
+            Op:    api.FilterEq,
+            Value: "technology",
         },
         &api.FieldFilter{
-            Field:    "tags",
-            Operator: api.In,
-            Value:    []string{"ai", "machine-learning"},
+            Field: "tags",
+            Op:    api.FilterIn,
+            Value: []interface{}{"ai", "machine-learning"},
         },
     },
 }
 
-results, err := coll.Search(&api.SearchRequest{
+results, err := coll.Search(ctx, &api.SearchRequest{
     Vector: query,
     K:      10,
     Filter: filter,
@@ -147,7 +229,7 @@ results, err := coordinator.Search(request)
 *Note: Search QPS measured with concurrency=1.*
 
 **Highlights**:
-- **SIMD Acceleration**: Hand-written Assembly (AVX2 for AMD64, NEON for ARM64) for DotProduct, Euclidean, and Cosine distance.
+- **Vectorized Distance Kernels**: Pure-Go distance functions (DotProduct, Euclidean, Cosine) with manual loop unrolling to help the Go compiler auto-vectorize the hot paths — no CGO or hand-written assembly.
 - **Zero-Allocation Search**: Optimized hot paths to minimize GC pressure.
 - **High Throughput**: Up to **60,000 QPS** on a single node for low-dimensional vectors.
 - **Data Integrity**: Verified 100% data integrity and recall for exact matches even at 4096 dimensions.
@@ -189,21 +271,25 @@ config := &api.CollectionConfig{
     Name:      "my-collection",
     Dimension: 384,
     Metric:    api.Cosine,
-    
-    // Index tuning
-    IndexConfig: &index.Config{
-        M:              16,   // Connections per node
-        EfConstruction: 200,  // Construction search depth
-        MaxLayer:       16,   // Maximum layers
-    },
-    
-    // Persistence
-    PersistenceConfig: &collection.PersistenceConfig{
-        EnableWAL:        true,
-        SyncInterval:     5 * time.Second,
-        SnapshotInterval: time.Hour,
-    },
+
+    // HNSW index tuning (flat fields on CollectionConfig)
+    M:              16,  // Connections per node
+    EfConstruction: 200, // Construction search depth
+    MaxLayer:       16,  // Maximum layers
+    Seed:           42,  // Deterministic layer assignment
+    ThreadSafe:     true,
 }
+
+// For durable, crash-safe storage (WAL + snapshots), use the persistent
+// collection instead, which wraps the above config with storage paths:
+//
+//   pcfg := &collection.PersistentCollectionConfig{
+//       CollectionConfig: config,
+//       DataDir:          "./data",
+//       WALDir:           "./data/wal",
+//       SnapshotDir:      "./data/snapshots",
+//   }
+//   coll, err := collection.NewPersistentVectorCollection(pcfg)
 ```
 
 ### Cluster Configuration
