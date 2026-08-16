@@ -86,6 +86,110 @@ func TestExactMatchFound(t *testing.T) {
 	}
 }
 
+// TestNormalizationPreservesRanking checks that unit-normalizing on insert (the
+// optimization that lets cosine collapse to a dot product) does not change the
+// ranking a general cosine implementation would produce.
+func TestNormalizationPreservesRanking(t *testing.T) {
+	rng := rand.New(rand.NewSource(99))
+	const dim = 64
+	g, _ := New(DefaultConfig(dim, Cosine))
+
+	data := make(map[string][]float32, 300)
+	for i := range 300 {
+		v := randomVector(rng, dim)
+		// Deliberately vary magnitude: cosine must ignore length entirely.
+		scale := 1 + float32(i%7)
+		for j := range v {
+			v[j] *= scale
+		}
+		id := fmt.Sprintf("v%d", i)
+		data[id] = v
+		if err := g.Insert(id, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	query := randomVector(rng, dim)
+	got, err := g.Search(query, 5, 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bruteForceNearest(data, CosineDistance, query, 5)
+
+	for i := range want {
+		if got[i].ID != want[i] {
+			t.Fatalf("rank %d: got %s, want %s (normalization changed ordering)", i, got[i].ID, want[i])
+		}
+	}
+}
+
+// TestInsertDoesNotAliasCaller guards the copy-on-insert behaviour: mutating the
+// slice you passed in must not corrupt the graph.
+func TestInsertDoesNotAliasCaller(t *testing.T) {
+	g, _ := New(DefaultConfig(4, Euclidean))
+	v := []float32{1, 0, 0, 0}
+	if err := g.Insert("a", v); err != nil {
+		t.Fatal(err)
+	}
+	for i := range v { // caller reuses their buffer
+		v[i] = 999
+	}
+	res, err := g.Search([]float32{1, 0, 0, 0}, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].Distance > 1e-6 {
+		t.Fatalf("graph aliased caller's slice: %+v", res)
+	}
+}
+
+// TestRecallHighDimension exercises an embedding-sized vector, where the old
+// implementation's recall collapsed.
+func TestRecallHighDimension(t *testing.T) {
+	const (
+		n   = 1500
+		dim = 768
+		k   = 10
+		ef  = 128
+	)
+	rng := rand.New(rand.NewSource(21))
+	cfg := DefaultConfig(dim, Cosine)
+	g, _ := New(cfg)
+
+	data := make(map[string][]float32, n)
+	for i := range n {
+		v := randomVector(rng, dim)
+		id := fmt.Sprintf("v%d", i)
+		data[id] = v
+		if err := g.Insert(id, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var hits, total int
+	for range 50 {
+		query := randomVector(rng, dim)
+		got, _ := g.Search(query, k, ef)
+		want := bruteForceNearest(data, CosineDistance, query, k)
+		wantSet := make(map[string]struct{}, len(want))
+		for _, id := range want {
+			wantSet[id] = struct{}{}
+		}
+		for _, r := range got {
+			if _, ok := wantSet[r.ID]; ok {
+				hits++
+			}
+		}
+		total += len(want)
+	}
+
+	recall := float64(hits) / float64(total)
+	t.Logf("recall@%d at dim=%d: %.3f", k, dim, recall)
+	if recall < 0.90 {
+		t.Fatalf("high-dimension recall too low: %.3f", recall)
+	}
+}
+
 func TestRecallVsBruteForce(t *testing.T) {
 	const (
 		n   = 2000

@@ -1,10 +1,10 @@
 package hnsw
 
 import (
-	"container/heap"
 	"errors"
 	"math"
 	"math/rand"
+	"slices"
 	"sort"
 )
 
@@ -30,6 +30,17 @@ type Config struct {
 	// EfConstruction is how wide the search is during inserts. Higher = better
 	// graph quality, slower inserts.
 	EfConstruction int
+	// Alpha is the pruning relaxation factor from the DiskANN/Vamana line of
+	// work. When selecting neighbors we drop a candidate that sits closer to an
+	// already-chosen neighbor than to the node itself — that edge is redundant,
+	// you could reach it by hopping. Alpha scales that test:
+	//
+	//	1.0  classic HNSW heuristic
+	//	>1.0 prunes harder, keeping more long-range "shortcut" edges, which
+	//	     makes the graph more navigable and measurably lifts recall.
+	//
+	// 1.0-1.4 is the useful band; DefaultConfig uses 1.2.
+	Alpha float32
 	// Seed makes level assignment (and therefore the graph) reproducible.
 	Seed int64
 }
@@ -41,6 +52,7 @@ func DefaultConfig(dimension int, metric Metric) Config {
 		Metric:         metric,
 		M:              16,
 		EfConstruction: 200,
+		Alpha:          1.2,
 		Seed:           1,
 	}
 }
@@ -60,12 +72,24 @@ type Graph struct {
 	mMax  int     // max neighbors on layers > 0
 	mMax0 int     // max neighbors on layer 0 (denser)
 	ml    float64 // level-generation normalization factor = 1 / ln(M)
+	alpha float32
 	rng   *rand.Rand
+
+	// normalized records that stored vectors are unit length, which lets the
+	// cosine kernel collapse to a plain dot product.
+	normalized bool
 
 	nodes    []*node
 	ids      map[string]int // external id -> index into nodes
 	entry    int            // index of the entry point, -1 when empty
 	maxLevel int
+
+	// Scratch state reused across searches so the hot path allocates nothing.
+	visited      visitedList
+	scratchCands []candidate
+	scratchRes   []candidate
+	scratchSel   []candidate
+	queryBuf     []float32
 }
 
 // New creates an empty graph. No memory is spent on the graph itself until the
@@ -80,16 +104,22 @@ func New(cfg Config) (*Graph, error) {
 	if cfg.EfConstruction <= 0 {
 		cfg.EfConstruction = 200
 	}
+	if cfg.Alpha <= 0 {
+		cfg.Alpha = 1
+	}
+	normalized := cfg.Metric.normalizes()
 	return &Graph{
-		cfg:      cfg,
-		dist:     cfg.Metric.Func(),
-		mMax:     cfg.M,
-		mMax0:    cfg.M * 2,
-		ml:       1.0 / math.Log(float64(cfg.M)),
-		rng:      rand.New(rand.NewSource(cfg.Seed)),
-		ids:      make(map[string]int),
-		entry:    -1,
-		maxLevel: 0,
+		cfg:        cfg,
+		dist:       cfg.Metric.fastFunc(normalized),
+		mMax:       cfg.M,
+		mMax0:      cfg.M * 2,
+		ml:         1.0 / math.Log(float64(cfg.M)),
+		alpha:      cfg.Alpha,
+		rng:        rand.New(rand.NewSource(cfg.Seed)),
+		normalized: normalized,
+		ids:        make(map[string]int),
+		entry:      -1,
+		maxLevel:   0,
 	}, nil
 }
 
@@ -100,6 +130,18 @@ func (g *Graph) Len() int { return len(g.nodes) }
 // distribution: most nodes land on layer 0, a few reach higher layers.
 func (g *Graph) randomLevel() int {
 	return int(-math.Log(g.rng.Float64()) * g.ml)
+}
+
+// prepare returns a graph-owned copy of v, normalized when the metric wants it.
+// Copying matters for correctness as well as normalization: without it the
+// graph would alias the caller's slice and silently corrupt if they reused it.
+func (g *Graph) prepare(v []float32) []float32 {
+	out := make([]float32, len(v))
+	copy(out, v)
+	if g.normalized {
+		Normalize(out)
+	}
+	return out
 }
 
 // Insert adds (or is a no-op for a duplicate id of) a vector into the graph.
@@ -114,8 +156,9 @@ func (g *Graph) Insert(id string, vector []float32) error {
 		return nil // v1: ignore duplicates; update semantics come later
 	}
 
+	vec := g.prepare(vector)
 	level := g.randomLevel()
-	n := newNode(id, vector, level)
+	n := newNode(id, vec, level)
 	idx := len(g.nodes)
 	g.nodes = append(g.nodes, n)
 	g.ids[id] = idx
@@ -131,13 +174,13 @@ func (g *Graph) Insert(id string, vector []float32) error {
 	// find a good entry point near the new node.
 	cur := g.entry
 	for lc := g.maxLevel; lc > level; lc-- {
-		cur = g.greedyClosest(cur, vector, lc)
+		cur = g.greedyClosest(cur, vec, lc)
 	}
 
 	// Phase 2: from min(maxLevel, level) down to 0, find neighbors and connect.
 	start := min(level, g.maxLevel)
 	for lc := start; lc >= 0; lc-- {
-		w := g.searchLayer(vector, []int{cur}, g.cfg.EfConstruction, lc)
+		w := g.searchLayer(vec, cur, g.cfg.EfConstruction, lc)
 		neighbors := g.selectNeighbors(w, g.maxConn(lc))
 		for _, nb := range neighbors {
 			g.connect(idx, nb, lc)
@@ -170,14 +213,22 @@ func (g *Graph) Search(query []float32, k, ef int) ([]Result, error) {
 		ef = k
 	}
 
+	// Normalize into a reusable buffer rather than touching the caller's slice.
+	q := query
+	if g.normalized {
+		g.queryBuf = append(g.queryBuf[:0], query...)
+		Normalize(g.queryBuf)
+		q = g.queryBuf
+	}
+
 	// Descend the upper layers greedily to reach the right region.
 	cur := g.entry
 	for lc := g.maxLevel; lc > 0; lc-- {
-		cur = g.greedyClosest(cur, query, lc)
+		cur = g.greedyClosest(cur, q, lc)
 	}
 
 	// Do the wide search on layer 0.
-	w := g.searchLayer(query, []int{cur}, ef, 0)
+	w := g.searchLayer(q, cur, ef, 0)
 
 	// w is sorted ascending by distance; take the top k.
 	if len(w) > k {
@@ -211,78 +262,127 @@ func (g *Graph) greedyClosest(start int, target []float32, lc int) int {
 
 // searchLayer runs the core best-first search on a single layer, returning up
 // to ef closest nodes to query, sorted ascending by distance.
-func (g *Graph) searchLayer(query []float32, entryPoints []int, ef, lc int) []candidate {
-	visited := make(map[int]struct{}, ef*2)
-	cands := &minHeap{} // frontier: explore closest first
-	results := &maxHeap{} // best-so-far: drop farthest when over ef
+func (g *Graph) searchLayer(query []float32, entryPoint, ef, lc int) []candidate {
+	g.visited.reset(len(g.nodes))
 
-	for _, ep := range entryPoints {
-		d := g.dist(g.nodes[ep].vector, query)
-		visited[ep] = struct{}{}
-		heap.Push(cands, candidate{ep, d})
-		heap.Push(results, candidate{ep, d})
-	}
+	// Reuse the heap backing arrays; only the result slice is freshly allocated
+	// because the caller keeps it.
+	cands := g.scratchCands[:0]
+	results := g.scratchRes[:0]
 
-	for cands.Len() > 0 {
-		c := heap.Pop(cands).(candidate)
-		// If the closest frontier node is farther than our worst result, stop.
-		if results.Len() >= ef && c.dist > (*results)[0].dist {
+	d := g.dist(g.nodes[entryPoint].vector, query)
+	g.visited.visit(entryPoint)
+	cands = append(cands, candidate{entryPoint, d})
+	results = append(results, candidate{entryPoint, d})
+
+	var c candidate
+	for len(cands) > 0 {
+		c, cands = minPop(cands)
+		// If the closest frontier node is farther than our worst result, every
+		// remaining candidate is worse too — stop.
+		if len(results) >= ef && c.dist > results[0].dist {
 			break
 		}
 		for _, nb := range g.neighborsAt(c.idx, lc) {
-			if _, seen := visited[nb]; seen {
+			if g.visited.visit(nb) {
 				continue
 			}
-			visited[nb] = struct{}{}
-			d := g.dist(g.nodes[nb].vector, query)
-			if results.Len() < ef || d < (*results)[0].dist {
-				heap.Push(cands, candidate{nb, d})
-				heap.Push(results, candidate{nb, d})
-				if results.Len() > ef {
-					heap.Pop(results) // drop the farthest
+			nd := g.dist(g.nodes[nb].vector, query)
+			if len(results) < ef || nd < results[0].dist {
+				cands = minPush(cands, candidate{nb, nd})
+				results = maxPush(results, candidate{nb, nd})
+				if len(results) > ef {
+					_, results = maxPop(results) // drop the farthest
 				}
 			}
 		}
 	}
 
-	out := make([]candidate, results.Len())
+	out := make([]candidate, len(results))
 	for i := len(out) - 1; i >= 0; i-- {
-		out[i] = heap.Pop(results).(candidate) // pops farthest-first -> fill from end
+		out[i], results = maxPop(results) // farthest first -> fill from end
 	}
+
+	g.scratchCands, g.scratchRes = cands, results
 	return out // ascending by distance
 }
 
-// selectNeighbors keeps the m closest candidates. This is the simple heuristic;
-// the fancier "keep diverse neighbors" variant is a later optimization.
+// selectNeighbors picks up to m edges for base out of cands (ascending by
+// distance to base), using the alpha-relaxed diversity heuristic.
+//
+// Taking simply the m closest produces clustered edges that all point the same
+// way, which strands the search in local minima. Instead we skip a candidate c
+// when it already sits closer to a chosen neighbor s than it does to base —
+// c is reachable via s, so that edge buys nothing. Alpha > 1 tightens the test,
+// preserving more long-range links and making the graph easier to navigate.
+// cands carry their distance to base already, so base itself is not needed.
 func (g *Graph) selectNeighbors(cands []candidate, m int) []int {
-	if len(cands) > m {
-		cands = cands[:m]
+	if len(cands) <= m {
+		out := make([]int, len(cands))
+		for i, c := range cands {
+			out[i] = c.idx
+		}
+		return out
 	}
-	out := make([]int, len(cands))
-	for i, c := range cands {
-		out[i] = c.idx
+
+	selected := make([]int, 0, m)
+	rejected := g.scratchSel[:0]
+
+	for _, c := range cands {
+		if len(selected) >= m {
+			break
+		}
+		keep := true
+		for _, s := range selected {
+			if g.alpha*g.dist(g.nodes[c.idx].vector, g.nodes[s].vector) <= c.dist {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			selected = append(selected, c.idx)
+		} else {
+			rejected = append(rejected, c)
+		}
 	}
-	return out
+
+	// Backfill with the closest rejects rather than returning a thin list: a
+	// node with too few edges is a dead end during search.
+	for i := 0; len(selected) < m && i < len(rejected); i++ {
+		selected = append(selected, rejected[i].idx)
+	}
+
+	g.scratchSel = rejected
+	return selected
 }
 
-// pruneConnections trims a node's neighbor list on layer lc back down to the
-// layer's max, keeping the closest ones.
+// pruneConnections trims a node's neighbor list on layer lc back to the layer
+// cap, applying the same diversity heuristic used when inserting.
 func (g *Graph) pruneConnections(idx, lc int) {
-	max := g.maxConn(lc)
+	maxConn := g.maxConn(lc)
 	nbrs := g.neighborsAt(idx, lc)
-	if len(nbrs) <= max {
+	if len(nbrs) <= maxConn {
 		return
 	}
+
+	// Compute each distance exactly once. Doing this inside a sort comparator
+	// instead would recompute them O(n log n) times.
 	self := g.nodes[idx].vector
-	sort.Slice(nbrs, func(i, j int) bool {
-		return g.dist(g.nodes[nbrs[i]].vector, self) < g.dist(g.nodes[nbrs[j]].vector, self)
-	})
-	g.nodes[idx].neighbors[lc] = nbrs[:max]
+	cands := make([]candidate, len(nbrs))
+	for i, nb := range nbrs {
+		cands[i] = candidate{nb, g.dist(g.nodes[nb].vector, self)}
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].dist < cands[j].dist })
+
+	g.nodes[idx].neighbors[lc] = g.selectNeighbors(cands, maxConn)
 }
 
-// connect adds `to` to `from`'s neighbor list on layer lc (no dedup in v1).
+// connect adds `to` to `from`'s neighbor list on layer lc, skipping duplicates.
 func (g *Graph) connect(from, to, lc int) {
 	n := g.nodes[from]
+	if slices.Contains(n.neighbors[lc], to) {
+		return
+	}
 	n.neighbors[lc] = append(n.neighbors[lc], to)
 }
 

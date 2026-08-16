@@ -1,10 +1,9 @@
 # internal/hnsw
 
 A small, readable HNSW (Hierarchical Navigable Small World) index — the core of
-GoVecDB's approximate nearest-neighbor search. This is the v1 "learn it by
-building it" implementation: **single-threaded, no memory pools or SIMD,
-optimized for clarity over raw speed.** Optimizations arrive as later, separately
-scoped commits.
+GoVecDB's approximate nearest-neighbor search. Single-threaded in this v1 cut,
+written to be understood first and then made fast with changes that are each
+measured rather than assumed.
 
 ## Why HNSW
 
@@ -17,67 +16,106 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 
 | File | Responsibility |
 |------|----------------|
-| `distance.go` | `Metric` (Cosine / Euclidean / DotProduct). Every function returns **smaller = closer**, so the graph never branches on the metric. |
-| `node.go` | A single vector: `id`, `vector`, and per-layer neighbor lists. |
-| `pq.go` | Two heaps: a min-heap (explore closest first) and a max-heap (drop the farthest result when over `ef`). |
-| `graph.go` | The algorithm: `New`, `Insert`, `Search`, plus internals (`searchLayer`, `greedyClosest`, neighbor selection & pruning). |
-| `graph_test.go` | Empty-graph, validation, exact-match, and recall-vs-brute-force tests. |
+| `distance.go` | `Metric` (Cosine / Euclidean / DotProduct) + unrolled kernels. Everything returns **smaller = closer**, so the graph never branches on the metric. |
+| `node.go` | A single vector: `id`, `vector`, per-layer neighbor lists. |
+| `pq.go` | Hand-written min/max heaps over `[]candidate` — no `container/heap`, no interface boxing. |
+| `visited.go` | Generation-stamped visited set, reused across searches. |
+| `graph.go` | The algorithm: `New`, `Insert`, `Search`, plus `searchLayer`, `greedyClosest`, neighbor selection & pruning. |
+| `graph_test.go` | Correctness + recall-vs-brute-force at 32 and 768 dimensions. |
+| `bench_test.go` | Insert / search / distance benchmarks. |
 
-## The three knobs
+## The knobs
 
 | Knob | Where | Adaptable? |
 |------|-------|-----------|
 | `M` — neighbors per node (layers > 0; layer 0 uses `2*M`) | `Config`, set once | **No** — structural; changing it means rebuilding. |
-| `EfConstruction` — search width during inserts | `Config` | Kept fixed in practice. |
-| `ef` — search width at query time | `Search(query, k, ef)` | **Yes** — per query; auto-clamped to `>= k`. Bigger `ef` = better recall, slower. |
+| `EfConstruction` — search width during inserts | `Config` | Kept fixed (100–200). |
+| `Alpha` — pruning relaxation (see below) | `Config` | Fixed per graph; 1.0–1.4 useful, default 1.2. |
+| `ef` — search width at query time | `Search(query, k, ef)` | **Yes** — per query; auto-clamped to `>= k`. |
+
+## Design decisions that matter
+
+### 1. Normalize on insert, so cosine becomes a dot product
+Cosine similarity needs `dot(a,b) / (|a|·|b|)` — three accumulators and two
+square roots per comparison. Since only *direction* matters, we unit-normalize
+each vector once at insert time; from then on `|a| = |b| = 1` and cosine
+distance is just `1 - dot(a,b)`. **2.5× faster per comparison**, and the ranking
+is provably unchanged (`TestNormalizationPreservesRanking`).
+
+Only Cosine normalizes — doing it for Euclidean or DotProduct would silently
+change what those metrics mean.
+
+### 2. Alpha-pruned neighbor selection (DiskANN/Vamana), not "keep the M closest"
+Keeping simply the M nearest neighbors produces edges that all point into the
+same cluster, which strands searches in local minima. Instead a candidate `c` is
+dropped when it already sits closer to an already-chosen neighbor `s` than to the
+node itself — you could reach `c` by hopping through `s`, so that edge buys
+nothing.
+
+`Alpha` scales that test: `alpha * d(c,s) <= d(c,q)` rejects. `Alpha = 1.0` is
+the classic HNSW heuristic; `> 1.0` prunes harder and keeps more long-range
+shortcut edges, making the graph more navigable.
+
+### 3. Zero-allocation search path
+Two changes took search from **795 allocations to 2**:
+- The per-search `map[int]struct{}` visited set became a reusable array of
+  generation stamps — clearing is a counter bump, not an allocation.
+- `container/heap` passes values as `any`, boxing every candidate. The heaps here
+  operate on `[]candidate` directly.
+
+### 4. Unrolled distance kernels
+Four independent accumulators break the floating-point dependency chain so the
+CPU can overlap additions, and slices are re-sliced to a common length to hoist
+bounds checks. Euclidean went 74.5 ns → 26.6 ns.
+
+### 5. Copy on insert
+The graph stores its own copy of every vector. Beyond enabling normalization,
+this stops the graph from aliasing (and being corrupted by) a caller's reused
+buffer — see `TestInsertDoesNotAliasCaller`.
+
+## Measured results
+
+Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
+
+| | Before | After | Change |
+|---|---|---|---|
+| Search | 250,878 ns/op | 114,327 ns/op | **2.2× faster** |
+| Search allocations | 795 | 2 | **~400× fewer** |
+| Search bytes | 95,579 B/op | 1,264 B/op | **75× less** |
+| Insert allocations | 1,680 | 210 | **8× fewer** |
+| Cosine distance | 73.9 ns | 30.1 ns | **2.5× faster** |
+| Euclidean distance | 74.5 ns | 26.6 ns | **2.8× faster** |
+| Recall@10 (dim 32) | 0.994 | 0.999 | more accurate |
+| Recall@10 (dim 768) | — | 0.972 | — |
 
 ## Usage
 
 ```go
-g, _ := hnsw.New(hnsw.DefaultConfig(128, hnsw.Cosine)) // dim=128
+g, _ := hnsw.New(hnsw.DefaultConfig(128, hnsw.Cosine))
 _ = g.Insert("doc1", vec1)
-_ = g.Insert("doc2", vec2)
 
 results, _ := g.Search(query, 10 /*k*/, 64 /*ef*/)
 for _, r := range results {
-    fmt.Println(r.ID, r.Distance) // ascending distance; smaller = closer
+    fmt.Println(r.ID, r.Distance) // ascending; smaller = closer
 }
 ```
 
 ## Algorithm at a glance
 
-**Insert(id, vec):**
-1. Draw a random top level (exponential decay — most nodes land on layer 0).
-2. Greedily descend from the current entry point down to `level+1` (`ef=1`) to
-   reach a good starting region.
-3. From `min(maxLevel, level)` down to 0: `searchLayer` with `EfConstruction`,
-   select the closest `M`, connect both directions, prune neighbors back to the
-   layer cap.
-4. If the new node reached a higher level than any existing node, it becomes the
-   entry point.
+**Insert(id, vec):** copy+normalize → draw a random top level → greedily descend
+to `level+1` → for each layer down to 0, `searchLayer` with `EfConstruction`,
+alpha-select neighbors, connect both ways, prune → promote to entry point if it
+reached a new top level.
 
-**Search(query, k, ef):**
-1. Greedily descend the upper layers to the right region.
-2. One wide `searchLayer` on layer 0 with `ef`.
-3. Return the `k` closest, sorted ascending by distance.
-
-## How state maps to the concepts
-
-- **Empty graph = empty container.** `entry = -1`, zero nodes, no memory spent on
-  the graph until the first `Insert`.
-- **No thread-safety yet.** Callers serialize access; a concurrent version is a
-  later step.
+**Search(query, k, ef):** normalize query → greedily descend upper layers → one
+wide `searchLayer` on layer 0 → return the `k` closest.
 
 ## Not implemented yet (deliberately)
 
-Delete / update, persistence (WAL + snapshots), the diverse-neighbor selection
-heuristic, concurrency, and SIMD/pooling. Each is a separate upcoming slice — see
-`docs/MIGRATION.md`.
-
-## Test
+Delete / update, persistence (WAL + snapshots), concurrency, and SIMD assembly.
+Each is a separate upcoming slice — see `docs/MIGRATION.md`.
 
 ```bash
-go test ./internal/hnsw/ -v
+go test ./internal/hnsw/ -v                      # correctness + recall
+go test ./internal/hnsw/ -run='^$' -bench=. -benchmem
 ```
-
-Current recall@10 vs brute force on the test set: **~0.99**.
