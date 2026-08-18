@@ -16,11 +16,16 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 
 | File | Responsibility |
 |------|----------------|
-| `distance.go` | `Metric` (Cosine / Euclidean / DotProduct) + unrolled kernels. Everything returns **smaller = closer**, so the graph never branches on the metric. |
+| `doc.go` | Package overview and this file map. |
+| `config.go` | `Config` knobs, `DefaultConfig`, and the sentinel errors callers match on. |
+| `graph.go` | The `Graph` type: state, `New`, `Len`, and the shared helpers (`randomLevel`, `prepare`). |
+| `insert.go` | `Insert` — building the graph. |
+| `search.go` | `Result`, `Search`, and the primitives it rides on: `greedyClosest`, `searchLayer`. |
+| `neighbors.go` | Edge management: alpha-pruned `selectNeighbors`, `pruneConnections`, `connect`, adjacency lookups. |
 | `node.go` | A single vector: `id`, `vector`, per-layer neighbor lists. |
+| `distance.go` | `Metric` (Cosine / Euclidean / DotProduct) + unrolled kernels. Everything returns **smaller = closer**, so the graph never branches on the metric. |
 | `pq.go` | Hand-written min/max heaps over `[]candidate` — no `container/heap`, no interface boxing. |
 | `visited.go` | Generation-stamped visited set, reused across searches. |
-| `graph.go` | The algorithm: `New`, `Insert`, `Search`, plus `searchLayer`, `greedyClosest`, neighbor selection & pruning. |
 | `graph_test.go` | Correctness + recall-vs-brute-force at 32 and 768 dimensions. |
 | `bench_test.go` | Insert / search / distance benchmarks. |
 

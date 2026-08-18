@@ -1,8 +1,5 @@
-// Package hnsw is a small, readable implementation of the Hierarchical
-// Navigable Small World (HNSW) graph for approximate nearest-neighbor search.
-//
-// Every distance function returns a value where SMALLER MEANS CLOSER, so the
-// graph can reason about "nearest" without ever branching on the metric.
+// Distance metrics and their kernels. Everything here returns SMALLER MEANS
+// CLOSER, so the graph never has to branch on which metric is in use.
 //
 // Kernels are hand-unrolled with four independent accumulators. This is not
 // cosmetic: a single accumulator serialises the FP-add dependency chain, so the
@@ -10,6 +7,7 @@
 // engine overlap them, and it also gives the Go compiler a shape it can
 // auto-vectorise. Slices are re-sliced to a common length first so the bounds
 // checks are hoisted out of the loop.
+
 package hnsw
 
 import "math"
