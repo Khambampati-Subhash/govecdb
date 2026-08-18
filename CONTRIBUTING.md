@@ -1,308 +1,101 @@
-# 🤝 Contributing to GoVecDB
+# Contributing to GoVecDB
 
-Thank you for your interest in contributing to GoVecDB! We welcome contributions from the community and are excited to work with you to make GoVecDB even better.
+Thanks for your interest in GoVecDB.
 
-## 🚀 Quick Start
+> **Read this first:** GoVecDB is in a **ground-up v1 rebuild** on the
+> `v1-restructure` branch. The previous ~45,700-line implementation has been
+> removed from the working tree (it lives on in git history on `main`). Today the
+> codebase is one package: `internal/hnsw`.
+>
+> The shape of the code is changing quickly and there is no public API yet, so
+> **please open an issue before starting substantial work** — otherwise you risk
+> building against something that is about to move. Small fixes and test
+> improvements are always welcome without ceremony.
 
-### Prerequisites
-- **Go 1.23+** installed
-- **Git** for version control
-- **Make** (optional but recommended)
+## Development setup
 
-### 🛠️ Development Setup
-
-1. **Fork & Clone**
-   ```bash
-   # Fork the repository on GitHub, then:
-   git clone https://github.com/khambampati-subhash/govecdb.git
-   cd govecdb
-   ```
-
-2. **Install Dependencies**
-   ```bash
-   go mod download
-   go mod tidy
-   ```
-
-3. **Verify Setup**
-   ```bash
-   # Run tests to ensure everything works
-   make test
-   # Or without make:
-   go test ./...
-   ```
-
-4. **Run Demo**
-   ```bash
-   make demo
-   # Or without make:
-   go run ./cmd/demo/
-   ```
-
-## 🌟 How to Contribute
-
-### 🐛 Bug Reports
-- **Search existing issues** first
-- Use the **bug report template**
-- Include:
-  - Go version (`go version`)
-  - Operating system
-  - Steps to reproduce
-  - Expected vs actual behavior
-  - Code samples if applicable
-
-### ✨ Feature Requests
-- Check **existing feature requests**
-- Use the **feature request template**
-- Explain:
-  - Use case and motivation
-  - Proposed API design
-  - Implementation considerations
-
-### 🔧 Code Contributions
-
-#### 1. Create a Branch
 ```bash
-git checkout -b feature/awesome-feature
-# or
-git checkout -b fix/important-bug
+git clone https://github.com/khambampati-subhash/govecdb.git
+cd govecdb
 ```
 
-#### 2. Make Changes
-- **Follow Go conventions** and idioms
-- **Write tests** for new functionality
-- **Update documentation** if needed
-- **Add benchmarks** for performance-critical code
+Requires **Go 1.24+**. There is nothing to install — the module has zero
+third-party dependencies, no `require` block, and no `go.sum`.
 
-#### 3. Test Your Changes
 ```bash
-# Run all tests
-make test
-
-# Run benchmarks
-make bench
-
-# Check code formatting
-make fmt
-
-# Run linting
-make lint
-
-# Integration tests
-make test-integration
+go build ./...
+go vet ./...
+go test ./... -race
 ```
 
-#### 4. Commit Guidelines
-Follow **Conventional Commits**:
+Benchmarks:
+
 ```bash
-# Examples:
-feat(index): add HNSW parameter tuning
-fix(collection): resolve metadata filtering issue
-docs(readme): update installation instructions
-perf(search): optimize distance calculations
-test(cluster): add chaos engineering tests
+go test ./internal/hnsw/ -run='^$' -bench=. -benchmem
 ```
 
-#### 5. Submit Pull Request
-- **Clear title** describing the change
-- **Detailed description** with context
-- **Link related issues**
-- **Include test results**
-- **Update CHANGELOG.md** if needed
+If `go` is not on your PATH: `export PATH=$PATH:/usr/local/go/bin`.
 
-## 📋 Code Standards
+## Standards
 
-### 🎯 Code Quality
-- **Test Coverage**: Aim for >90% coverage
-- **Documentation**: All public APIs must be documented
-- **Error Handling**: Comprehensive error handling with meaningful messages
-- **Performance**: Benchmark performance-critical paths
-- **Security**: Follow security best practices
+**Every change must keep `go build`, `go vet`, and `go test` green.** Land work as
+its own focused commit; a commit that leaves the tree broken will be sent back.
 
-### 📝 Go Style Guidelines
-```go
-// ✅ Good: Clear, documented, tested
-// Package collection provides vector collection management.
-package collection
+- **SOLID first.** One package = one responsibility. Depend on interfaces
+  (`Index`, `Store`, `WAL`, `DistanceFunc`), inject concretes. Prefer factory +
+  functional options over a pile of constructors.
+- **Distances return "smaller = closer"** everywhere, so callers never branch on
+  the metric.
+- **Comments explain *why*, not the obvious *what*.** Match the density and tone of
+  `internal/hnsw/` — that package is the style reference.
+- **No new third-party dependencies** without discussing it in an issue first.
+  Pure-stdlib, no-CGO is a design goal, not an accident.
+- **Performance claims need numbers.** "Faster" means a `-benchmem` before/after in
+  the PR description, not an assertion.
 
-// VectorCollection manages a collection of vectors with CRUD operations.
-type VectorCollection struct {
-    store api.VectorStore
-    index api.VectorIndex
-}
+### Locked baselines
 
-// Add inserts a vector into the collection.
-// Returns ErrVectorExists if the vector ID already exists.
-func (c *VectorCollection) Add(ctx context.Context, vector *api.Vector) error {
-    if err := vector.Validate(); err != nil {
-        return fmt.Errorf("invalid vector: %w", err)
-    }
-    // ... implementation
-}
-```
+Index changes must not regress these — they are enforced by tests:
 
-### 🧪 Testing Standards
-```go
-func TestVectorCollection_Add(t *testing.T) {
-    tests := []struct {
-        name    string
-        vector  *api.Vector
-        wantErr bool
-    }{
-        {
-            name: "valid vector",
-            vector: &api.Vector{
-                ID:   "test1",
-                Data: []float32{1.0, 2.0, 3.0},
-            },
-            wantErr: false,
-        },
-        // ... more test cases
-    }
-    
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            // ... test implementation
-        })
-    }
-}
-```
+| Baseline | Value | Guarded by |
+|---|---|---|
+| Recall@10, dim 32 | 0.999 | `TestRecallVsBruteForce` |
+| Recall@10, dim 768 | 0.972 | `TestRecallHighDimension` |
+| Search allocations | 2 allocs/op | `BenchmarkSearch -benchmem` |
 
-## 📦 Project Structure
+## Tests
+
+New behavior needs a test. For the index specifically, correctness means **recall
+measured against brute-force ground truth**, not a hand-picked example that happens
+to pass — see `graph_test.go` for the pattern.
+
+Run the race detector before opening a PR: `go test ./... -race`.
+
+## Commit messages
+
+Conventional-commit style, scoped to the package:
 
 ```
-govecdb/
-├── 📁 api/           # Core interfaces and types
-├── 📁 collection/    # Collection implementation
-├── 📁 index/         # HNSW index implementation
-├── 📁 store/         # Storage implementations
-├── 📁 cluster/       # Distributed features
-├── 📁 persist/       # Persistence layer
-├── 📁 examples/      # Usage examples
-├── 📁 benchmarks/    # Performance comparisons
-├── 📁 docs/          # Documentation
-├── 📁 internal/      # Internal utilities
-└── 📁 tests/         # Integration tests
+perf(hnsw): normalize vectors, alpha-pruned selection, zero-alloc search
+feat(wal): append-only record log with per-record checksums
 ```
 
-## 🎯 Areas for Contribution
+Do **not** add `Co-Authored-By` trailers.
 
-### 🔥 High Priority
-- **Performance optimizations** in search algorithms
-- **Additional distance metrics** (Hamming, Jaccard, etc.)
-- **Query optimization** features
-- **Memory usage improvements**
-- **Distributed system enhancements**
+## Pull requests
 
-### 🌱 Good First Issues
-- **Documentation improvements**
-- **Example applications**
-- **Test coverage improvements**
-- **Benchmark additions**
-- **Error message enhancements**
+1. Branch off `v1-restructure` (not `main`).
+2. Keep the PR focused — one concern per PR.
+3. State what you verified: build, vet, tests, race, and benchmark deltas if the
+   change touches a hot path.
+4. If you knowingly left something out of scope, say so in the description.
 
-### 🚀 Advanced Features
-- **GPU acceleration** support
-- **Approximate nearest neighbor** algorithms
-- **Vector quantization** techniques
-- **Advanced clustering** features
-- **Real-time replication**
+## Reporting bugs
 
-## 🔄 Development Workflow
+Include your Go version (`go version`), OS, steps to reproduce, expected vs actual
+behavior, and a minimal code sample. For recall or performance issues, include the
+`Config` you used and the `k`/`ef` values.
 
-### 🏗️ Building
-```bash
-# Build the library
-make build
+## License
 
-# Build examples
-make build-examples
-
-# Cross-compilation
-make build-all
-```
-
-### 🧪 Testing
-```bash
-# Unit tests
-make test
-
-# Integration tests
-make test-integration
-
-# Benchmark tests
-make bench
-
-# Coverage report
-make coverage
-```
-
-### 📊 Performance Testing
-```bash
-# Run performance benchmarks
-make perf
-
-# Compare with other vector databases
-make compare
-
-# Memory profiling
-make profile-mem
-
-# CPU profiling
-make profile-cpu
-```
-
-## 📖 Documentation
-
-### 📚 Types of Documentation
-- **API Documentation**: Go doc comments
-- **User Guides**: Markdown in `/docs`
-- **Examples**: Working code in `/examples`
-- **Benchmarks**: Performance comparisons
-
-### 📝 Documentation Standards
-- **Clear examples** for all public APIs
-- **Performance characteristics** noted
-- **Error conditions** documented
-- **Thread safety** guarantees specified
-
-## 🎉 Recognition
-
-Contributors are recognized in:
-- **README.md** contributors section
-- **CHANGELOG.md** for significant contributions
-- **GitHub releases** acknowledgments
-
-## 📞 Getting Help
-
-- **💬 Discussions**: GitHub Discussions for questions
-- **🐛 Issues**: GitHub Issues for bugs
-- **📧 Contact**: Maintainer email for security issues
-- **📖 Documentation**: Check `/docs` for detailed guides
-
-## 🔒 Security
-
-For security vulnerabilities:
-- **DO NOT** create public issues
-- **Email directly** to maintainer
-- **Include** full details and reproduction steps
-- **Wait for response** before public disclosure
-
-## 📋 Pull Request Checklist
-
-Before submitting:
-- [ ] 🧪 All tests pass
-- [ ] 📊 Benchmarks show no regression
-- [ ] 📖 Documentation updated
-- [ ] 🎯 Code follows style guidelines
-- [ ] ✅ Commit messages follow convention
-- [ ] 🔗 Related issues linked
-- [ ] 📝 CHANGELOG.md updated (if applicable)
-
-## 🙏 Thank You!
-
-Every contribution makes GoVecDB better for everyone. We appreciate your time and effort in making this project successful!
-
----
-
-**Happy Contributing!** 🚀✨
+Contributions are licensed under the MIT License — see [LICENSE](LICENSE).

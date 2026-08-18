@@ -1,85 +1,114 @@
-# GoVecDB v1 — Clean Restructure (Salvage & Rebuild)
+# GoVecDB v1 — Clean Rebuild
 
-> Branch: `v1-restructure` · Same module path · History preserved · Embeddable library only.
-> Strategy: fresh SOLID layout, **port the proven & tested core**, drop dead + out-of-scope code.
+> Branch: `v1-restructure` · Same module path · Embeddable library only.
 > Gate: `go build ./... && go vet ./... && go test ./... -race` green after every step.
 
-## Baseline (verified before starting)
-Core packages pass tests today: `api`, `index`, `store`, `persist`, `collection`, `segment`.
-`filter` builds but has **no tests** (we add them). This is the correctness we preserve.
+## What changed about the plan
+
+The original plan on this branch was **salvage & port**: keep the proven legacy
+core and clean it in place. That is no longer what we are doing.
+
+Building the HNSW index from scratch (rather than untangling `index/`) produced a
+better result than porting would have — 1,075 readable lines, recall 0.999 at dim
+32 verified against brute force, and a search path down to 2 allocations. The
+old index was ~8,100 lines across three competing graph implementations with
+entangled helpers.
+
+So the strategy is now **rebuild from scratch, one subsystem at a time**, using the
+old code as a *reference in git history* rather than as a source to copy.
+
+## Current state
+
+```
+govecdb/
+├── internal/hnsw/     # the entire codebase — index engine, 1,075 lines
+├── docs/
+├── go.mod             # stdlib only; no require block, no go.sum
+├── README.md  CLAUDE.md  CONTRIBUTING.md  LICENSE
+```
+
+All legacy packages were deleted in the clean-slate commit. **Nothing is lost** —
+`main` still has every line. To consult the old implementation:
+
+```bash
+git show main:persist/wal.go
+git show main:persist/snapshot.go
+git log main --oneline -- persist/
+```
+
+### Deleted (recoverable from `main`)
+
+| Category | Packages |
+|---|---|
+| Superseded by the new HNSW | `index/`, `store/`, `collection/`, `api/`, `filter/`, `persist/` |
+| Out of v1 scope (v2) | `cluster/`, `api/rest/`, `proto/`, `client/`, `segment/` |
+| Dead / never wired | `utils/`, `diskann/`, `quantization/`, `batch/`, `streaming/`, `accuracy/`, `internal/{benchmark,errors,health,logging,metrics,monitoring}` |
+| Tooling for the above | `cmd/`, `demo/`, `examples/`, `deployments/`, `Makefile`, `run_*.sh` |
+
+Deleting these dropped every third-party dependency: raft, gRPC, protobuf, bolt,
+chroma-go, onnxruntime, uuid. The module is now pure stdlib.
 
 ## Target layout
 
 ```
 govecdb/
-├── vector.go            # public API: Vector, SearchRequest, SearchResult, DistanceMetric
-├── filter.go            # public filter expressions (FieldFilter, LogicalFilter, helpers)
+├── vector.go            # public API: Vector, SearchRequest, SearchResult
 ├── db.go                # DB + Collection interfaces + facade
 ├── options.go           # functional-options construction
 ├── errors.go            # exported sentinel errors
 ├── internal/
-│   ├── distance/        # Cosine/Euclidean/Dot/Manhattan kernels        (Strategy)
-│   ├── hnsw/            # HNSW index engine (live subset, cleaned)       (SRP)
-│   ├── store/          # in-memory vector store                         (Repository)
-│   ├── wal/           # write-ahead log                                 (SRP)
-│   ├── snapshot/     # snapshots + recovery
-│   ├── filter/      # metadata query engine (inverted + numeric index)
-│   └── obs/        # Logger + Metrics interfaces, no-op defaults         (DIP)
-├── cmd/govecdb-bench/  # benchmark CLI (trimmed)
-├── examples/
-├── docs/
-└── README.md
+│   ├── hnsw/            # index engine                          ✅ done
+│   ├── wal/             # write-ahead log                       ← next
+│   ├── snapshot/        # snapshots + recovery
+│   ├── store/           # in-memory vector store
+│   ├── filter/          # metadata query engine
+│   └── obs/             # Logger + Metrics interfaces, no-op defaults
+└── docs/
 ```
 
-## Source → destination map (salvage)
-
-| New location | Ported from | Notes |
-|---|---|---|
-| `vector.go`, `filter.go`, `db.go`, `errors.go` | `api/types.go` | Split the 573-line types file by concern; keep interfaces |
-| `internal/distance/` | `index/simd_distance.go` + live helpers from `index/optimized_metrics.go` | One canonical kernel set; drop the 3-way duplication |
-| `internal/hnsw/` | `index/{hnsw,graph,node,heap,types,context,metrics,advanced_memory_pool}.go` + needed helpers from `optimized_graph.go` (`connWithDist`, `max`, `ConnectionSet`, `OptimizedHNSWNode`) | Untangle helpers into this pkg; behind an `Index` interface |
-| `internal/store/` | `store/{store,mem_store}.go` | Repository behind `Store` interface |
-| `internal/wal/` | `persist/wal.go` (+ `persist/types.go` records) | Single WAL; drop `store/wal.go` + `persist/optimized_persistence.go` |
-| `internal/snapshot/` | `persist/snapshot.go` | |
-| `internal/filter/` | `filter/{hybrid_engine,inverted_index,numeric_index,interfaces}.go` | + new tests |
-| `db.go` facade | `collection/{collection,persistent,manifest}.go` | Merge in-memory + persistent into one type; persistence via injected WAL/snapshot (Strategy), constructed with options |
-
-## Dropped for v1 (history keeps them; recoverable from `main`)
-
-**Dead / orphaned (unused by anything):**
-`utils/`, `diskann/`, `quantization/`, `batch/`, `streaming/`, `internal/` (old),
-`accuracy/`.
-
-**Superseded duplicates:**
-`index/{concurrent_index,optimized_graph,optimized_metrics,optimized_structures,simd_impl,multi_index}.go`,
-`collection/enhanced_collection.go`, `store/wal.go`, `persist/optimized_persistence.go`,
-`api/streaming_api.go`.
-
-**Out of v1 scope (embeddable-first) — revisit in v2:**
-`cluster/`, `api/rest/`, `proto/`, `segment/` (only used by dropped enhanced collection),
-`client/`, `cmd/{server,benchmark_chroma,benchmark_suite,quality_check}`.
-
-## SOLID / patterns applied
-- **SRP** — one package = one responsibility; split god-files (`api/types.go`, `collection`).
-- **DIP** — `DB`/`Collection` depend on `Index`, `Store`, `WAL`, `Snapshotter`, `DistanceFunc`,
-  `Logger`, `Metrics` interfaces; concrete impls injected.
-- **OCP / Strategy** — distance metric, index type, persistence pluggable.
-- **Factory + Functional Options** — `govecdb.Open(cfg, WithWAL(dir), WithMetric(...), WithLogger(...))`.
-- **ISP / Liskov** — small interfaces so `FlatIndex` and `HNSWIndex` are interchangeable.
-
 ## Ordered execution (each = one green-gated commit)
-1. **Scaffold + public types** — `vector.go`/`filter.go`/`db.go`/`errors.go` from `api/types.go`; define core interfaces. *(no behavior change)*
-2. **`internal/distance`** — port canonical kernels + tests.
-3. **`internal/hnsw`** — port live index, untangle helpers, put behind `Index` interface + factory.
-4. **`internal/store`** — port mem store behind `Store` interface.
-5. **`internal/wal` + `internal/snapshot`** — single WAL + snapshot behind interfaces.
-6. **`internal/filter`** — port + **add tests** (currently zero).
-7. **`db.go` facade** — unify in-memory + persistent collection; functional options.
-8. **Delete dropped packages**; `go mod tidy`.
-9. **Examples + README + docs** refreshed to the new API.
-10. **Full `go test ./... -race`**, recall regression test, benchmark vs baseline.
+
+1. ~~**`internal/hnsw`**~~ — from-scratch index, brute-force recall tests, benchmarks. **Done.**
+2. **`internal/wal`** — append-only log behind a `WAL` interface. **Next.**
+3. **`internal/snapshot`** — point-in-time graph snapshot + recovery that replays the WAL.
+4. **Delete / update semantics** in the index — needs tombstones and a rebuild policy.
+5. **Concurrency** — the graph is single-threaded today; make reads concurrent first.
+6. **`internal/store`** — vector + metadata storage behind a `Store` interface.
+7. **`internal/filter`** — metadata query engine, with tests from day one.
+8. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users import.
+9. **Examples + README** for the real API.
+
+## Phase 2 — WAL (next)
+
+Design constraints, decided:
+
+- **Write to the WAL first, then apply to the in-memory graph.** On recovery,
+  replay the log to rebuild the graph. The graph is *derived state* — it is never
+  the source of truth.
+- **The WAL is an interface** (`Append`, `Replay`, `Sync`, `Close`) so the index can
+  be constructed with a no-op WAL in tests and benchmarks.
+- **Records are versioned** from the first commit. A log format without a version
+  byte cannot be migrated later.
+- **Checksums per record.** A torn write at the tail must be detectable, and
+  recovery must truncate to the last intact record rather than failing outright.
+- **`fsync` policy is a knob**, not a hardcode: always / interval / never trade
+  durability against throughput.
+
+Same bar as the index: small single-responsibility files, comments that explain
+*why*, and tests that verify crash recovery rather than assuming it.
+
+## SOLID / patterns
+
+- **SRP** — one package = one responsibility.
+- **DIP** — `DB`/`Collection` depend on `Index`, `Store`, `WAL`, `Snapshotter`,
+  `DistanceFunc`, `Logger` interfaces; concrete impls injected.
+- **OCP / Strategy** — distance metric, index type, persistence pluggable.
+- **Factory + Functional Options** — `govecdb.Open(cfg, WithWAL(dir), WithMetric(...))`.
+- **ISP / Liskov** — small interfaces so a flat index and HNSW are interchangeable.
 
 ## Risks
-- **HNSW untangle (step 3)** is the delicate one — isolated commit, tests green before/after.
-- **Recall regression** — lock baseline recall numbers before touching the index.
-- Every step reverts cleanly (separate commits on a throwaway branch).
+
+- **Recall regression** — the baseline is locked in `graph_test.go` (0.999 @ dim 32,
+  0.972 @ dim 768). Any index change must keep those numbers.
+- **Allocation regression** — search is 2 allocs/op; `-benchmem` guards it.
+- Every step is a separate commit and reverts cleanly.

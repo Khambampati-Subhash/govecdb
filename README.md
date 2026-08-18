@@ -1,21 +1,27 @@
 # GoVecDB
 
-A high-performance, distributed vector database written in pure Go for production workloads requiring similarity search and semantic search.
+An embeddable **vector database in pure Go** — no CGO, no dependencies. Stores
+embeddings and answers *"what is most similar to this?"* using an HNSW
+approximate-nearest-neighbor index.
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/khambampati-subhash/govecdb)](https://goreportcard.com/report/github.com/khambampati-subhash/govecdb)
-[![Go Version](https://img.shields.io/badge/go-1.23+-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/go-1.24+-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## Features
+> ## ⚠️ Status: v1 rebuild in progress
+>
+> This branch (`v1-restructure`) is a **ground-up rewrite**. The previous
+> implementation — ~45,700 lines covering clustering, gRPC, REST, segments and
+> several competing index variants — has been removed from the working tree. It
+> remains in git history on `main` and is recoverable at any time.
+>
+> **What exists today:** `internal/hnsw` — a complete, tested, benchmarked HNSW
+> index (1,075 lines). That is the entire codebase.
+>
+> **What does not exist yet:** the public API, persistence, deletes, concurrency.
+> There is no importable package yet — `internal/` is not consumable from outside
+> the module. See [the roadmap](docs/MIGRATION.md).
 
-- **Pure Go** - Zero dependencies, no CGO, embeddable
-- **High Performance** - Sub-millisecond search with HNSW algorithm
-- **Production Ready** - WAL persistence, crash recovery, comprehensive testing
-- **Thread Safe** - Built with Go's concurrency primitives
-- **Distributed** - Clustering with consistent hashing and Raft consensus
-- **Smart Filtering** - Complex metadata queries with vector search
-
-## What Is GoVecDB & Why It Exists
+## What GoVecDB is for
 
 AI models turn text, images, and audio into **embeddings** — lists of numbers where
 *things that mean similar things sit close together* in number-space. That reframes
@@ -23,16 +29,16 @@ AI models turn text, images, and audio into **embeddings** — lists of numbers 
 nearest to my query vector** (nearest-neighbor search).
 
 The naive approach — compare the query against *every* stored vector — is `O(N)` and
-collapses at millions of vectors. **GoVecDB's purpose is to make that search fast,
-durable, and scalable**, in pure Go with no CGO so it stays embeddable:
+collapses at millions of vectors. GoVecDB's purpose is to make that search fast and
+durable, in pure Go so it stays embeddable:
 
 > Store millions of embeddings and answer *"what's most similar to this?"* in
-> sub-millisecond time, survive crashes, and scale across machines.
+> sub-millisecond time, and survive crashes.
 
 This powers **semantic search**, **RAG** for LLMs, **recommendations**, and
 **anomaly detection**.
 
-## How It Works
+## How it works
 
 ### The core trick: HNSW (skip brute force)
 
@@ -69,316 +75,79 @@ neighbors — visiting only a tiny fraction of all vectors. Two knobs trade spee
 accuracy: `M` (connections per node) and `EfConstruction`/`ef` (how wide the search
 explores).
 
-### The layers that make it production-grade
+For the design decisions behind the implementation — why vectors are normalized on
+insert, why neighbor selection is alpha-pruned, how the search path reaches two
+allocations — see [`internal/hnsw/README.md`](internal/hnsw/README.md).
 
-Each layer of the system solves one part of the problem:
+## Current API
 
-| Layer | Package | What it achieves |
-|-------|---------|------------------|
-| **Contract** | `api` | Interfaces & types (`Vector`, `SearchRequest`, `VectorIndex`, `VectorStore`) — everything below is swappable behind them |
-| **Orchestration** | `collection` | `VectorCollection` ties the index, storage, and filtering together with thread-safe lifecycle management |
-| **Speed** | `index` | HNSW graph — the approximate nearest-neighbor engine |
-| **Data** | `store` | Holds the actual vectors + metadata in memory |
-| **Durability** | `persist` | Write-Ahead Log (WAL) + snapshots so a crash doesn't lose data |
-| **Precision** | `filter` | Metadata queries combined with vector search (*similar* **AND** `category = tech`) |
-| **Scale** | `cluster` | Spreads data across nodes via consistent hashing + Raft consensus |
-
-**Distance metrics** (`Cosine`, `Euclidean`, `DotProduct`, `Manhattan`) define what
-"near" means and are selected per collection. A typical write flow is
-`Add → store the vector → insert into the HNSW graph → append to the WAL`; a read is
-`Search → HNSW descent → optional metadata filter → top-K results`.
-
-## Quick Start
-
-### Installation
-
-```bash
-go get github.com/khambampati-subhash/govecdb
-```
-
-### Basic Usage
+`internal/hnsw` is internal, so this is not importable yet; it is what the public
+API will be built on top of.
 
 ```go
-package main
+g, _ := hnsw.New(hnsw.DefaultConfig(128, hnsw.Cosine))
+_ = g.Insert("doc1", vec1)
 
-import (
-    "context"
-    "log"
-
-    "github.com/khambampati-subhash/govecdb/api"
-    "github.com/khambampati-subhash/govecdb/collection"
-    "github.com/khambampati-subhash/govecdb/store"
-)
-
-func main() {
-    ctx := context.Background()
-
-    // Create collection
-    config := &api.CollectionConfig{
-        Name:           "documents",
-        Dimension:      384,
-        Metric:         api.Cosine,
-        M:              16,
-        EfConstruction: 200,
-        MaxLayer:       16,
-        ThreadSafe:     true,
-    }
-
-    coll, err := collection.NewVectorCollection(config, store.DefaultStoreConfig(config.Name))
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer coll.Close()
-
-    // Add vectors
-    vectors := []*api.Vector{
-        {
-            ID:   "doc1",
-            Data: make([]float32, 384), // Your embeddings here
-            Metadata: map[string]interface{}{
-                "title": "Introduction to AI",
-                "tags":  []string{"ai", "machine-learning"},
-            },
-        },
-    }
-
-    if err := coll.AddBatch(ctx, vectors); err != nil {
-        log.Fatal(err)
-    }
-
-    // Search
-    query := make([]float32, 384) // Your query embedding
-    results, err := coll.Search(ctx, &api.SearchRequest{
-        Vector: query,
-        K:      10,
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    for _, result := range results {
-        log.Printf("ID: %s, Score: %.4f\n", result.Vector.ID, result.Score)
-    }
+results, _ := g.Search(query, 10 /*k*/, 64 /*ef*/)
+for _, r := range results {
+    fmt.Println(r.ID, r.Distance) // ascending; smaller = closer
 }
 ```
 
-### Advanced Filtering
+| Knob | Where | Adaptable? |
+|------|-------|-----------|
+| `M` — neighbors per node (layers > 0; layer 0 uses `2*M`) | `Config`, set once | **No** — structural; changing it means rebuilding |
+| `EfConstruction` — search width during inserts | `Config` | Kept fixed (100–200) |
+| `Alpha` — pruning relaxation | `Config` | Fixed per graph; 1.0–1.4 useful, default 1.2 |
+| `ef` — search width at query time | `Search(query, k, ef)` | **Yes** — per query; auto-clamped to `>= k` |
 
-```go
-// Search with metadata filters
-filter := &api.LogicalFilter{
-    Op: api.FilterAnd,
-    Filters: []api.FilterExpr{
-        &api.FieldFilter{
-            Field: "category",
-            Op:    api.FilterEq,
-            Value: "technology",
-        },
-        &api.FieldFilter{
-            Field: "tags",
-            Op:    api.FilterIn,
-            Value: []interface{}{"ai", "machine-learning"},
-        },
-    },
-}
+## Measured performance
 
-results, err := coll.Search(ctx, &api.SearchRequest{
-    Vector: query,
-    K:      10,
-    Filter: filter,
-})
-```
+Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
 
-### Distributed Setup
+| Metric | Value |
+|---|---|
+| Search | 105,141 ns/op |
+| Search allocations | **2 allocs/op**, 1,264 B/op |
+| Cosine distance (normalized) | 30.1 ns, 0 allocs |
+| Euclidean distance | 25.9 ns, 0 allocs |
+| Recall@10 (dim 32) | **0.999** |
+| Recall@10 (dim 768) | **0.972** |
 
-```go
-import "github.com/khambampati-subhash/govecdb/cluster"
+Recall is measured against brute-force ground truth in `graph_test.go`, not estimated.
 
-// Create cluster
-config := &cluster.Config{
-    NodeID:            "node1",
-    ReplicationFactor: 3,
-    ShardCount:        16,
-}
+## Roadmap
 
-manager := cluster.NewClusterManager(config)
-coordinator := cluster.NewQueryCoordinator(manager)
+1. ~~**HNSW index**~~ — done, from scratch, tested against brute force
+2. **WAL** — write-ahead log; write to WAL first, then apply to the in-memory graph
+3. **Snapshots + recovery** — replay the WAL to rebuild the graph (the graph is derived state)
+4. **Delete / update** semantics
+5. **Concurrency** — the index is single-threaded today
+6. **Public API** — `vector.go` / `db.go` / `options.go` facade over the internals
+7. **Metadata filtering**
 
-// Distributed search
-results, err := coordinator.Search(request)
-```
-
-## Performance
-
-**Key Metrics** (tested on Apple M1 Pro / Intel i7):
-
-## Comprehensive Benchmarks (N=1000)
-
-| Dimension | Insertion Rate (ops/s) | Recall@10 | Search QPS | Avg Latency |
-|-----------|------------------------|-----------|------------|-------------|
-| 128       | ~2008                  | 0.66      | ~2813      | ~0.36ms     |
-| 256       | ~1646                  | 0.66      | ~2282      | ~0.44ms     |
-| 512       | ~1186                  | 0.63      | ~1763      | ~0.57ms     |
-| 1024      | ~785                   | 0.66      | ~1199      | ~0.83ms     |
-| 2048      | ~446                   | 0.65      | ~757       | ~1.32ms     |
-| 4096      | ~243                   | 0.65      | ~442       | ~2.26ms     |
-| 6000      | ~133                   | 0.66      | ~206       | ~4.85ms     |
-| 8192      | ~123                   | 0.55      | ~241       | ~4.15ms     |
-| 16384     | ~63                    | 0.35      | ~127       | ~7.84ms     |
-
-*Note: Search QPS measured with concurrency=1.*
-
-**Highlights**:
-- **Vectorized Distance Kernels**: Pure-Go distance functions (DotProduct, Euclidean, Cosine) with manual loop unrolling to help the Go compiler auto-vectorize the hot paths — no CGO or hand-written assembly.
-- **Zero-Allocation Search**: Optimized hot paths to minimize GC pressure.
-- **High Throughput**: Up to **60,000 QPS** on a single node for low-dimensional vectors.
-- **Data Integrity**: Verified 100% data integrity and recall for exact matches even at 4096 dimensions.
-
-For detailed benchmarks, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
-
-## Architecture
-
-```
-┌─────────────────────┐
-│     API Layer      │  Type-safe interfaces
-├─────────────────────┤
-│   Collection Mgmt  │  High-level abstractions
-├─────────────────────┤
-│   Index Engine     │  HNSW algorithm
-├─────────────────────┤
-│  Storage Layer     │  Memory management
-├─────────────────────┤
-│ Persistence Layer  │  WAL, snapshots
-├─────────────────────┤
-│  Cluster Layer     │  Distribution
-└─────────────────────┘
-```
-
-**Key Components**:
-- **HNSW Index**: Fast approximate nearest neighbor search
-- **WAL Persistence**: Durability and crash recovery
-- **Consistent Hashing**: Automatic data distribution
-- **Raft Consensus**: Distributed coordination
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
-
-## Configuration
-
-### Collection Configuration
-
-```go
-config := &api.CollectionConfig{
-    Name:      "my-collection",
-    Dimension: 384,
-    Metric:    api.Cosine,
-
-    // HNSW index tuning (flat fields on CollectionConfig)
-    M:              16,  // Connections per node
-    EfConstruction: 200, // Construction search depth
-    MaxLayer:       16,  // Maximum layers
-    Seed:           42,  // Deterministic layer assignment
-    ThreadSafe:     true,
-}
-
-// For durable, crash-safe storage (WAL + snapshots), use the persistent
-// collection instead, which wraps the above config with storage paths:
-//
-//   pcfg := &collection.PersistentCollectionConfig{
-//       CollectionConfig: config,
-//       DataDir:          "./data",
-//       WALDir:           "./data/wal",
-//       SnapshotDir:      "./data/snapshots",
-//   }
-//   coll, err := collection.NewPersistentVectorCollection(pcfg)
-```
-
-### Cluster Configuration
-
-```go
-clusterConfig := &cluster.Config{
-    NodeID:            "node-1",
-    ReplicationFactor: 3,
-    ShardCount:        32,
-    
-    ConsensusConfig: &cluster.RaftConfig{
-        HeartbeatTimeout:  100 * time.Millisecond,
-        ElectionTimeout:   500 * time.Millisecond,
-    },
-}
-```
-
-## Use Cases
-
-- **Semantic Search**: Build search engines with natural language understanding
-- **RAG Systems**: Retrieval-augmented generation for LLMs
-- **Recommendations**: Content-based recommendation engines
-- **Anomaly Detection**: High-dimensional data analysis
-
-## Testing
-
-```bash
-# Run all tests
-go test ./...
-
-# Run benchmarks
-go test ./... -bench=. -benchmem
-
-# Run with race detection
-go test ./... -race
-```
-
-## Documentation
-
-- [Architecture Guide](docs/ARCHITECTURE.md) - Technical deep-dive
-- [Performance Guide](docs/PERFORMANCE.md) - Benchmarks and optimization
-- [Distributed Systems](docs/DISTRIBUTED_SYSTEMS.md) - Cluster deployment
-- [API Reference](https://pkg.go.dev/github.com/khambampati-subhash/govecdb)
+Out of scope for v1 (returns in v2): clustering, REST/gRPC servers, quantization.
 
 ## Development
 
-### Prerequisites
-- Go 1.23+
-- Git
-
-### Setup
 ```bash
-git clone https://github.com/khambampati-subhash/govecdb.git
-cd govecdb
-go mod download
-```
-
-### Code Quality
-```bash
-go fmt ./...
+go build ./...
 go vet ./...
-golangci-lint run
+go test ./... -race
 ```
+
+```bash
+go test ./internal/hnsw/ -run='^$' -bench=. -benchmem
+```
+
+Requires Go 1.24+. The module has **zero third-party dependencies** — `go.mod` has no
+`require` block, and there is no `go.sum`. Keep it that way.
 
 ## Contributing
 
-Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-**Ways to Contribute**:
-- Bug reports and feature requests
-- Code contributions with tests
-- Documentation improvements
-- Performance benchmarks
+See [CONTRIBUTING.md](CONTRIBUTING.md). Note that during the v1 rebuild the codebase
+is changing shape quickly; open an issue before starting substantial work.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
-## Acknowledgments
-
-- HNSW algorithm by Yu. A. Malkov and D. A. Yashunin
-- Inspired by Chroma, Weaviate, and Qdrant
-- Go community for excellent tooling
-
-## Support
-
-- **Issues**: [GitHub Issues](https://github.com/khambampati-subhash/govecdb/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/khambampati-subhash/govecdb/discussions)
-
----
-
-**Built with ❤️ for the Go community**
+MIT — see [LICENSE](LICENSE).
