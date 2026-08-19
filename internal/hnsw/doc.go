@@ -4,6 +4,10 @@
 // Every distance function returns a value where SMALLER MEANS CLOSER, so the
 // graph can reason about "nearest" without ever branching on the metric.
 //
+// A Graph is safe for concurrent use: searches run in parallel under a read
+// lock, inserts take the write lock, and all per-traversal scratch comes from a
+// pool so no two callers share mutable state.
+//
 // The package is split one responsibility per file:
 //
 //	config.go     Config knobs, defaults, and the sentinel errors callers see.
@@ -15,4 +19,5 @@
 //	distance.go   Metrics and their hand-unrolled kernels.
 //	pq.go         Allocation-free min/max heaps over []candidate.
 //	visited.go    Generation-stamped visited set, reused across searches.
+//	state.go      Pooled per-traversal scratch; why Search can hold RLock.
 package hnsw

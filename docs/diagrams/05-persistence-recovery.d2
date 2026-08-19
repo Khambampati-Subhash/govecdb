@@ -250,21 +250,20 @@ test_note: |md
   class: note
 }
 
-prereq: Blocked on two things that do not exist yet {
+prereq: Blocked on deletes {
   class: bad
 
   body: |md
-    **1 · Deletes.** The record type reserves `DELETE`, but
+    **Deletes.** The record type reserves `DELETE`, but
     `Graph` has no `Delete` method. Removing an HNSW node can
     disconnect the graph; the standard answer is tombstones
     plus periodic rebuild. Settle the semantics before
     freezing the record format.
 
-    **2 · Concurrency.** The graph is single-threaded, and the
-    scratch buffers make even concurrent *reads* unsafe. The
-    moment a WAL writer and a reader coexist you need at
-    minimum an `RWMutex`, and per-goroutine scratch to keep
-    the 2-allocs/op number.
+    *Concurrency was the other blocker and is now cleared:*
+    scratch moved into a pooled `searchState` and the graph is
+    guarded by an `RWMutex`, so a WAL writer and readers can
+    coexist without giving up the 2-allocs/op search.
   |
 }
 

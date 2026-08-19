@@ -4,11 +4,23 @@ import (
 	"errors"
 	"math"
 	"math/rand"
+	"sync"
 )
 
-// Graph is an HNSW index. It is NOT safe for concurrent use in this v1 cut;
-// callers serialize access. Concurrency comes in a later step.
+// Graph is an HNSW index. It is safe for concurrent use: any number of Search
+// calls run in parallel, and Insert excludes them. Per-search scratch lives in a
+// pooled searchState (see state.go) rather than on the graph, which is what lets
+// readers share it.
+//
+// The lock is coarse — one RWMutex over the whole graph — because HNSW inserts
+// mutate neighbor lists several hops away from the new node, so there is no
+// small region to lock instead. Read-heavy workloads (the expected shape) scale;
+// concurrent *writers* serialize, and finer-grained writes are a later step.
 type Graph struct {
+	// mu guards every mutable field below it. cfg, dist, the M/ml/alpha knobs
+	// and normalized are written once in New and only read afterwards.
+	mu sync.RWMutex
+
 	cfg  Config
 	dist DistanceFunc
 
@@ -27,12 +39,9 @@ type Graph struct {
 	entry    int            // index of the entry point, -1 when empty
 	maxLevel int
 
-	// Scratch state reused across searches so the hot path allocates nothing.
-	visited      visitedList
-	scratchCands []candidate
-	scratchRes   []candidate
-	scratchSel   []candidate
-	queryBuf     []float32
+	// pool hands out per-traversal scratch so the hot path allocates nothing.
+	// It is internally synchronized, so it sits outside mu's coverage.
+	pool sync.Pool
 }
 
 // New creates an empty graph. No memory is spent on the graph itself until the
@@ -51,7 +60,7 @@ func New(cfg Config) (*Graph, error) {
 		cfg.Alpha = 1
 	}
 	normalized := cfg.Metric.normalizes()
-	return &Graph{
+	g := &Graph{
 		cfg:        cfg,
 		dist:       cfg.Metric.fastFunc(normalized),
 		mMax:       cfg.M,
@@ -63,11 +72,17 @@ func New(cfg Config) (*Graph, error) {
 		ids:        make(map[string]int),
 		entry:      -1,
 		maxLevel:   0,
-	}, nil
+	}
+	g.pool.New = func() any { return new(searchState) }
+	return g, nil
 }
 
 // Len reports how many vectors are in the graph.
-func (g *Graph) Len() int { return len(g.nodes) }
+func (g *Graph) Len() int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return len(g.nodes)
+}
 
 // randomLevel draws a layer for a new node from an exponentially decaying
 // distribution: most nodes land on layer 0, a few reach higher layers.

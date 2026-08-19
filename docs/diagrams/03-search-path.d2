@@ -111,9 +111,10 @@ alloc_note: |md
   - The only two allocations are the result slice and the
     `[]Result` handed back to the caller.
 
-  **Cost of this speed:** the scratch buffers are graph-owned,
-  so concurrent `Search` calls on one graph corrupt each other.
-  Single-threaded today, by design — not an oversight.
+  **This scratch is per-traversal, not graph-owned.** It comes
+  from a pooled `searchState`, which is what lets `Search` hold
+  only `RLock` and run in parallel — graph-owned buffers would
+  make concurrent searches corrupt each other.
 | {
   class: note
 }

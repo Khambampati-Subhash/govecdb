@@ -81,8 +81,10 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - `ef` is the **query-time** knob in `Search(query, k, ef)`; must be `>= k`, bigger
   = higher recall + slower.
 - Empty graph = empty container: no graph memory until the first insert.
-- The graph is **single-threaded** today — callers serialize access. Concurrency is
-  a later phase, not an oversight.
+- The graph is **safe for concurrent use**: `Search` holds `RLock` and runs in
+  parallel, `Insert` holds the write lock. Per-traversal scratch comes from a
+  pooled `searchState` (`state.go`) — that is *why* `Search` can be a reader, so
+  never move scratch back onto `Graph`. Concurrent writers still serialize.
 - Insert **copies** the caller's vector (and normalizes it for Cosine), so the graph
   never aliases a reused caller buffer.
 - Durability model *(phase 2, not yet built)*: **write to WAL first, then apply to

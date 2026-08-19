@@ -1,6 +1,9 @@
 package hnsw
 
 // Insert adds (or is a no-op for a duplicate id of) a vector into the graph.
+//
+// Safe to call concurrently, but writers serialize against each other and
+// exclude searches for the duration.
 func (g *Graph) Insert(id string, vector []float32) error {
 	if len(vector) == 0 {
 		return ErrEmptyVector
@@ -8,11 +11,21 @@ func (g *Graph) Insert(id string, vector []float32) error {
 	if len(vector) != g.cfg.Dimension {
 		return ErrDimensionMismatch
 	}
+
+	// Copy and normalize before taking the lock: it only touches the caller's
+	// slice and immutable config, so it need not block searches.
+	vec := g.prepare(vector)
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	if _, exists := g.ids[id]; exists {
 		return nil // v1: ignore duplicates; update semantics come later
 	}
 
-	vec := g.prepare(vector)
+	st := g.acquireState()
+	defer g.releaseState(st)
+
 	level := g.randomLevel()
 	n := newNode(id, vec, level)
 	idx := len(g.nodes)
@@ -36,12 +49,12 @@ func (g *Graph) Insert(id string, vector []float32) error {
 	// Phase 2: from min(maxLevel, level) down to 0, find neighbors and connect.
 	start := min(level, g.maxLevel)
 	for lc := start; lc >= 0; lc-- {
-		w := g.searchLayer(vec, cur, g.cfg.EfConstruction, lc)
-		neighbors := g.selectNeighbors(w, g.maxConn(lc))
+		w := g.searchLayer(st, vec, cur, g.cfg.EfConstruction, lc)
+		neighbors := g.selectNeighbors(st, w, g.maxConn(lc))
 		for _, nb := range neighbors {
 			g.connect(idx, nb, lc)
 			g.connect(nb, idx, lc)
-			g.pruneConnections(nb, lc)
+			g.pruneConnections(st, nb, lc)
 		}
 		if len(w) > 0 {
 			cur = w[0].idx // closest, to seed the next lower layer

@@ -8,23 +8,37 @@ type Result struct {
 
 // Search returns the k nearest neighbors to query. ef controls accuracy and is
 // clamped up to at least k.
+//
+// Safe to call concurrently, with itself and with Insert.
 func (g *Graph) Search(query []float32, k, ef int) ([]Result, error) {
 	if len(query) != g.cfg.Dimension {
 		return nil, ErrDimensionMismatch
 	}
-	if g.entry == -1 || k <= 0 {
+	if k <= 0 {
 		return nil, nil
 	}
 	if ef < k {
 		ef = k
 	}
 
-	// Normalize into a reusable buffer rather than touching the caller's slice.
+	st := g.acquireState()
+	defer g.releaseState(st)
+
+	// Normalize into scratch rather than touching the caller's slice. This needs
+	// no lock — the buffer is ours and g.normalized is fixed at construction —
+	// so it stays outside the critical section.
 	q := query
 	if g.normalized {
-		g.queryBuf = append(g.queryBuf[:0], query...)
-		Normalize(g.queryBuf)
-		q = g.queryBuf
+		st.queryBuf = append(st.queryBuf[:0], query...)
+		Normalize(st.queryBuf)
+		q = st.queryBuf
+	}
+
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	if g.entry == -1 {
+		return nil, nil
 	}
 
 	// Descend the upper layers greedily to reach the right region.
@@ -34,7 +48,7 @@ func (g *Graph) Search(query []float32, k, ef int) ([]Result, error) {
 	}
 
 	// Do the wide search on layer 0.
-	w := g.searchLayer(q, cur, ef, 0)
+	w := g.searchLayer(st, q, cur, ef, 0)
 
 	// w is sorted ascending by distance; take the top k.
 	if len(w) > k {
@@ -67,17 +81,18 @@ func (g *Graph) greedyClosest(start int, target []float32, lc int) int {
 }
 
 // searchLayer runs the core best-first search on a single layer, returning up
-// to ef closest nodes to query, sorted ascending by distance.
-func (g *Graph) searchLayer(query []float32, entryPoint, ef, lc int) []candidate {
-	g.visited.reset(len(g.nodes))
+// to ef closest nodes to query, sorted ascending by distance. Callers hold at
+// least g.mu.RLock and own st.
+func (g *Graph) searchLayer(st *searchState, query []float32, entryPoint, ef, lc int) []candidate {
+	st.visited.reset(len(g.nodes))
 
 	// Reuse the heap backing arrays; only the result slice is freshly allocated
 	// because the caller keeps it.
-	cands := g.scratchCands[:0]
-	results := g.scratchRes[:0]
+	cands := st.cands[:0]
+	results := st.results[:0]
 
 	d := g.dist(g.nodes[entryPoint].vector, query)
-	g.visited.visit(entryPoint)
+	st.visited.visit(entryPoint)
 	cands = append(cands, candidate{entryPoint, d})
 	results = append(results, candidate{entryPoint, d})
 
@@ -90,7 +105,7 @@ func (g *Graph) searchLayer(query []float32, entryPoint, ef, lc int) []candidate
 			break
 		}
 		for _, nb := range g.neighborsAt(c.idx, lc) {
-			if g.visited.visit(nb) {
+			if st.visited.visit(nb) {
 				continue
 			}
 			nd := g.dist(g.nodes[nb].vector, query)
@@ -109,6 +124,8 @@ func (g *Graph) searchLayer(query []float32, entryPoint, ef, lc int) []candidate
 		out[i], results = maxPop(results) // farthest first -> fill from end
 	}
 
-	g.scratchCands, g.scratchRes = cands, results
+	// Hand the (possibly regrown) backing arrays back to the state so the next
+	// traversal inherits the capacity.
+	st.cands, st.results = cands, results
 	return out // ascending by distance
 }

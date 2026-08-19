@@ -1,9 +1,9 @@
 # internal/hnsw
 
 A small, readable HNSW (Hierarchical Navigable Small World) index — the core of
-GoVecDB's approximate nearest-neighbor search. Single-threaded in this v1 cut,
-written to be understood first and then made fast with changes that are each
-measured rather than assumed.
+GoVecDB's approximate nearest-neighbor search. Safe for concurrent use, written
+to be understood first and then made fast with changes that are each measured
+rather than assumed.
 
 ## Why HNSW
 
@@ -26,7 +26,9 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `distance.go` | `Metric` (Cosine / Euclidean / DotProduct) + unrolled kernels. Everything returns **smaller = closer**, so the graph never branches on the metric. |
 | `pq.go` | Hand-written min/max heaps over `[]candidate` — no `container/heap`, no interface boxing. |
 | `visited.go` | Generation-stamped visited set, reused across searches. |
+| `state.go` | `searchState`: the pooled per-traversal scratch that makes `Search` read-only. |
 | `graph_test.go` | Correctness + recall-vs-brute-force at 32 and 768 dimensions. |
+| `concurrent_test.go` | Parallel-vs-serial equivalence, mixed reader/writer race coverage. |
 | `bench_test.go` | Insert / search / distance benchmarks. |
 
 ## The knobs
@@ -78,20 +80,44 @@ The graph stores its own copy of every vector. Beyond enabling normalization,
 this stops the graph from aliasing (and being corrupted by) a caller's reused
 buffer — see `TestInsertDoesNotAliasCaller`.
 
+### 6. Pooled scratch is what makes concurrent search possible
+The scratch state used to live on `Graph`, so every `Search` *wrote* to the
+index: it stamped the visited array and rewrote the heap slices. Putting an
+`RWMutex` on top of that would have been theatre — two readers holding `RLock`
+would still have corrupted each other's traversal.
+
+So the scratch moved first, into a pooled `searchState` (`state.go`), and only
+then did the `RWMutex` go on. Now `Search` genuinely only reads the graph:
+readers run in parallel, `Insert` excludes them, and the pool keeps the
+2-allocations-per-search property intact because it hands back the same 40 KB
+visited array and heaps instead of reallocating them.
+
+The lock is coarse — one `RWMutex` over the whole graph. HNSW inserts rewrite
+neighbor lists several hops from the new node, so there is no small region to
+lock instead; fine-grained writes are a later step. Reads scale, writers
+serialize.
+
+`TestConcurrentSearchMatchesSerial` pins the guarantee: the same queries run from
+16 goroutines must return exactly what they return serially.
+
 ## Measured results
 
 Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
 
 | | Before | After | Change |
 |---|---|---|---|
-| Search | 250,878 ns/op | 114,327 ns/op | **2.2× faster** |
+| Search | 250,878 ns/op | 105,117 ns/op | **2.4× faster** |
 | Search allocations | 795 | 2 | **~400× fewer** |
-| Search bytes | 95,579 B/op | 1,264 B/op | **75× less** |
-| Insert allocations | 1,680 | 210 | **8× fewer** |
+| Search bytes | 95,579 B/op | 1,269 B/op | **75× less** |
+| Search, 16 goroutines | — | 8,288 ns/op | **12.7× throughput** |
+| Insert allocations | 1,680 | 208 | **8× fewer** |
 | Cosine distance | 73.9 ns | 30.1 ns | **2.5× faster** |
 | Euclidean distance | 74.5 ns | 26.6 ns | **2.8× faster** |
 | Recall@10 (dim 32) | 0.994 | 0.999 | more accurate |
 | Recall@10 (dim 768) | — | 0.972 | — |
+
+Concurrency cost nothing on the serial path: search stayed at 2 allocs/op and the
+recall figures are unchanged to three decimals.
 
 ## Usage
 
@@ -117,10 +143,11 @@ wide `searchLayer` on layer 0 → return the `k` closest.
 
 ## Not implemented yet (deliberately)
 
-Delete / update, persistence (WAL + snapshots), concurrency, and SIMD assembly.
-Each is a separate upcoming slice — see `docs/MIGRATION.md`.
+Delete / update, persistence (WAL + snapshots), fine-grained write locking, and
+SIMD assembly. Each is a separate upcoming slice — see `docs/MIGRATION.md`.
 
 ```bash
 go test ./internal/hnsw/ -v                      # correctness + recall
+go test ./internal/hnsw/ -race                   # concurrency
 go test ./internal/hnsw/ -run='^$' -bench=. -benchmem
 ```

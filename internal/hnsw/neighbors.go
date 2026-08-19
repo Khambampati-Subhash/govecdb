@@ -14,7 +14,7 @@ import (
 // c is reachable via s, so that edge buys nothing. Alpha > 1 tightens the test,
 // preserving more long-range links and making the graph easier to navigate.
 // cands carry their distance to base already, so base itself is not needed.
-func (g *Graph) selectNeighbors(cands []candidate, m int) []int {
+func (g *Graph) selectNeighbors(st *searchState, cands []candidate, m int) []int {
 	if len(cands) <= m {
 		out := make([]int, len(cands))
 		for i, c := range cands {
@@ -24,7 +24,7 @@ func (g *Graph) selectNeighbors(cands []candidate, m int) []int {
 	}
 
 	selected := make([]int, 0, m)
-	rejected := g.scratchSel[:0]
+	rejected := st.rejected[:0]
 
 	for _, c := range cands {
 		if len(selected) >= m {
@@ -50,13 +50,13 @@ func (g *Graph) selectNeighbors(cands []candidate, m int) []int {
 		selected = append(selected, rejected[i].idx)
 	}
 
-	g.scratchSel = rejected
+	st.rejected = rejected
 	return selected
 }
 
 // pruneConnections trims a node's neighbor list on layer lc back to the layer
 // cap, applying the same diversity heuristic used when inserting.
-func (g *Graph) pruneConnections(idx, lc int) {
+func (g *Graph) pruneConnections(st *searchState, idx, lc int) {
 	maxConn := g.maxConn(lc)
 	nbrs := g.neighborsAt(idx, lc)
 	if len(nbrs) <= maxConn {
@@ -72,7 +72,7 @@ func (g *Graph) pruneConnections(idx, lc int) {
 	}
 	sort.Slice(cands, func(i, j int) bool { return cands[i].dist < cands[j].dist })
 
-	g.nodes[idx].neighbors[lc] = g.selectNeighbors(cands, maxConn)
+	g.nodes[idx].neighbors[lc] = g.selectNeighbors(st, cands, maxConn)
 }
 
 // connect adds `to` to `from`'s neighbor list on layer lc, skipping duplicates.

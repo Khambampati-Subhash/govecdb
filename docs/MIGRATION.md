@@ -57,8 +57,8 @@ govecdb/
 ├── options.go           # functional-options construction
 ├── errors.go            # exported sentinel errors
 ├── internal/
-│   ├── hnsw/            # index engine                          ✅ done
-│   ├── wal/             # write-ahead log                       ← next
+│   ├── hnsw/            # index engine — concurrent reads       ✅ done
+│   ├── wal/             # write-ahead log
 │   ├── snapshot/        # snapshots + recovery
 │   ├── store/           # in-memory vector store
 │   ├── filter/          # metadata query engine
@@ -69,16 +69,17 @@ govecdb/
 ## Ordered execution (each = one green-gated commit)
 
 1. ~~**`internal/hnsw`**~~ — from-scratch index, brute-force recall tests, benchmarks. **Done.**
-2. **`internal/wal`** — append-only log behind a `WAL` interface. **Next.**
-3. **`internal/snapshot`** — point-in-time graph snapshot + recovery that replays the WAL.
-4. **Delete / update semantics** in the index — needs tombstones and a rebuild policy.
-5. **Concurrency** — the graph is single-threaded today; make reads concurrent first.
+2. ~~**Concurrent reads**~~ — scratch pooled into `searchState`, graph guarded by an
+   `RWMutex`, parallel `Search`. **Done.** Fine-grained write locking is deferred.
+3. **Delete / update semantics** in the index — tombstones and a rebuild policy. **Next.**
+4. **`internal/wal`** — append-only log behind a `WAL` interface, with segment rotation.
+5. **`internal/snapshot`** — point-in-time graph snapshot + recovery that replays the WAL.
 6. **`internal/store`** — vector + metadata storage behind a `Store` interface.
 7. **`internal/filter`** — metadata query engine, with tests from day one.
 8. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users import.
 9. **Examples + README** for the real API.
 
-## Phase 2 — WAL (next)
+## Phase — WAL
 
 Design constraints, decided:
 
@@ -110,5 +111,7 @@ Same bar as the index: small single-responsibility files, comments that explain
 
 - **Recall regression** — the baseline is locked in `graph_test.go` (0.999 @ dim 32,
   0.972 @ dim 768). Any index change must keep those numbers.
-- **Allocation regression** — search is 2 allocs/op; `-benchmem` guards it.
+- **Allocation regression** — search is 2 allocs/op; `-benchmem` guards it. The
+  scratch pool must keep it there: allocating a `searchState` per search would
+  undo the whole zero-allocation path.
 - Every step is a separate commit and reverts cleanly.
