@@ -1,0 +1,231 @@
+# GoVecDB v1 — what the HNSW index actually stores
+#
+# The layered graph, the anatomy of a node, and where the bytes go.
+
+vars: {
+  d2-config: {
+    theme-id: 200
+    layout-engine: elk
+    pad: 40
+  }
+}
+
+
+# Black canvas. Theme 200 makes default label/markdown text light;
+# every explicit fill below is a dark surface chosen to keep its hue.
+style.fill: "#000000"
+
+direction: down
+
+classes: {
+  group: {
+    style.fill: "#0C0C14"
+    style.stroke: "#44445A"
+    style.stroke-width: 2
+  }
+  node: {
+    shape: circle
+    style.fill: "#12385C"
+    style.stroke: "#64B5F6"
+  }
+  entry: {
+    shape: circle
+    style.fill: "#4A1418"
+    style.stroke: "#EF5350"
+    style.stroke-width: 3
+  }
+  layer: {
+    style.fill: "#161616"
+    style.stroke: "#6E6E6E"
+  }
+  struct: {
+    style.fill: "#191B33"
+    style.stroke: "#9FA8DA"
+    style.stroke-width: 2
+  }
+  note: {
+    shape: text
+    style.font-size: 13
+    style.italic: true
+  }
+}
+
+graph_struct: "Graph — internal/hnsw/graph.go" {
+  shape: sql_table
+
+  cfg: Config
+  dist: "DistanceFunc — chosen once, never branched on"
+  nodes: "[]*node"
+  ids: "map[string]int — external id → slot"
+  entry: "int — entry point, -1 when empty"
+  maxLevel: int
+  mMax: "int — neighbor cap, layers > 0"
+  mMax0: "int — neighbor cap, layer 0 (= 2·M)"
+  ml: "float64 — 1/ln(M), level decay"
+  rng: "*rand.Rand — seeded, reproducible"
+  visited: "visitedList — generation stamps"
+  scratch: "scratchCands / scratchRes / scratchSel / queryBuf"
+}
+
+node_struct: "node — internal/hnsw/node.go" {
+  shape: sql_table
+
+  id: "string — caller's external id"
+  vector: "[]float32 — graph-owned copy, normalized for Cosine"
+  neighbors: "[][]int — neighbors[l] = slots on layer l"
+}
+
+hierarchy: The layered graph {
+  class: group
+  direction: down
+
+  # grid-columns, not `direction: right` — nested direction is a TALA-only
+  # feature; dagre and ELK both ignore it. Grids are engine-independent and
+  # still draw intra-container edges.
+  l2: Layer 2 — sparse, long jumps {
+    class: layer
+    grid-columns: 2
+    grid-gap: 90
+    a2: A {
+      class: entry
+    }
+    d2n: D {
+      class: node
+    }
+    a2 -- d2n
+  }
+
+  l1: Layer 1 — medium hops {
+    class: layer
+    grid-columns: 3
+    grid-gap: 70
+    a1: A {
+      class: node
+    }
+    c1: C {
+      class: node
+    }
+    d1: D {
+      class: node
+    }
+    a1 -- c1
+    c1 -- d1
+  }
+
+  l0: Layer 0 — EVERY vector lives here {
+    class: layer
+    grid-columns: 5
+    grid-gap: 50
+    a0: A {
+      class: node
+    }
+    b0: B {
+      class: node
+    }
+    c0: C {
+      class: node
+    }
+    d0: D {
+      class: node
+    }
+    e0: E {
+      class: node
+    }
+    a0 -- b0
+    b0 -- c0
+    c0 -- d0
+    d0 -- e0
+    a0 -- c0
+  }
+
+  l2 -> l1: descend {
+    style.stroke: "#EF5350"
+    style.stroke-width: 2
+  }
+  l1 -> l0: descend {
+    style.stroke: "#EF5350"
+    style.stroke-width: 2
+  }
+}
+
+level_note: |md
+  ### How a node picks its top layer
+
+  `randomLevel() = int(-log(rand()) * ml)`, `ml = 1/ln(M)`
+
+  Exponentially decaying: most nodes stop at layer 0, a few
+  reach high. That is what makes the top sparse and the
+  descent cheap. The RNG is **seeded**, so replaying the same
+  inserts in the same order rebuilds an identical graph — which
+  makes recovery-by-replay verifiable in a test.
+| {
+  class: note
+}
+
+selection: Neighbor selection — the recall lever {
+  style.fill: "#332B0D"
+  style.stroke: "#FFD54F"
+  style.stroke-width: 2
+
+  body: |md
+    ### Not "keep the M closest"
+
+    Keeping the M nearest produces edges that all point into the
+    same cluster, and searches strand in local minima.
+
+    Instead, drop candidate `c` when it already sits closer to an
+    already-chosen neighbor `s` than to the node itself — you
+    could reach `c` by hopping through `s`, so that edge buys
+    nothing:
+
+    `alpha * d(c,s) <= d(c,base)  →  reject c`
+
+    **alpha = 1.0** classic HNSW heuristic
+    **alpha > 1.0** prunes harder, keeps more long-range shortcut
+    edges, measurably lifts recall. Default **1.2**.
+
+    Rejected candidates are **backfilled** if the list comes up
+    short — a node with too few edges is a dead end during search.
+  |
+}
+
+memory: Memory budget {
+  style.fill: "#16290F"
+  style.stroke: "#9CCC65"
+  style.stroke-width: 2
+
+  body: |md
+    ### Per node
+
+    **vector** — `dim × 4 bytes`
+    **neighbors** — up to `2M` ints on L0 + `M` per upper layer
+    at M=16: ≈ 256 B on L0, plus slice headers
+
+    ### At the 4096-dim cap
+
+    16 KiB/vector → **1M vectors ≈ 16 GiB**, graph overhead is noise
+
+    ### At 128 dims
+
+    512 B/vector → the **neighbor lists cost more than the data**
+
+    Know which regime you are in — it decides whether quantization
+    or graph compaction is the optimization that matters.
+  |
+}
+
+graph_struct -> node_struct: "nodes[i]"
+node_struct -> hierarchy: participates on layers 0..topLevel
+hierarchy -> selection: edges chosen by
+
+# --- annotations, drawn faint so they never compete with the flow ---
+hierarchy -> level_note: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}
+node_struct -> memory: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}

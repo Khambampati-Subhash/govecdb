@@ -1,0 +1,223 @@
+# GoVecDB v1 — insert path, end to end
+#
+# The ordering constraint is the whole point: the WAL append is the COMMIT
+# POINT. Apply-to-graph happens after, and is safe to redo on replay. Reverse
+# these two and a crash between them means you acked a write that no longer
+# exists.
+
+vars: {
+  d2-config: {
+    theme-id: 200
+    layout-engine: elk
+    pad: 40
+  }
+}
+
+
+# Black canvas. Theme 200 makes default label/markdown text light;
+# every explicit fill below is a dark surface chosen to keep its hue.
+style.fill: "#000000"
+
+direction: down
+
+classes: {
+  step: {
+    style.fill: "#0D2137"
+    style.stroke: "#4FC3F7"
+    style.stroke-width: 2
+  }
+  critical: {
+    style.fill: "#3B1215"
+    style.stroke: "#FF6B6B"
+    style.stroke-width: 3
+  }
+  wal: {
+    style.fill: "#33240E"
+    style.stroke: "#FFB74D"
+    style.stroke-width: 2
+  }
+  graph: {
+    style.fill: "#191B33"
+    style.stroke: "#9FA8DA"
+  }
+  disk: {
+    shape: cylinder
+    style.fill: "#0E2A16"
+    style.stroke: "#66BB6A"
+  }
+  note: {
+    shape: text
+    style.font-size: 13
+    style.italic: true
+  }
+}
+
+start: "Insert(ns, id, vec, meta)" {
+  shape: circle
+  style.fill: "#3A2B52"
+  style.stroke: "#B39DDB"
+}
+
+s1: 1 · Validate {
+  class: step
+  body: |md
+    dimension · non-empty · ≤ 4096
+    reject NaN / ±Inf
+  |
+}
+
+s2: 2 · Resolve namespace {
+  class: step
+  body: |md
+    registry lookup; create or
+    load the collection if cold
+  |
+}
+
+s3: 3 · Assign sequence number {
+  class: step
+  body: |md
+    monotonic LSN — orders the WAL and
+    marks where a snapshot ends
+  |
+}
+
+wal_block: 4 · WAL APPEND — the commit point {
+  class: critical
+
+  encode: Encode record {
+    class: wal
+    fmt: |md
+      `[crc32][type=INSERT][seq][len][payload]`
+      payload = id + dim + float32s + meta
+    |
+  }
+
+  append: Append to buffer {
+    class: wal
+  }
+
+  fsync: fsync policy gate {
+    class: wal
+    body: |md
+      **always** — safe, ~1–10 ms/write on consumer NVMe
+      **interval** — group commit, default ~50 ms
+      **never** — tests and benchmarks only
+    |
+  }
+
+  encode -> append -> fsync
+}
+
+durable_note: |md
+  **Only after fsync returns is the write durable.**
+  With `interval`, you may lose up to that window on
+  power loss — that is a documented product decision,
+  not an accident. Redis ships the same tradeoff.
+| {
+  class: note
+}
+
+s5: 5 · Apply to in-memory graph {
+  class: critical
+
+  copy: "prepare(v) — copy + normalize" {
+    class: graph
+    body: |md
+      Copies so the graph never aliases a
+      caller buffer. Normalizes for Cosine,
+      collapsing it to `1 - dot(a,b)`.
+    |
+  }
+
+  lvl: "randomLevel()" {
+    class: graph
+    body: |md
+      `int(-log(rand) * ml)`, `ml = 1/ln(M)`
+      Seeded → replay reproduces the graph
+    |
+  }
+
+  descend: Greedy descend maxLevel → level+1 {
+    class: graph
+    body: ef=1, just to find a good entry point
+  }
+
+  connect: For each layer level → 0 {
+    class: graph
+    body: |md
+      1. `searchLayer(vec, cur, EfConstruction, lc)`
+      2. `selectNeighbors(w, maxConn(lc))` — alpha-pruned
+      3. `connect(new, nb)` **and** `connect(nb, new)`
+      4. `pruneConnections(nb, lc)` — trim to cap
+      5. seed next layer with the closest hit
+    |
+  }
+
+  promote: Promote to entry point {
+    class: graph
+    body: if level > maxLevel
+  }
+
+  copy -> lvl -> descend -> connect -> promote
+}
+
+s6: 6 · Ack client {
+  shape: circle
+  style.fill: "#1B4D2E"
+  style.stroke: "#66BB6A"
+}
+
+wal_disk: WAL segment on disk {
+  class: disk
+  style.multiple: true
+}
+
+crash: Crash here? {
+  shape: diamond
+  style.fill: "#4A1418"
+  style.stroke: "#EF5350"
+}
+
+crash_note: |md
+  **Crash after step 4, before step 6** → the record is on
+  disk. Replay re-applies it. The client never got an ack,
+  so a retry is idempotent (duplicate id is a no-op today).
+
+  **Crash before step 4 completes** → torn tail record. CRC
+  fails on recovery, the log truncates there, the write
+  simply never happened. Both outcomes are consistent.
+| {
+  class: note
+}
+
+start -> s1 -> s2 -> s3 -> wal_block.encode
+
+wal_block.fsync -> wal_disk: durable {
+  style.stroke: "#FFB74D"
+  style.stroke-width: 3
+}
+
+wal_block.fsync -> s5.copy: "ONLY NOW apply" {
+  style.stroke: "#FF6B6B"
+  style.stroke-width: 3
+  style.bold: true
+}
+
+s5.promote -> s6
+
+wal_block -> crash: {
+  style.stroke-dash: 3
+  style.opacity: 0.75
+}
+crash -> crash_note: {
+  style.stroke-dash: 3
+  style.opacity: 0.75
+}
+
+# --- annotations, drawn faint so they never compete with the flow ---
+wal_block -> durable_note: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}

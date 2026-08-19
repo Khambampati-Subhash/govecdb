@@ -1,0 +1,223 @@
+# GoVecDB v1 — end-to-end architecture
+#
+# The load-bearing distinction in this diagram is the RAM / disk boundary.
+# Vectors are RAM-resident because HNSW computes a distance at EVERY hop of
+# traversal; if `.vector` were a disk read, one search would become hundreds
+# of seeks. Disk carries durability (WAL + snapshot) and cold payload only.
+
+vars: {
+  d2-config: {
+    theme-id: 200
+    layout-engine: elk
+    pad: 40
+  }
+}
+
+
+# Black canvas. Theme 200 makes default label/markdown text light;
+# every explicit fill below is a dark surface chosen to keep its hue.
+style.fill: "#000000"
+
+direction: down
+
+classes: {
+  group: {
+    style.fill: "#0C0C14"
+    style.stroke: "#44445A"
+    style.stroke-width: 2
+  }
+  api: {
+    style.fill: "#241B33"
+    style.stroke: "#B39DDB"
+    style.stroke-width: 2
+  }
+  ram: {
+    style.fill: "#0D2137"
+    style.stroke: "#4FC3F7"
+    style.stroke-width: 2
+  }
+  wal: {
+    style.fill: "#33240E"
+    style.stroke: "#FFB74D"
+    style.stroke-width: 2
+  }
+  disk: {
+    shape: cylinder
+    style.fill: "#0E2A16"
+    style.stroke: "#66BB6A"
+    style.stroke-width: 2
+  }
+  bg: {
+    shape: hexagon
+    style.fill: "#2A1233"
+    style.stroke: "#CE93D8"
+  }
+  note: {
+    shape: text
+    style.font-size: 13
+    style.italic: true
+  }
+}
+
+client: Caller supplies embeddings {
+  shape: person
+  style.fill: "#1C1C1C"
+}
+
+embed_note: |md
+  **Out of scope: GoVecDB never generates embeddings.**
+  Running a model in-process means ONNX → CGO → the end of
+  "pure Go, embeddable". Callers bring their own vectors.
+| {
+  class: note
+}
+
+api: Public API — db.go / vector.go / options.go {
+  class: api
+
+  insert: Insert(ns, id, vec, meta)
+  search: Search(ns, query, k, ef)
+  del: Delete(ns, id)
+}
+
+validate: Validation gate {
+  class: api
+  style.fill: "#3B1215"
+  style.stroke: "#FF6B6B"
+
+  checks: |md
+    - `len(vec) != 0` → ErrEmptyVector
+    - `len(vec) == cfg.Dimension` → ErrDimensionMismatch
+    - `cfg.Dimension <= 4096` (policy cap)
+    - reject NaN / ±Inf — one poisons every
+      distance comparison it touches
+  |
+}
+
+registry: Collection registry {
+  class: ram
+  explain: |md
+    `map[namespace]*Collection`
+
+    Namespace, **not** user-id — the same
+    mechanism serves prod/staging and
+    docs/images. Load on demand, evict idle.
+  |
+}
+
+collection: Collection (one per namespace) {
+  class: ram
+
+  wal_engine: WAL engine {
+    class: wal
+    buf: Append buffer
+    sync: fsync policy — always / interval / never
+    buf -> sync
+  }
+
+  graph: HNSW graph — internal/hnsw {
+    class: ram
+    nodes: "nodes []*node — id, vector, neighbors"
+    ids: "ids map[string]int"
+    entry: entry point + maxLevel
+    scratch: reusable scratch buffers — 2 allocs/op
+  }
+
+  meta: Metadata / payload index {
+    class: ram
+    explain: id → disk offset
+  }
+}
+
+# The container is a plain group: a hexagon container puts its own label
+# underneath its children. Only the leaf workers are hexagons.
+background: Background workers {
+  class: group
+
+  checkpointer: Checkpointer {
+    class: bg
+  }
+  truncator: WAL truncator {
+    class: bg
+  }
+}
+
+storage: Disk {
+  class: group
+  direction: right
+
+  wal_files: WAL segments\nwal-000017.log {
+    class: disk
+    style.multiple: true
+  }
+  snap: Snapshot\nsnap-000016.bin {
+    class: disk
+  }
+  payload: Payload store\n(text, metadata) {
+    class: disk
+  }
+}
+
+ram_note: |md
+  ### Everything in this band is RAM
+
+  At the 4096-dim cap: 4096 × 4B = **16 KiB per vector**,
+  so 1M vectors ≈ **16 GiB** before graph overhead.
+  At high dims vectors dominate; at 128 dims the
+  neighbor lists cost more than the data.
+| {
+  class: note
+}
+
+client -> api.insert: vec + metadata
+client -> api.search: query vector
+client -> api.del: id
+
+api.insert -> validate
+api.search -> validate
+api.del -> validate
+
+validate -> registry: resolve namespace
+registry -> collection
+
+# --- the write ordering that makes durability work ---
+collection.wal_engine -> collection.graph: "2. then apply" {
+  style.stroke: "#FF6B6B"
+  style.stroke-width: 3
+  style.bold: true
+}
+
+collection.wal_engine -> storage.wal_files: "1. append + fsync\n(commit point)" {
+  style.stroke: "#FFB74D"
+  style.stroke-width: 3
+}
+
+# --- read path never touches disk for vectors ---
+collection.graph -> collection.meta: top-k ids
+collection.meta -> storage.payload: "hydrate k payloads only\n(never during traversal)" {
+  style.stroke: "#66BB6A"
+  style.stroke-dash: 4
+}
+
+# --- background persistence ---
+collection.graph -> background.checkpointer: "snapshot FROM RAM\n(never re-reads the WAL)" {
+  style.stroke: "#CE93D8"
+  style.stroke-width: 2
+}
+background.checkpointer -> storage.snap: write + fsync + rename
+background.checkpointer -> background.truncator: snapshot durable at seq N
+background.truncator -> storage.wal_files: drop segments < N {
+  style.stroke-dash: 3
+}
+
+# --- annotations, drawn faint so they never compete with the flow ---
+client -> embed_note: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}
+collection -> ram_note: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}

@@ -1,0 +1,320 @@
+# GoVecDB v1 — persistence and recovery (phase 2)
+#
+# Three independent clocks, differing by orders of magnitude:
+#   WAL append     every write, synchronous, buffered
+#   WAL fsync      ~50 ms (policy) — bounds how much you can lose
+#   Checkpoint     seconds to minutes — bounds recovery time and WAL size
+#
+# The WAL is read exactly ONCE in the life of a process: at startup.
+# Snapshots are written FROM RAM. You never re-read the log to persist.
+
+vars: {
+  d2-config: {
+    theme-id: 200
+    layout-engine: elk
+    pad: 40
+  }
+}
+
+
+# Black canvas. Theme 200 makes default label/markdown text light;
+# every explicit fill below is a dark surface chosen to keep its hue.
+style.fill: "#000000"
+
+direction: down
+
+classes: {
+  group: {
+    style.fill: "#0C0C14"
+    style.stroke: "#44445A"
+    style.stroke-width: 2
+  }
+  ram: {
+    style.fill: "#0D2137"
+    style.stroke: "#4FC3F7"
+    style.stroke-width: 2
+  }
+  wal: {
+    style.fill: "#33240E"
+    style.stroke: "#FFB74D"
+    style.stroke-width: 2
+  }
+  disk: {
+    shape: cylinder
+    style.fill: "#0E2A16"
+    style.stroke: "#66BB6A"
+    style.stroke-width: 2
+  }
+  bad: {
+    style.fill: "#3B1215"
+    style.stroke: "#EF5350"
+    style.stroke-width: 2
+  }
+  note: {
+    shape: text
+    style.font-size: 13
+    style.italic: true
+  }
+}
+
+record: WAL record layout {
+  shape: sql_table
+
+  crc32: "uint32  — checksum of everything after it"
+  type: "uint8   — INSERT | DELETE | CHECKPOINT"
+  seq: "uint64  — monotonic LSN"
+  len: "uint32  — payload byte length"
+  payload: "[]byte  — id, dim, float32s, metadata"
+}
+
+header: Segment file header {
+  shape: sql_table
+
+  magic: "uint32 — 'GVWL', catches a wrong file"
+  version: "uint8  — REQUIRED from commit one"
+}
+
+fmt_note: |md
+  ### Why `[len][data]` is not enough
+
+  **crc32** — power loss mid-append leaves a partial record.
+  Length-only means you read garbage as valid data. With a
+  checksum, recovery reads until CRC fails and truncates
+  there. A torn tail is *expected*, not an error.
+
+  **version** — a format without a version byte can never be
+  migrated. Free now, impossible to retrofit.
+
+  **type** — deletes are coming; leaving room costs nothing.
+
+  **seq** — tells you where the snapshot ends and the
+  replay tail begins.
+| {
+  class: note
+}
+
+runtime: Running system {
+  class: group
+  direction: right
+
+  ram_state: In-memory state {
+    class: ram
+    g: HNSW graph — the live truth
+    m: id → payload offset map
+  }
+
+  wal_active: Active segment {
+    class: wal
+    body: wal-000017.log
+  }
+
+  ram_state -> wal_active: "append BEFORE apply" {
+    style.stroke: "#FF6B6B"
+    style.stroke-width: 3
+  }
+}
+
+derived_note: |md
+  **The graph is derived state, never the source of truth.**
+  It can always be reconstructed from snapshot + WAL. That
+  is what lets recovery be simple and what makes the
+  write ordering non-negotiable.
+| {
+  class: note
+}
+
+checkpoint: Checkpoint cycle {
+  class: group
+  direction: down
+
+  c1: 1 · Freeze a consistent view {
+    class: ram
+    body: note the current seq — call it N
+  }
+  c2: 2 · Serialize FROM RAM {
+    class: ram
+    body: |md
+      **not** by re-reading the WAL —
+      the in-memory state is the source
+    |
+  }
+  c3: 3 · Write to a temp file {
+    class: disk
+  }
+  c4: 4 · fsync, then atomic rename {
+    class: disk
+    body: rename is the commit — a half-written snapshot is never visible
+  }
+  c5: 5 · Truncate WAL below N {
+    class: wal
+    body: delete whole segments — this is why rotation exists
+  }
+
+  c1 -> c2 -> c3 -> c4 -> c5
+}
+
+snapshot_choice: The decision hiding in the snapshot {
+  style.fill: "#332B0D"
+  style.stroke: "#FFD54F"
+  style.stroke-width: 3
+
+  body: |md
+    ### Vectors only, or vectors + graph structure?
+
+    **Vectors only** — small, simple format, but recovery
+    re-inserts everything. Rebuilding 1M × 768 is **minutes**,
+    not seconds.
+
+    **Vectors + neighbor lists** — larger and fiddlier, but
+    recovery is deserialization.
+
+    **Start with vectors-only. Then measure recovery time
+    before calling it done.** If it is unacceptable, serialize
+    the graph. Do not discover this in production.
+  |
+}
+
+storage: Disk layout {
+  class: group
+  direction: right
+
+  seg_old: wal-000015.log\nwal-000016.log {
+    class: disk
+    style.multiple: true
+    style.opacity: 0.7
+  }
+  snap: snap-000016.bin {
+    class: disk
+  }
+  seg_new: wal-000017.log\n(active) {
+    class: disk
+  }
+}
+
+truncated_note: |md
+  Segments at or below the snapshot's seq are
+  **deletable** — their contents are already
+  captured in `snap-000016.bin`.
+| {
+  class: note
+}
+
+recovery: Recovery — the only time the WAL is read {
+  class: group
+  direction: down
+
+  r1: 1 · Find newest valid snapshot {
+    class: disk
+  }
+  r2: 2 · Load it — rebuild vectors (and graph, if serialized) {
+    class: ram
+  }
+  r3: 3 · Replay WAL records with seq > N {
+    class: wal
+    body: in original order — same order + same seed = identical graph
+  }
+  r4: 4 · CRC fails on the tail record? {
+    shape: diamond
+    class: bad
+  }
+  r5: 5 · Truncate there and continue {
+    class: wal
+    body: |md
+      A torn final record is the **normal**
+      outcome of a power loss, not corruption.
+      Do not fail the whole recovery for it.
+    |
+  }
+  r6: 6 · Open for writes {
+    shape: circle
+    style.fill: "#1B4D2E"
+    style.stroke: "#66BB6A"
+  }
+
+  r1 -> r2 -> r3 -> r4
+  r4 -> r5: yes
+  r4 -> r6: no, clean tail
+  r5 -> r6
+}
+
+test_note: |md
+  ### Test this by actually killing the process
+
+  A recovery path verified only by unit tests that call
+  `Close()` cleanly is a recovery path that has never been
+  tested. Spawn a child, `SIGKILL` it mid-write, reopen,
+  assert the surviving prefix is exactly consistent.
+
+  This is the single highest-value test in the WAL package.
+| {
+  class: note
+}
+
+prereq: Blocked on two things that do not exist yet {
+  class: bad
+
+  body: |md
+    **1 · Deletes.** The record type reserves `DELETE`, but
+    `Graph` has no `Delete` method. Removing an HNSW node can
+    disconnect the graph; the standard answer is tombstones
+    plus periodic rebuild. Settle the semantics before
+    freezing the record format.
+
+    **2 · Concurrency.** The graph is single-threaded, and the
+    scratch buffers make even concurrent *reads* unsafe. The
+    moment a WAL writer and a reader coexist you need at
+    minimum an `RWMutex`, and per-goroutine scratch to keep
+    the 2-allocs/op number.
+  |
+}
+
+header -> record: "file starts with, then N records"
+runtime.wal_active -> storage.seg_new: appends land here
+runtime.ram_state -> checkpoint.c1: periodically {
+  style.stroke: "#CE93D8"
+  style.stroke-width: 2
+}
+checkpoint.c4 -> storage.snap
+checkpoint.c5 -> storage.seg_old: delete {
+  style.stroke-dash: 3
+}
+storage.snap -> recovery.r1: on startup {
+  style.stroke: "#4FC3F7"
+  style.stroke-width: 2
+}
+storage.seg_new -> recovery.r3: tail only {
+  style.stroke: "#4FC3F7"
+  style.stroke-width: 2
+}
+
+# --- annotations, drawn faint so they never compete with the flow ---
+record -> fmt_note: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}
+runtime -> derived_note: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}
+checkpoint -> snapshot_choice: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}
+storage -> truncated_note: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}
+recovery -> test_note: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}
+recovery -> prereq: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}

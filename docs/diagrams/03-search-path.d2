@@ -1,0 +1,213 @@
+# GoVecDB v1 — search path, end to end
+#
+# Every hop of the descent computes a distance against a RAM-resident vector.
+# Disk is touched exactly once, at the end, to hydrate the payloads of the k
+# winners. Nothing on the traversal path is allowed to block on I/O.
+
+vars: {
+  d2-config: {
+    theme-id: 200
+    layout-engine: elk
+    pad: 40
+  }
+}
+
+
+# Black canvas. Theme 200 makes default label/markdown text light;
+# every explicit fill below is a dark surface chosen to keep its hue.
+style.fill: "#000000"
+
+direction: down
+
+classes: {
+  step: {
+    style.fill: "#0D2137"
+    style.stroke: "#4FC3F7"
+    style.stroke-width: 2
+  }
+  hot: {
+    style.fill: "#332B0D"
+    style.stroke: "#FFD54F"
+    style.stroke-width: 2
+  }
+  disk: {
+    shape: cylinder
+    style.fill: "#0E2A16"
+    style.stroke: "#66BB6A"
+  }
+  note: {
+    shape: text
+    style.font-size: 13
+    style.italic: true
+  }
+}
+
+start: "Search(ns, query, k, ef)" {
+  shape: circle
+  style.fill: "#3A2B52"
+  style.stroke: "#B39DDB"
+}
+
+s1: 1 · Validate + clamp {
+  class: step
+  body: |md
+    `len(query) == cfg.Dimension`
+    `if ef < k { ef = k }` — ef below k
+    cannot return k results
+    empty graph → nil, nil
+  |
+}
+
+s2: 2 · Normalize query {
+  class: step
+  body: |md
+    Into `g.queryBuf`, a reusable scratch
+    buffer — the caller's slice is never
+    touched, and this costs no allocation
+  |
+}
+
+hot_path: HOT PATH — RAM only, zero disk I/O {
+  class: hot
+
+  s3: 3 · Greedy descent, maxLevel → 1 {
+    class: step
+    body: |md
+      `greedyClosest(cur, q, lc)`
+
+      At each layer, step to the closest neighbor
+      until none improves. ef=1. Cheap navigation
+      that lands us in the right region.
+    |
+  }
+
+  s4: 4 · "searchLayer(q, cur, ef, 0)" {
+    class: step
+    body: |md
+      Best-first search on layer 0, the only
+      layer holding every vector.
+
+      **candidates** — min-heap (closest first)
+      **results** — max-heap (farthest at top,
+      so the worst keeper is O(1) to test)
+
+      Stop when the nearest frontier node is
+      farther than the current worst result:
+      everything left is worse too.
+    |
+  }
+
+  s3 -> s4: seed with best entry point
+}
+
+alloc_note: |md
+  ### Why this is 2 allocs/op
+
+  - **visited set** — generation-stamped array, not a
+    `map[int]struct{}`. Clearing is `gen++`, O(1), no alloc.
+  - **heaps** — plain `[]candidate` with hand-written
+    sift up/down. `container/heap` passes values as `any`,
+    which boxes every candidate (~795 allocs/search).
+  - The only two allocations are the result slice and the
+    `[]Result` handed back to the caller.
+
+  **Cost of this speed:** the scratch buffers are graph-owned,
+  so concurrent `Search` calls on one graph corrupt each other.
+  Single-threaded today, by design — not an oversight.
+| {
+  class: note
+}
+
+s5: 5 · Take top k {
+  class: step
+  body: |md
+    `searchLayer` returns ascending by distance,
+    so this is a slice: `w[:k]`
+  |
+}
+
+s6: 6 · Map indices → external ids {
+  class: step
+  body: "g.nodes[c.idx].id  →  Result{ID, Distance}"
+}
+
+s7: 7 · Hydrate payloads {
+  class: step
+  style.fill: "#0E2A16"
+  body: |md
+    **k reads, not hundreds.** This is the only
+    disk access in the entire query, and it is
+    for text/metadata — never for the float32s
+    the traversal needed.
+  |
+}
+
+payload: Payload store {
+  class: disk
+}
+
+done: Results — ascending, smaller = closer {
+  shape: circle
+  style.fill: "#1B4D2E"
+  style.stroke: "#66BB6A"
+}
+
+recall_note: |md
+  ### ef is the accuracy dial
+
+  `ef` is the **only** per-query knob. Bigger = wider
+  layer-0 search = higher recall, slower. Locked baselines:
+  **recall@10 = 0.999** at dim 32, **0.972** at dim 768,
+  measured against brute force in `graph_test.go`.
+
+  `M` and `EfConstruction` are build-time and structural —
+  changing `M` requires a full rebuild.
+| {
+  class: note
+}
+
+antipattern: REJECTED DESIGN {
+  style.fill: "#3B1215"
+  style.stroke: "#EF5350"
+  style.stroke-width: 3
+
+  body: |md
+    ### "Get indices from HNSW, then fetch vectors from disk"
+
+    This cannot work. The graph does not produce candidates and
+    then need vectors — it needs a vector at **every hop** to
+    compute the next distance. At ef=64 that is hundreds of
+    lookups per query.
+
+    Backing `.vector` with disk turns a **105 µs** search into
+    hundreds of seeks. That is not a slower version of HNSW;
+    it is a different and much worse algorithm.
+
+    Making traversal disk-friendly is **DiskANN** — a different
+    index, deliberately out of scope for v1.
+  |
+}
+
+start -> s1 -> s2 -> hot_path.s3
+hot_path.s4 -> s5 -> s6 -> s7 -> done
+s7 -> payload: "k lookups by id" {
+  style.stroke: "#66BB6A"
+  style.stroke-dash: 4
+}
+
+# --- annotations, drawn faint so they never compete with the flow ---
+hot_path -> alloc_note: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}
+s5 -> recall_note: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}
+s7 -> antipattern: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}
