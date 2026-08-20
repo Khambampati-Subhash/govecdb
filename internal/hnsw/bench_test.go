@@ -60,6 +60,37 @@ func BenchmarkSearch(b *testing.B) {
 	}
 }
 
+// BenchmarkSearchTombstones measures the price of deferred deletion: dead slots
+// stay on the frontier and keep results under-filled, which loosens the pruning
+// bound and widens the search. This is the curve a compaction threshold should
+// be set against, so it is worth having a number rather than an assertion.
+func BenchmarkSearchTombstones(b *testing.B) {
+	for _, pct := range []int{0, 25, 50, 75} {
+		b.Run(fmt.Sprintf("dead=%d%%", pct), func(b *testing.B) {
+			rng := rand.New(rand.NewSource(11))
+			g, _ := New(DefaultConfig(benchDim, Cosine))
+			for i := range benchN {
+				_ = g.Insert(fmt.Sprintf("v%d", i), randomVector(rng, benchDim))
+			}
+			for i := range benchN {
+				if i%100 < pct {
+					g.Delete(fmt.Sprintf("v%d", i))
+				}
+			}
+			qs := make([][]float32, 200)
+			for i := range qs {
+				qs[i] = randomVector(rng, benchDim)
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				_, _ = g.Search(qs[i%len(qs)], benchK, benchEf)
+			}
+		})
+	}
+}
+
 func BenchmarkDistance(b *testing.B) {
 	rng := rand.New(rand.NewSource(5))
 	a := randomVector(rng, benchDim)

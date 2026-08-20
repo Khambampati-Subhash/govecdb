@@ -70,7 +70,27 @@ func (g *Graph) pruneConnections(st *searchState, idx, lc int) {
 	for i, nb := range nbrs {
 		cands[i] = candidate{nb, g.dist(g.nodes[nb].vector, self)}
 	}
-	sort.Slice(cands, func(i, j int) bool { return cands[i].dist < cands[j].dist })
+
+	// Live neighbors outrank tombstones, and only then does distance decide.
+	//
+	// This is the one place tombstones compete with live nodes for a scarce
+	// resource — edge slots — and ranking them purely by distance loses data.
+	// Insert connects nb->idx and immediately prunes nb; if a dead node wins
+	// that contest, the brand-new live node loses its only inbound edge and
+	// becomes unreachable forever. Nothing else can rescue it: a node's own
+	// outgoing edges never help anyone find it.
+	//
+	// Demoting rather than dropping is what keeps this safe. selectNeighbors
+	// backfills to the cap regardless, so a node with few live candidates still
+	// keeps its tombstone edges and the bridges they provide. Tombstones only
+	// lose slots where live alternatives actually exist.
+	sort.Slice(cands, func(i, j int) bool {
+		di, dj := g.nodes[cands[i].idx].deleted, g.nodes[cands[j].idx].deleted
+		if di != dj {
+			return !di
+		}
+		return cands[i].dist < cands[j].dist
+	})
 
 	g.nodes[idx].neighbors[lc] = g.selectNeighbors(st, cands, maxConn)
 }

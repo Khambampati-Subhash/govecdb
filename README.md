@@ -17,7 +17,7 @@ approximate-nearest-neighbor index.
 > **What exists today:** `internal/hnsw` — a complete, tested, benchmarked HNSW
 > index (1,075 lines). That is the entire codebase.
 >
-> **What does not exist yet:** the public API, persistence, deletes.
+> **What does not exist yet:** the public API, persistence, compaction.
 > There is no importable package yet — `internal/` is not consumable from outside
 > the module. See [the roadmap](docs/MIGRATION.md).
 
@@ -120,11 +120,12 @@ Recall is measured against brute-force ground truth in `graph_test.go`, not esti
 
 1. ~~**HNSW index**~~ — done, from scratch, tested against brute force
 2. ~~**Concurrent reads**~~ — done; pooled search scratch + `RWMutex`, parallel `Search`
-3. **Delete / update** semantics — tombstones plus a rebuild policy
-4. **WAL** — write-ahead log; write to WAL first, then apply to the in-memory graph
-5. **Snapshots + recovery** — replay the WAL to rebuild the graph (the graph is derived state)
-6. **Public API** — `vector.go` / `db.go` / `options.go` facade over the internals
-7. **Metadata filtering**
+3. ~~**Delete**~~ — done; tombstones that keep routing, filtered out of results
+4. **Upsert + compaction** — replace a duplicate id; rebuild to reclaim tombstoned slots
+5. **WAL** — write-ahead log; write to WAL first, then apply to the in-memory graph
+6. **Snapshots + recovery** — replay the WAL to rebuild the graph (the graph is derived state)
+7. **Public API** — `vector.go` / `db.go` / `options.go` facade over the internals
+8. **Metadata filtering**
 
 Out of scope for v1 (returns in v2): clustering, REST/gRPC servers, quantization.
 

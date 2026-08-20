@@ -12,6 +12,12 @@ type node struct {
 
 	// neighbors[l] = neighbor indexes on layer l. len(neighbors) == topLevel+1.
 	neighbors [][]int
+
+	// deleted marks a tombstone. The slot keeps its index and all of its edges,
+	// so searches still route *through* it; it simply stops being an answer.
+	// See Delete for why the alternative — actually removing the slot — is not
+	// on the table.
+	deleted bool
 }
 
 // topLevel is the highest layer this node participates in.

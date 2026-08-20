@@ -20,6 +20,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `config.go` | `Config` knobs, `DefaultConfig`, and the sentinel errors callers match on. |
 | `graph.go` | The `Graph` type: state, `New`, `Len`, and the shared helpers (`randomLevel`, `prepare`). |
 | `insert.go` | `Insert` — building the graph. |
+| `delete.go` | `Delete` — tombstoning a slot, and re-electing the entry point when it is the one deleted. |
 | `search.go` | `Result`, `Search`, and the primitives it rides on: `greedyClosest`, `searchLayer`. |
 | `neighbors.go` | Edge management: alpha-pruned `selectNeighbors`, `pruneConnections`, `connect`, adjacency lookups. |
 | `node.go` | A single vector: `id`, `vector`, per-layer neighbor lists. |
@@ -29,6 +30,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `state.go` | `searchState`: the pooled per-traversal scratch that makes `Search` read-only. |
 | `graph_test.go` | Correctness + recall-vs-brute-force at 32 and 768 dimensions. |
 | `concurrent_test.go` | Parallel-vs-serial equivalence, mixed reader/writer race coverage. |
+| `delete_test.go` | Tombstone semantics, recall under deletes, entry re-election, stranding. |
 | `bench_test.go` | Insert / search / distance benchmarks. |
 
 ## The knobs
@@ -100,6 +102,39 @@ serialize.
 `TestConcurrentSearchMatchesSerial` pins the guarantee: the same queries run from
 16 goroutines must return exactly what they return serially.
 
+### 7. Delete is a tombstone, and dead nodes keep routing
+Removing a node outright is not an option twice over. Slots are addressed by
+index, so removing one shifts every index above it and invalidates every
+neighbor list in the graph. Worse, a node is a *bridge* — HNSW reaches a region
+by hopping through whatever lies between — so cutting one out can strand a whole
+neighborhood of vectors nobody deleted.
+
+So `Delete` marks the slot and leaves everything else alone. The distinction
+that makes it work lives in `searchLayer`, across its two structures:
+
+| | admits |
+|---|---|
+| `cands` — the frontier | **everything.** A dead node is still a bridge. |
+| `results` | **live nodes only.** A dead node is not an answer. |
+
+Filtering at the end instead would be simpler and wrong: it would return fewer
+than `k` hits as tombstones pile up, rather than searching wider to find `k`
+live ones.
+
+Two consequences worth knowing:
+
+- **`pruneConnections` demotes tombstones.** It is the one place dead and live
+  nodes compete for a scarce resource — edge slots. Ranked purely by distance, a
+  tombstone can evict the edge `Insert` just created and leave the new vector
+  with no inbound link, which is silent data loss. Demoting (not dropping) is
+  the fix: `selectNeighbors` still backfills to the cap, so a node with few live
+  candidates keeps its tombstone edges and the bridges they carry.
+- **`Delete` is idempotent** and returns `bool`, not `error`. Deleting an unknown
+  id is a no-op because WAL recovery replays records, and an operation that
+  failed on its second application would make replay order-sensitive.
+
+`Len` counts live vectors only; `Stats` exposes the tombstones behind them.
+
 ## Measured results
 
 Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
@@ -118,6 +153,23 @@ Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
 
 Concurrency cost nothing on the serial path: search stayed at 2 allocs/op and the
 recall figures are unchanged to three decimals.
+
+### The price of tombstones
+
+Dead slots stay on the frontier and keep `results` under-filled, which loosens
+the pruning bound and widens the search. `BenchmarkSearchTombstones` measures
+the curve a compaction threshold should be set against:
+
+| Tombstones | Search | vs. clean |
+|---|---|---|
+| 0% | 108 µs | — |
+| 25% | 127 µs | 1.2× |
+| 50% | 165 µs | 1.6× |
+| 75% | 262 µs | 2.5× |
+
+Allocations stay at 2/op throughout — tombstones cost time, not memory churn.
+Recall does not degrade: with half the graph deleted, recall@10 against brute
+force over the survivors is 1.000.
 
 ## Usage
 
@@ -143,8 +195,10 @@ wide `searchLayer` on layer 0 → return the `k` closest.
 
 ## Not implemented yet (deliberately)
 
-Delete / update, persistence (WAL + snapshots), fine-grained write locking, and
-SIMD assembly. Each is a separate upcoming slice — see `docs/MIGRATION.md`.
+Compaction (tombstones never release memory on their own), upsert semantics —
+`Insert` still no-ops on a duplicate id — persistence (WAL + snapshots),
+fine-grained write locking, and SIMD assembly. Each is a separate upcoming
+slice — see `docs/MIGRATION.md`.
 
 ```bash
 go test ./internal/hnsw/ -v                      # correctness + recall

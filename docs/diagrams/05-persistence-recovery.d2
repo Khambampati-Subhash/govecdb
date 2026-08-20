@@ -50,6 +50,11 @@ classes: {
     style.stroke: "#EF5350"
     style.stroke-width: 2
   }
+  good: {
+    style.fill: "#0E2A16"
+    style.stroke: "#66BB6A"
+    style.stroke-width: 2
+  }
   note: {
     shape: text
     style.font-size: 13
@@ -250,20 +255,26 @@ test_note: |md
   class: note
 }
 
-prereq: Blocked on deletes {
-  class: bad
+prereq: Prerequisites — both now cleared {
+  class: good
 
   body: |md
-    **Deletes.** The record type reserves `DELETE`, but
-    `Graph` has no `Delete` method. Removing an HNSW node can
-    disconnect the graph; the standard answer is tombstones
-    plus periodic rebuild. Settle the semantics before
-    freezing the record format.
+    **Deletes.** `Graph.Delete` tombstones a slot: it keeps its
+    index and its edges, so searches still route *through* it
+    while it is filtered out of results. The operation set the
+    record format has to cover is therefore settled — `INSERT`
+    and `DELETE`, with `DELETE` idempotent so replaying a
+    record twice is safe.
 
-    *Concurrency was the other blocker and is now cleared:*
-    scratch moved into a pooled `searchState` and the graph is
-    guarded by an `RWMutex`, so a WAL writer and readers can
-    coexist without giving up the 2-allocs/op search.
+    **Concurrency.** Scratch moved into a pooled `searchState`
+    and the graph is guarded by an `RWMutex`, so a WAL writer
+    and readers can coexist without giving up the 2-allocs/op
+    search.
+
+    *Still open:* compaction. Tombstones never release memory
+    on their own, and a rebuild changes every slot index — so
+    a checkpoint written before one cannot be replayed onto a
+    graph compacted after it.
   |
 }
 

@@ -63,6 +63,10 @@ func (g *Graph) Search(query []float32, k, ef int) ([]Result, error) {
 
 // greedyClosest walks layer lc from a starting node, always stepping to the
 // neighbor closest to target, until no neighbor is closer. Returns that node.
+//
+// It is deliberately blind to tombstones: this is pure routing on the upper
+// layers, and the node it lands on is a seed for the next layer down, never an
+// answer. Skipping dead nodes here would only make the descent worse.
 func (g *Graph) greedyClosest(start int, target []float32, lc int) int {
 	best := start
 	bestDist := g.dist(g.nodes[start].vector, target)
@@ -81,8 +85,18 @@ func (g *Graph) greedyClosest(start int, target []float32, lc int) int {
 }
 
 // searchLayer runs the core best-first search on a single layer, returning up
-// to ef closest nodes to query, sorted ascending by distance. Callers hold at
-// least g.mu.RLock and own st.
+// to ef closest LIVE nodes to query, sorted ascending by distance. Callers hold
+// at least g.mu.RLock and own st.
+//
+// Tombstones split the two structures this runs on, and that split is the whole
+// of the delete design:
+//
+//	cands   (the frontier) admits everything — a dead node is still a bridge
+//	results                admits live nodes only — a dead node is not an answer
+//
+// Filtering at the end instead would be simpler and wrong: it would return
+// fewer than ef hits as tombstones accumulate, rather than searching wider to
+// find ef live ones.
 func (g *Graph) searchLayer(st *searchState, query []float32, entryPoint, ef, lc int) []candidate {
 	st.visited.reset(len(g.nodes))
 
@@ -94,7 +108,9 @@ func (g *Graph) searchLayer(st *searchState, query []float32, entryPoint, ef, lc
 	d := g.dist(g.nodes[entryPoint].vector, query)
 	st.visited.visit(entryPoint)
 	cands = append(cands, candidate{entryPoint, d})
-	results = append(results, candidate{entryPoint, d})
+	if !g.nodes[entryPoint].deleted {
+		results = append(results, candidate{entryPoint, d})
+	}
 
 	var c candidate
 	for len(cands) > 0 {
@@ -111,9 +127,17 @@ func (g *Graph) searchLayer(st *searchState, query []float32, entryPoint, ef, lc
 			nd := g.dist(g.nodes[nb].vector, query)
 			if len(results) < ef || nd < results[0].dist {
 				cands = minPush(cands, candidate{nb, nd})
-				results = maxPush(results, candidate{nb, nd})
-				if len(results) > ef {
-					_, results = maxPop(results) // drop the farthest
+
+				// A tombstone rides the frontier but never becomes an answer.
+				// With many of them `results` fills slowly, which loosens the
+				// pruning bound above and makes the search explore wider — the
+				// honest, self-correcting cost of deferred deletion, and what
+				// compaction later buys back.
+				if !g.nodes[nb].deleted {
+					results = maxPush(results, candidate{nb, nd})
+					if len(results) > ef {
+						_, results = maxPop(results) // drop the farthest
+					}
 				}
 			}
 		}

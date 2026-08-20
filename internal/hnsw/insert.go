@@ -51,6 +51,17 @@ func (g *Graph) Insert(id string, vector []float32) error {
 	for lc := start; lc >= 0; lc-- {
 		w := g.searchLayer(st, vec, cur, g.cfg.EfConstruction, lc)
 		neighbors := g.selectNeighbors(st, w, g.maxConn(lc))
+
+		// searchLayer yields live nodes only, so inserting into a region whose
+		// every member is tombstoned returns nothing to attach to — and a node
+		// with no edges is unreachable forever, which is data loss, not just
+		// poor recall. Fall back to the node we searched from: edges are
+		// bidirectional, and a dead neighbor still routes, so linking to a
+		// tombstone beats isolation.
+		if len(neighbors) == 0 {
+			neighbors = append(neighbors, cur)
+		}
+
 		for _, nb := range neighbors {
 			g.connect(idx, nb, lc)
 			g.connect(nb, idx, lc)

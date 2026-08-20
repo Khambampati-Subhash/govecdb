@@ -87,6 +87,12 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   never move scratch back onto `Graph`. Concurrent writers still serialize.
 - Insert **copies** the caller's vector (and normalizes it for Cosine), so the graph
   never aliases a reused caller buffer.
+- `Delete` is a **tombstone**, never a real removal: the slot keeps its index and
+  its edges. In `searchLayer` the frontier (`cands`) admits dead nodes — they are
+  still bridges — while `results` admits only live ones. Do not "simplify" this
+  into filtering the final result slice; that silently returns fewer than `k`.
+  `pruneConnections` **demotes** tombstones so they cannot evict a fresh live
+  edge and strand a vector. `Len` is live-only; `Stats` shows the tombstones.
 - Durability model *(phase 2, not yet built)*: **write to WAL first, then apply to
   the in-memory graph**; on recovery, replay the WAL to rebuild the graph — the
   graph is derived state, never the source of truth.

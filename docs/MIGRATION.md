@@ -71,13 +71,16 @@ govecdb/
 1. ~~**`internal/hnsw`**~~ — from-scratch index, brute-force recall tests, benchmarks. **Done.**
 2. ~~**Concurrent reads**~~ — scratch pooled into `searchState`, graph guarded by an
    `RWMutex`, parallel `Search`. **Done.** Fine-grained write locking is deferred.
-3. **Delete / update semantics** in the index — tombstones and a rebuild policy. **Next.**
-4. **`internal/wal`** — append-only log behind a `WAL` interface, with segment rotation.
-5. **`internal/snapshot`** — point-in-time graph snapshot + recovery that replays the WAL.
-6. **`internal/store`** — vector + metadata storage behind a `Store` interface.
-7. **`internal/filter`** — metadata query engine, with tests from day one.
-8. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users import.
-9. **Examples + README** for the real API.
+3. ~~**Tombstone `Delete`**~~ — dead slots keep routing, results filter them,
+   entry re-election. **Done.** Upsert and compaction are the remaining index work.
+4. **Upsert + compaction** — `Insert` must replace a duplicate id, and tombstones
+   need a rebuild pass to reclaim memory. **Next.**
+5. **`internal/wal`** — append-only log behind a `WAL` interface, with segment rotation.
+6. **`internal/snapshot`** — point-in-time graph snapshot + recovery that replays the WAL.
+7. **`internal/store`** — vector + metadata storage behind a `Store` interface.
+8. **`internal/filter`** — metadata query engine, with tests from day one.
+9. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users import.
+10. **Examples + README** for the real API.
 
 ## Phase — WAL
 

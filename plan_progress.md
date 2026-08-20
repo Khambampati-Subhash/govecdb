@@ -13,7 +13,7 @@ was built that way, and what it measured. Tasks are only marked done when
 | # | Task | Status |
 |---|------|--------|
 | 1 | Pool the search scratch, then guard the graph with an `RWMutex` | ✅ |
-| 2 | Tombstone-based `Delete` with stable slot indices and entry re-election | ⬜ |
+| 2 | Tombstone-based `Delete` with stable slot indices and entry re-election | ✅ |
 | 3 | Real upsert semantics for `Insert` | ⬜ |
 | 4 | Compaction pass once tombstones cross a threshold | ⬜ |
 
@@ -162,9 +162,200 @@ the serial path.
 
 ---
 
-## Next: Task 2 — tombstone `Delete`
+## Task 2 — Tombstone `Delete` ✅
+
+*Plan.md A.2: tombstone-based `Delete` that keeps slot indices stable, keeps
+traversing through dead nodes while filtering them out of results, and re-elects
+the entry point when the entry node itself is deleted.*
+
+### Why a tombstone is the only option
+
+Two independent reasons, and the second is the one that actually forces it:
+
+1. **Slots are addressed by index.** Every neighbor list in the graph is a list
+   of `int` indices into `g.nodes`. Removing one slot shifts every index above
+   it, invalidating every neighbor list — an O(N·M) repair for a single delete.
+2. **A node is a bridge.** HNSW reaches a region by hopping through whatever
+   lies between, and those hops do not care whether the waypoint is still
+   wanted. Cut one out and a whole neighborhood can become unreachable —
+   vectors nobody deleted, gone.
+
+So `Delete` marks the slot and changes nothing else.
+
+### The core distinction
+
+A tombstone is **dead as an answer, alive as a route**. That maps onto the two
+structures `searchLayer` already runs on, and this split *is* the design:
+
+| structure | admits |
+|---|---|
+| `cands` — the frontier | everything; a dead node is still a bridge |
+| `results` | live nodes only; a dead node is not an answer |
+
+The tempting simplification — let `searchLayer` return everything and filter the
+final slice in `Search` — is wrong, and quietly so. It returns fewer than `k`
+hits as tombstones accumulate, instead of searching wider to find `k` live ones.
+Recall would rot silently as a function of delete volume.
+
+`greedyClosest` is left completely untouched: it is pure routing on the upper
+layers and never produces an answer, so it stays blind to tombstones by design.
+
+### Entry-point re-election
+
+Deleting the entry point breaks two invariants at once. `reelectEntry` restores
+both with one choice — the live node with the highest top level:
+
+- **the entry must be live**, or every search starts from a corpse;
+- **the entry must sit at exactly `maxLevel`**, because `Insert` descends from
+  `maxLevel` indexing the entry's own neighbor slice, and a shorter entry would
+  index past the end of it.
+
+Layers above the new entry are left populated but unreachable — harmless, since
+only tombstones live up there now. If every slot is dead, the graph resets to
+`entry = -1`, so the next `Insert` takes the first-node path and starts fresh.
+
+The scan is O(N), which is affordable precisely because it is rare: it costs a
+pass only when the one specific node that happens to be the entry is deleted.
+A level-indexed structure to avoid it would add permanent write-path cost to
+make a rare path cheap.
+
+### The bug this turned up
+
+The first implementation passed every semantic test — and then a stress test
+found **43 of 145 live vectors unreachable** after a delete-heavy workload.
+
+Measuring the same workload across `M`, against an insert-only control:
+
+| M | insert-only unreachable | delete-heavy, first cut |
+|---|---|---|
+| 2 | 14/145 | 43/145 |
+| 4 | **0**/145 | 12/145 |
+| 8 | **0**/145 | 1/145 |
+| 16 (default) | 0/145 | 0/145 |
+
+The control column matters: M=2 strands vectors with *no deletes at all*, so
+that row is a pre-existing property of an `M` so low that pruning drops reverse
+edges — not something deletes introduced. But M=4 and M=8 go from perfect to
+broken, and that is a genuine tombstone defect.
+
+**Root cause:** `pruneConnections` is the one place tombstones and live nodes
+compete for a scarce resource — edge slots. Ranked purely by distance, a dead
+node could evict the edge `Insert` had just created, destroying the new node's
+only *inbound* link. Nothing can rescue a node in that state: its own outgoing
+edges never help anyone find it.
+
+**Fix:** rank live nodes ahead of tombstones, then by distance. Demoting rather
+than dropping is what keeps it safe — `selectNeighbors` still backfills to the
+cap, so a node with few live candidates keeps its tombstone edges and the
+bridges they carry. Tombstones only lose slots where live alternatives exist.
+
+| M | before fix | after fix |
+|---|---|---|
+| 2 | 43/145 | **2**/145 |
+| 4 | 12/145 | **0**/145 |
+| 8 | 1/145 | **0**/145 |
+
+With no tombstones present the comparator falls straight through to distance, so
+the delete-free path is bit-identical — confirmed by the recall baselines not
+moving.
+
+A second, narrower guard also went in: `searchLayer` returns live nodes only, so
+inserting into a region whose every member is tombstoned finds nothing to attach
+to. `Insert` falls back to linking the node it searched from — a dead neighbor
+still routes, and edges are bidirectional, so linking to a tombstone beats
+isolation. After the pruning fix this only triggers at pathologically low `M`.
+
+### API decisions
+
+- **`Delete(id) bool`, not `error`.** There is no failure mode, and inventing an
+  always-nil error is worse than an honest bool. Deleting an unknown id is a
+  no-op, which makes `Delete` idempotent — deliberate, not lenient: WAL recovery
+  replays records, and an operation that failed on its second application would
+  make replay order-sensitive.
+- **`Delete` unbinds the id but keeps the slot.** Re-inserting the same id
+  allocates a *new* slot rather than resurrecting the old one, whose edges were
+  chosen for the old vector and would be wrong for a new one.
+- **`Len` counts live vectors only.** A `Len` that silently included tombstones
+  would be a trap. `Stats{Live, Deleted, Slots}` exposes what is underneath, and
+  exists to answer "is it time to compact?" without leaking graph internals to
+  whatever ends up deciding that.
+
+### Measured
+
+Locked baselines all held — the tombstone check is a bool test on a cache line
+already loaded for the vector:
+
+| | Before | After |
+|---|---|---|
+| Recall@10, dim 32 | 0.999 | **0.999** |
+| Recall@10, dim 768 | 0.972 | **0.972** |
+| Search allocations | 2 | **2** |
+| Search | 105–112 µs/op | 107–113 µs/op |
+| Search, 16 goroutines | 8.3 µs/op | 8.3–8.6 µs/op |
+
+Recall *under* deletes is the new number that matters: with half the graph
+tombstoned, recall@10 against brute force over the survivors is **1.000**.
+
+`BenchmarkSearchTombstones` measures what deferred deletion costs — dead slots
+keep `results` under-filled, which loosens the pruning bound and widens the
+search. This is the curve task 4's threshold should be set against:
+
+| Tombstones | Search | vs. clean |
+|---|---|---|
+| 0% | 108 µs | — |
+| 25% | 127 µs | 1.2× |
+| 50% | 165 µs | 1.6× |
+| 75% | 262 µs | 2.5× |
+
+Allocations stay at 2/op throughout: tombstones cost time, not memory churn.
+
+### Tests added — `internal/hnsw/delete_test.go`
+
+- **`TestTombstonesDoNotStrandVectors`** — the one that found the bug. Asserts a
+  *comparative* invariant across M ∈ {2,4,8,16}: deleting must not strand more
+  vectors than a delete-free graph of the same config, and must strand zero
+  wherever the delete-free graph is itself perfect. Comparative because M=2 is
+  pathological on its own, so an absolute threshold would either be arbitrary or
+  encode a pre-existing weakness as acceptable.
+- **`TestDeletedNodesStillRoute`** — deletes 70% and requires every survivor to
+  remain retrievable; the direct test of "dead nodes keep bridging".
+- **`TestRecallAfterDeletes`** — recall vs brute force over the survivors, so
+  deletion is held to the same bar as the rest of the index.
+- **`TestDeleteEntryPointReelects`** — deletes the entry 20 times in a row,
+  asserting both invariants after each.
+- **`TestDeleteAllThenReinsert`** — the collapse-to-empty path.
+- **`TestReinsertAfterDeleteUsesNewSlot`** — same id, new vector, and the old
+  tombstoned vector must never resurface.
+- **`TestDeleteIsIdempotent`**, **`TestLenAndStatsTrackTombstones`**,
+  **`TestConcurrentDeleteAndSearch`** (deletes against 8 live readers, `-race`).
+
+### Files touched
+
+| File | Change |
+|---|---|
+| `internal/hnsw/delete.go` | **New.** `Delete` + `reelectEntry`. |
+| `internal/hnsw/delete_test.go` | **New.** The nine tests above. |
+| `internal/hnsw/node.go` | `deleted bool` tombstone flag. |
+| `internal/hnsw/graph.go` | `numDeleted`; `Len` is live-only; `Stats` type + method. |
+| `internal/hnsw/search.go` | Frontier/results split in `searchLayer`. |
+| `internal/hnsw/neighbors.go` | `pruneConnections` demotes tombstones. |
+| `internal/hnsw/insert.go` | Isolation fallback for fully tombstoned regions. |
+| `internal/hnsw/bench_test.go` | `BenchmarkSearchTombstones`. |
+| `doc.go`, READMEs, `CLAUDE.md`, `docs/MIGRATION.md`, `docs/diagrams/` | Delete semantics documented. |
+
+### Follow-ups this opened
+
+- **Compaction is now load-bearing, not optional** (task 4). Tombstones never
+  release memory, delete+reinsert of one id grows `nodes` without bound, and the
+  cost curve above is the argument for a threshold somewhere near 25–30%.
+- `Insert` still no-ops on a duplicate id (task 3). `Delete` + `Insert` is a
+  working upsert in the meantime, which is exactly why task 3 should land before
+  the WAL record format freezes.
+
+---
+
+## Next: Task 3 — upsert semantics
 
 Ordering note: `Plan.md` puts the whole of section A ahead of the WAL on
 purpose — the record format should not freeze around an operation set that is
-still missing `Delete` and a real upsert. `docs/MIGRATION.md` has been reordered
-to match.
+still missing a real upsert. `docs/MIGRATION.md` has been reordered to match.

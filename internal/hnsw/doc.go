@@ -8,11 +8,17 @@
 // lock, inserts take the write lock, and all per-traversal scratch comes from a
 // pool so no two callers share mutable state.
 //
+// Deletion is by tombstone. A deleted slot keeps its index and its edges, so
+// searches still route *through* it, but it never appears in a result. That
+// keeps every neighbor list valid and keeps the graph connected; the cost is
+// memory and traversal work that only compaction reclaims.
+//
 // The package is split one responsibility per file:
 //
 //	config.go     Config knobs, defaults, and the sentinel errors callers see.
 //	graph.go      The Graph type: state, construction, and shared helpers.
 //	insert.go     Insert — building the graph.
+//	delete.go     Delete — tombstoning, and re-electing the entry point.
 //	search.go     Search and the layer-walking primitives it is built from.
 //	neighbors.go  Edge management: selection, pruning, adjacency lookups.
 //	node.go       A single vector and its per-layer neighbor lists.
