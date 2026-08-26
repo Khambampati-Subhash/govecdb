@@ -61,9 +61,9 @@ s1: 1 · Validate + clamp {
 s2: 2 · Normalize query {
   class: step
   body: |md
-    Into `g.queryBuf`, a reusable scratch
-    buffer — the caller's slice is never
-    touched, and this costs no allocation
+    Into `st.queryBuf`, scratch borrowed
+    from the pool — the caller's slice is
+    never touched, and this costs no allocation
   |
 }
 

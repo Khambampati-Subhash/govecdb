@@ -1,6 +1,12 @@
 # GoVecDB v1 — what the HNSW index actually stores
 #
 # The layered graph, the anatomy of a node, and where the bytes go.
+#
+# Two things are deliberately NOT on Graph. Traversal scratch lives in a pooled
+# searchState, which is what makes Search a reader rather than a writer. And a
+# removed vector is not removed: the slot stays, flagged, because slots are
+# addressed by index and because a node is a bridge. Both deletes and updates
+# leave those slots behind — see the lifecycle panel.
 
 vars: {
   d2-config: {
@@ -53,18 +59,35 @@ classes: {
 graph_struct: "Graph — internal/hnsw/graph.go" {
   shape: sql_table
 
+  mu: "sync.RWMutex — guards everything below it"
   cfg: Config
   dist: "DistanceFunc — chosen once, never branched on"
-  nodes: "[]*node"
-  ids: "map[string]int — external id → slot"
+  nodes: "[]*node — slots, append-only; indexes never shift"
+  ids: "map[string]int — LIVE external id → slot"
   entry: "int — entry point, -1 when empty"
   maxLevel: int
+  numDeleted: "int — tombstoned slots; the compaction signal"
   mMax: "int — neighbor cap, layers > 0"
   mMax0: "int — neighbor cap, layer 0 (= 2·M)"
   ml: "float64 — 1/ln(M), level decay"
+  alpha: "float32 — pruning relaxation"
+  normalized: "bool — stored vectors are unit length (Cosine)"
   rng: "*rand.Rand — seeded, reproducible"
+  pool: "sync.Pool — hands out per-traversal searchState"
+}
+
+# No explicit fill: a sql_table takes its BODY colour from `style.stroke` and
+# only its header from `style.fill`, so styling it the way every other shape in
+# these diagrams is styled produces bright rows with light text on them. The
+# green dashed edge from Graph carries the distinction instead.
+state_struct: "searchState — internal/hnsw/state.go" {
+  shape: sql_table
+
   visited: "visitedList — generation stamps"
-  scratch: "scratchCands / scratchRes / scratchSel / queryBuf"
+  cands: "[]candidate — min-heap: the frontier"
+  results: "[]candidate — max-heap: best ef so far"
+  rejected: "[]candidate — selectNeighbors' backfill"
+  queryBuf: "[]float32 — normalized copy of the query"
 }
 
 node_struct: "node — internal/hnsw/node.go" {
@@ -73,6 +96,7 @@ node_struct: "node — internal/hnsw/node.go" {
   id: "string — caller's external id"
   vector: "[]float32 — graph-owned copy, normalized for Cosine"
   neighbors: "[][]int — neighbors[l] = slots on layer l"
+  deleted: "bool — tombstone: dead as an answer, alive as a route"
 }
 
 hierarchy: The layered graph {
@@ -189,6 +213,46 @@ selection: Neighbor selection — the recall lever {
   |
 }
 
+lifecycle: A slot outlives its vector — delete AND update {
+  style.fill: "#3B1215"
+  style.stroke: "#FF6B6B"
+  style.stroke-width: 2
+
+  body: |md
+    ### `Delete(id)` — a tombstone, never a removal
+
+    `delete(ids, id)` · `deleted = true` · `numDeleted++` ·
+    re-elect the entry if this slot *was* the entry.
+
+    The slot keeps its index and every edge. It has to: slots
+    are addressed **by index**, so removing one would shift
+    every index above it and invalidate every neighbor list in
+    the graph. And a node is a **bridge** — cut it out and a
+    neighborhood nobody deleted becomes unreachable.
+
+    ### `Insert(id, v)` on a live id — an upsert
+
+    Same three steps, then a **brand-new slot** is built for `v`
+    with a **fresh random level**. The old slot is never edited
+    in place: its *inbound* edges were chosen for the old
+    vector, and pruning makes edges asymmetric, so finding them
+    all is an O(N·M) scan of the whole graph.
+
+    Unchanged vector → early return, no slot spent. That is the
+    WAL-replay path.
+
+    ### What a tombstone costs until compaction
+
+    `cands` (the frontier) admits it — a dead node still bridges.
+    `results` never does — a dead node is not an answer. So the
+    search **widens** instead of returning fewer than `k` hits:
+    1.2× at 25% dead, 2.5× at 75%. `pruneConnections` demotes
+    tombstones so they cannot evict a fresh live edge.
+
+    Memory comes back only from a compaction rebuild.
+  |
+}
+
 memory: Memory budget {
   style.fill: "#16290F"
   style.stroke: "#9CCC65"
@@ -215,6 +279,11 @@ memory: Memory budget {
 }
 
 graph_struct -> node_struct: "nodes[i]"
+graph_struct -> state_struct: "pool.Get() — one per traversal,\nnever graph-owned" {
+  style.stroke: "#9CCC65"
+  style.stroke-dash: 3
+}
+node_struct -> lifecycle: "deleted"
 node_struct -> hierarchy: participates on layers 0..topLevel
 hierarchy -> selection: edges chosen by
 

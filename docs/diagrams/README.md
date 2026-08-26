@@ -10,14 +10,14 @@ d2 --layout elk docs/diagrams/01-overview.d2 docs/diagrams/01-overview.svg
 | Diagram | Covers |
 |---|---|
 | [01-overview](01-overview.svg) · [src](01-overview.d2) | The whole system and the RAM/disk boundary — API, validation, namespace registry, WAL engine, graph, background checkpointer, disk layout |
-| [02-insert-path](02-insert-path.svg) · [src](02-insert-path.d2) | Write flow, step by step: validate → seq → **WAL append (commit point)** → apply to graph → ack, plus the HNSW insert internals and what a crash at each point means |
+| [02-insert-path](02-insert-path.svg) · [src](02-insert-path.d2) | Write flow, step by step: validate → seq → **WAL append (commit point)** → apply to graph → ack, plus the HNSW insert internals, the **upsert branch** (unchanged vector → return; changed → tombstone the old slot, build a new one) and what a crash at each point means |
 | [03-search-path](03-search-path.svg) · [src](03-search-path.d2) | Query flow: normalize → greedy descent → `searchLayer` on L0 → top-k → payload hydration. Includes why the path is 2 allocs/op and the rejected fetch-vectors-from-disk design |
-| [04-hnsw-internals](04-hnsw-internals.svg) · [src](04-hnsw-internals.d2) | What the index actually stores — `Graph` and `node` field by field, the layered graph, level assignment, alpha-pruned neighbor selection, memory budget |
+| [04-hnsw-internals](04-hnsw-internals.svg) · [src](04-hnsw-internals.d2) | What the index actually stores — `Graph`, `node` and the pooled `searchState` field by field, the layered graph, level assignment, alpha-pruned neighbor selection, the slot lifecycle (deletes *and* updates both leave tombstones), memory budget |
 | [05-persistence-recovery](05-persistence-recovery.svg) · [src](05-persistence-recovery.d2) | Phase 2: WAL record format, segment rotation, checkpoint cycle, truncation, and the recovery path including torn-tail handling |
 
-## The four invariants these encode
+## The five invariants these encode
 
-Everything above follows from four decisions. If a future change contradicts one
+Everything above follows from five decisions. If a future change contradicts one
 of them, it is the change that is wrong.
 
 1. **Vectors are RAM-resident.** HNSW computes a distance at *every hop* of
@@ -37,6 +37,14 @@ of them, it is the change that is wrong.
    replay, and — because level assignment is seeded — replaying the same inserts
    in the same order reproduces an identical graph. That makes recovery testable
    by equality, not by sampling.
+
+5. **A slot index is immutable for the life of a graph.** Slots are never
+   removed, reused, or renumbered — every neighbor list in the graph is a list of
+   indices, so shifting one would invalidate all of them. `Delete` flags a slot;
+   an update flags the old one and appends a new one; neither ever edits a slot
+   another node might be pointing at. Compaction does not break this invariant,
+   it *retires* it: the rebuild produces a **new** graph that is swapped in
+   whole, never a renumbering of the live one.
 
 ## Three clocks, often confused
 

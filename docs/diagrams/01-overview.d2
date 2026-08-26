@@ -75,7 +75,7 @@ embed_note: |md
 api: Public API — db.go / vector.go / options.go {
   class: api
 
-  insert: Insert(ns, id, vec, meta)
+  insert: "Insert(ns, id, vec, meta) — upsert"
   search: Search(ns, query, k, ef)
   del: Delete(ns, id)
 }
@@ -117,10 +117,10 @@ collection: Collection (one per namespace) {
 
   graph: HNSW graph — internal/hnsw {
     class: ram
-    nodes: "nodes []*node — id, vector, neighbors"
-    ids: "ids map[string]int"
+    nodes: "nodes []*node — id, vector, neighbors, deleted"
+    ids: "ids map[string]int — live ids only"
     entry: entry point + maxLevel
-    scratch: reusable scratch buffers — 2 allocs/op
+    scratch: "pooled searchState — per traversal, 2 allocs/op"
   }
 
   meta: Metadata / payload index {
