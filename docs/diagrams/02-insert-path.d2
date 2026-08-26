@@ -130,11 +130,79 @@ s5: 5 · Apply to in-memory graph {
     |
   }
 
-  lvl: "randomLevel()" {
+  upsert: "5a · Is this id already live? — the upsert branch" {
+    class: graph
+    style.stroke: "#FFD54F"
+    style.stroke-width: 2
+
+    same: "ids[id] hit, same vector → return nil" {
+      style.fill: "#332B0D"
+      style.stroke: "#FFD54F"
+      body: |md
+        `slices.Equal` against the **stored** form.
+        No tombstone, no slot, no edge touched.
+
+        This is the WAL-replay path: recovery re-applies
+        records the graph already holds, and if that cost
+        a slot every restart would inflate the graph with
+        tombstones for vectors that never changed.
+        **332 ns**, against 776 µs for a real replacement.
+      |
+    }
+
+    kill: "ids[id] hit, new vector → tombstone the old slot" {
+      style.fill: "#3B1215"
+      style.stroke: "#FF6B6B"
+      style.stroke-width: 2
+      body: |md
+        1. `delete(ids, id)` — the **binding** goes
+        2. `node.deleted = true` — the **slot** stays,
+           keeping its index and every edge it has
+        3. `numDeleted++`
+        4. was this slot the entry? → `reelectEntry()`,
+           or the descent below starts from a corpse
+
+        Inside `Insert`'s own write lock, never by calling
+        `Delete` — that would open a window where the id
+        belongs to nobody, and a reader would observe an
+        update as a **disappearance**.
+      |
+    }
+
+    same -> kill: "vector differs" {
+      style.stroke: "#FFD54F"
+    }
+  }
+
+  why_new_slot: |md
+    **Why not just overwrite `node.vector` in place?**
+
+    The slot's index is referenced by neighbor lists all over
+    the graph, and those edges were chosen for the OLD vector —
+    they claim "these two are close" about a pair that no longer
+    is. Searches would keep being routed in from a region the
+    vector has left.
+
+    Repairing them is not available either: pruning makes edges
+    asymmetric, so a node's own neighbor list is *not* the list
+    of nodes pointing at it. Finding every inbound edge means
+    scanning the whole graph, **O(N·M) per update**.
+
+    A fresh slot is correct by construction. It costs one dead
+    slot — the same debt `Delete` takes on, paid to the same
+    compaction pass.
+  | {
+    class: note
+  }
+
+  lvl: "randomLevel() — for a brand-new slot" {
     class: graph
     body: |md
       `int(-log(rand) * ml)`, `ml = 1/ln(M)`
       Seeded → replay reproduces the graph
+
+      A replacement draws a **fresh** level; it does
+      not inherit the height of the slot it replaced.
     |
   }
 
@@ -159,7 +227,18 @@ s5: 5 · Apply to in-memory graph {
     body: if level > maxLevel
   }
 
-  copy -> lvl -> descend -> connect -> promote
+  copy -> upsert.same: "id already live"
+  copy -> lvl: "new id — branch skipped" {
+    style.stroke-dash: 3
+  }
+  upsert.kill -> lvl: "append a new slot at len(nodes)"
+  lvl -> descend -> connect -> promote
+
+  upsert -> why_new_slot: {
+    style.stroke-dash: 4
+    style.opacity: 0.7
+    style.stroke: "#6E6E6E"
+  }
 }
 
 s6: 6 · Ack client {
@@ -182,7 +261,8 @@ crash: Crash here? {
 crash_note: |md
   **Crash after step 4, before step 6** → the record is on
   disk. Replay re-applies it. The client never got an ack,
-  so a retry is idempotent (duplicate id is a no-op today).
+  so a retry is idempotent: PUT is an upsert, and re-applying
+  a vector the graph already holds changes nothing.
 
   **Crash before step 4 completes** → torn tail record. CRC
   fails on recovery, the log truncates there, the write
@@ -205,6 +285,11 @@ wal_block.fsync -> s5.copy: "ONLY NOW apply" {
 }
 
 s5.promote -> s6
+
+s5.upsert.same -> s6: "unchanged → return, graph untouched" {
+  style.stroke: "#FFD54F"
+  style.stroke-dash: 3
+}
 
 wal_block -> crash: {
   style.stroke-dash: 3

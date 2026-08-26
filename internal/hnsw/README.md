@@ -19,7 +19,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `doc.go` | Package overview and this file map. |
 | `config.go` | `Config` knobs, `DefaultConfig`, and the sentinel errors callers match on. |
 | `graph.go` | The `Graph` type: state, `New`, `Len`, and the shared helpers (`randomLevel`, `prepare`). |
-| `insert.go` | `Insert` — building the graph. |
+| `insert.go` | `Insert` — building the graph, and replacing an id that is already in it. |
 | `delete.go` | `Delete` — tombstoning a slot, and re-electing the entry point when it is the one deleted. |
 | `search.go` | `Result`, `Search`, and the primitives it rides on: `greedyClosest`, `searchLayer`. |
 | `neighbors.go` | Edge management: alpha-pruned `selectNeighbors`, `pruneConnections`, `connect`, adjacency lookups. |
@@ -31,6 +31,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `graph_test.go` | Correctness + recall-vs-brute-force at 32 and 768 dimensions. |
 | `concurrent_test.go` | Parallel-vs-serial equivalence, mixed reader/writer race coverage. |
 | `delete_test.go` | Tombstone semantics, recall under deletes, entry re-election, stranding. |
+| `upsert_test.go` | Replacement semantics, replay no-ops, recall under updates, atomicity. |
 | `bench_test.go` | Insert / search / distance benchmarks. |
 
 ## The knobs
@@ -135,6 +136,41 @@ Two consequences worth knowing:
 
 `Len` counts live vectors only; `Stats` exposes the tombstones behind them.
 
+### 8. `Insert` is an upsert, and a replacement builds a new slot
+There is no `Update`. A second `Insert` under a live id replaces the vector, so
+one operation covers create and replace.
+
+That is a narrowing of the operation set rather than a convenience. The WAL
+record format freezes around whatever operations exist, and a separate UPDATE
+record would have to mean "insert if absent" anyway to survive replay against a
+snapshot that may or may not already hold the id — two record types describing
+one state transition, differing only in what they assume about the past.
+
+A replacement **tombstones the old slot and builds a fresh one**; it does not
+overwrite the vector in place. Overwriting would keep the slot's index, and with
+it every neighbor list in the graph pointing at that index — edges chosen for the
+*old* vector, encoding "these two are close" about a pair that no longer is.
+Searches would keep being routed into the slot from a region it left. Repairing
+those edges is not an option either: pruning makes edges asymmetric, so a node's
+own neighbor list is not the list of nodes pointing at it, and finding every
+inbound edge means scanning the whole graph — O(N·M) per update.
+
+Two consequences:
+
+- **Updates pay into the same tombstone debt as deletes.** Re-embedding a corpus
+  of 300 vectors three times leaves 300 live vectors carried by 1,200 slots.
+  That workload — not deletion — is what makes compaction load-bearing.
+- **Re-applying an unchanged vector is free.** The comparison runs against the
+  *stored* form, so it costs one `slices.Equal` and changes nothing (331 ns
+  against 776 µs for a real replacement). That is the shape of WAL replay across
+  a snapshot boundary; without it every recovery would inflate the graph with
+  tombstones for vectors that never changed. Under Cosine the graph stores
+  direction only, so a rescaled vector is recognized as unchanged too.
+
+The whole upsert commits under **one** write lock — `Insert` tombstones directly
+rather than calling `Delete` — so a concurrent reader never observes the moment
+where the id belongs to nobody. An update is never visible as a disappearance.
+
 ## Measured results
 
 Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
@@ -171,6 +207,17 @@ Allocations stay at 2/op throughout — tombstones cost time, not memory churn.
 Recall does not degrade: with half the graph deleted, recall@10 against brute
 force over the survivors is 1.000.
 
+### The price of an update
+
+| Operation | Cost | |
+|---|---|---|
+| `Insert`, new id | 713 µs, 208 allocs | — |
+| `Insert`, replacing an id | 776 µs, 210 allocs | insert + tombstone, +9% |
+| `Insert`, vector unchanged | **332 ns**, 2 allocs | the WAL-replay path |
+
+Recall@10 after replacing half the graph is 0.999 — updates are held to the same
+bar as inserts.
+
 ## Usage
 
 ```go
@@ -185,20 +232,21 @@ for _, r := range results {
 
 ## Algorithm at a glance
 
-**Insert(id, vec):** copy+normalize → draw a random top level → greedily descend
-to `level+1` → for each layer down to 0, `searchLayer` with `EfConstruction`,
-alpha-select neighbors, connect both ways, prune → promote to entry point if it
-reached a new top level.
+**Insert(id, vec):** copy+normalize → if the id is live, return early when the
+vector is unchanged, otherwise tombstone its slot → draw a random top level →
+greedily descend to `level+1` → for each layer down to 0, `searchLayer` with
+`EfConstruction`, alpha-select neighbors, connect both ways, prune → promote to
+entry point if it reached a new top level.
 
 **Search(query, k, ef):** normalize query → greedily descend upper layers → one
 wide `searchLayer` on layer 0 → return the `k` closest.
 
 ## Not implemented yet (deliberately)
 
-Compaction (tombstones never release memory on their own), upsert semantics —
-`Insert` still no-ops on a duplicate id — persistence (WAL + snapshots),
-fine-grained write locking, and SIMD assembly. Each is a separate upcoming
-slice — see `docs/MIGRATION.md`.
+Compaction — tombstones never release memory on their own, and both `Delete` and
+`Insert`-as-update create them — plus persistence (WAL + snapshots), fine-grained
+write locking, and SIMD assembly. Each is a separate upcoming slice — see
+`docs/MIGRATION.md`.
 
 ```bash
 go test ./internal/hnsw/ -v                      # correctness + recall

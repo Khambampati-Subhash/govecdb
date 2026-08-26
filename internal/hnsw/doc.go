@@ -13,11 +13,16 @@
 // keeps every neighbor list valid and keeps the graph connected; the cost is
 // memory and traversal work that only compaction reclaims.
 //
+// Insert is an upsert: a second Insert under a live id tombstones the old slot
+// and builds a new one, because the old slot's inbound edges were chosen for the
+// old vector and would misroute searches if the vector underneath them changed.
+// So updates pay into the same tombstone debt that deletes do.
+//
 // The package is split one responsibility per file:
 //
 //	config.go     Config knobs, defaults, and the sentinel errors callers see.
 //	graph.go      The Graph type: state, construction, and shared helpers.
-//	insert.go     Insert — building the graph.
+//	insert.go     Insert — building the graph, and replacing an existing id.
 //	delete.go     Delete — tombstoning, and re-electing the entry point.
 //	search.go     Search and the layer-walking primitives it is built from.
 //	neighbors.go  Edge management: selection, pruning, adjacency lookups.

@@ -73,14 +73,16 @@ govecdb/
    `RWMutex`, parallel `Search`. **Done.** Fine-grained write locking is deferred.
 3. ~~**Tombstone `Delete`**~~ — dead slots keep routing, results filter them,
    entry re-election. **Done.** Upsert and compaction are the remaining index work.
-4. **Upsert + compaction** — `Insert` must replace a duplicate id, and tombstones
-   need a rebuild pass to reclaim memory. **Next.**
-5. **`internal/wal`** — append-only log behind a `WAL` interface, with segment rotation.
-6. **`internal/snapshot`** — point-in-time graph snapshot + recovery that replays the WAL.
-7. **`internal/store`** — vector + metadata storage behind a `Store` interface.
-8. **`internal/filter`** — metadata query engine, with tests from day one.
-9. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users import.
-10. **Examples + README** for the real API.
+4. ~~**Upsert**~~ — `Insert` replaces an existing id by tombstoning its slot and
+   building a new one; an unchanged vector is an early return. **Done.**
+5. **Compaction** — tombstones (from deletes *and* updates) never release memory,
+   so they need a rebuild pass once they cross a threshold. **Next.**
+6. **`internal/wal`** — append-only log behind a `WAL` interface, with segment rotation.
+7. **`internal/snapshot`** — point-in-time graph snapshot + recovery that replays the WAL.
+8. **`internal/store`** — vector + metadata storage behind a `Store` interface.
+9. **`internal/filter`** — metadata query engine, with tests from day one.
+10. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users import.
+11. **Examples + README** for the real API.
 
 ## Phase — WAL
 

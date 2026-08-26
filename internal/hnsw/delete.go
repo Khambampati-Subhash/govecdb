@@ -29,7 +29,18 @@ package hnsw
 func (g *Graph) Delete(id string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.tombstone(id)
+}
 
+// tombstone unbinds id and marks its slot dead, reporting whether there was
+// anything to kill. Delete is the standalone form; Insert calls this directly
+// when it replaces an existing id, so that the tombstone and the new slot
+// commit under a *single* write lock. Going through Delete would open a window
+// in which the id belongs to nobody, and a concurrent reader would see an
+// update as a disappearance.
+//
+// Callers hold the write lock.
+func (g *Graph) tombstone(id string) bool {
 	idx, ok := g.ids[id]
 	if !ok {
 		return false

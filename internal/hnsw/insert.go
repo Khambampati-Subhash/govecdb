@@ -1,6 +1,35 @@
 package hnsw
 
-// Insert adds (or is a no-op for a duplicate id of) a vector into the graph.
+import "slices"
+
+// Insert stores vector under id. If the id is already in the graph, the new
+// vector replaces the old one — Insert is an upsert, and one operation covers
+// both create and replace.
+//
+// That is a narrowing of the operation set, not a convenience. The WAL record
+// format freezes around whatever operations exist, and a separate UPDATE record
+// would have to mean "insert if absent" anyway to survive replay against a
+// snapshot that may or may not already contain the id. Two record types for one
+// state transition, differing only in what they assume about the past. With
+// upsert there is a single PUT whose meaning does not depend on history.
+//
+// # A replacement builds a new slot rather than editing the old one
+//
+// Overwriting the vector in place would keep the slot's index, and with it every
+// neighbor list in the graph that references that index. Those edges were chosen
+// for the *old* vector: they encode "these two are close", a claim the new
+// vector does not make. Searches would keep being routed into this slot from a
+// region it no longer belongs to, and never from the region it does.
+//
+// Repairing them is not an option either. Pruning makes edges asymmetric, so a
+// node's own neighbor list is not the list of nodes pointing at it; finding
+// every inbound edge means scanning the whole graph, O(N·M) per update.
+//
+// So a replacement tombstones the old slot and builds a fresh one, whose edges
+// are correct by construction. The price is one dead slot per update — the same
+// debt Delete takes on, paid off by the same compaction pass. A workload that
+// re-embeds the same ids repeatedly is therefore the one that makes compaction
+// load-bearing rather than housekeeping.
 //
 // Safe to call concurrently, but writers serialize against each other and
 // exclude searches for the duration.
@@ -19,8 +48,17 @@ func (g *Graph) Insert(id string, vector []float32) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if _, exists := g.ids[id]; exists {
-		return nil // v1: ignore duplicates; update semantics come later
+	if prev, exists := g.ids[id]; exists {
+		// Re-applying a record the graph already holds is the normal shape of
+		// WAL replay across a snapshot boundary, and it must not cost a slot:
+		// otherwise every recovery would inflate the graph with tombstones for
+		// vectors that never changed. The comparison is against the *stored*
+		// form, so for Cosine a rescaled vector is recognized as unchanged —
+		// the graph only ever stored its direction.
+		if slices.Equal(g.nodes[prev].vector, vec) {
+			return nil
+		}
+		g.tombstone(id)
 	}
 
 	st := g.acquireState()

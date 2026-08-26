@@ -87,11 +87,14 @@ API will be built on top of.
 ```go
 g, _ := hnsw.New(hnsw.DefaultConfig(128, hnsw.Cosine))
 _ = g.Insert("doc1", vec1)
+_ = g.Insert("doc1", vec2) // upsert: same id, new vector replaces the old
 
 results, _ := g.Search(query, 10 /*k*/, 64 /*ef*/)
 for _, r := range results {
     fmt.Println(r.ID, r.Distance) // ascending; smaller = closer
 }
+
+g.Delete("doc1") // tombstone; the slot keeps routing, never answers
 ```
 
 | Knob | Where | Adaptable? |
@@ -121,11 +124,12 @@ Recall is measured against brute-force ground truth in `graph_test.go`, not esti
 1. ~~**HNSW index**~~ — done, from scratch, tested against brute force
 2. ~~**Concurrent reads**~~ — done; pooled search scratch + `RWMutex`, parallel `Search`
 3. ~~**Delete**~~ — done; tombstones that keep routing, filtered out of results
-4. **Upsert + compaction** — replace a duplicate id; rebuild to reclaim tombstoned slots
-5. **WAL** — write-ahead log; write to WAL first, then apply to the in-memory graph
-6. **Snapshots + recovery** — replay the WAL to rebuild the graph (the graph is derived state)
-7. **Public API** — `vector.go` / `db.go` / `options.go` facade over the internals
-8. **Metadata filtering**
+4. ~~**Upsert**~~ — done; `Insert` replaces an existing id, tombstoning the old slot
+5. **Compaction** — rebuild the graph to reclaim slots left by deletes and updates
+6. **WAL** — write-ahead log; write to WAL first, then apply to the in-memory graph
+7. **Snapshots + recovery** — replay the WAL to rebuild the graph (the graph is derived state)
+8. **Public API** — `vector.go` / `db.go` / `options.go` facade over the internals
+9. **Metadata filtering**
 
 Out of scope for v1 (returns in v2): clustering, REST/gRPC servers, quantization.
 

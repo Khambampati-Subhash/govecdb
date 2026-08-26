@@ -51,6 +51,49 @@ func BenchmarkInsert(b *testing.B) {
 	}
 }
 
+// BenchmarkUpsert measures replacing an id that is already in the graph: a
+// tombstone plus a full insert. The graph accumulates one dead slot per
+// iteration, which is not a benchmark artifact — it is the cost being reported,
+// and the reason compaction is the next step rather than a later one.
+func BenchmarkUpsert(b *testing.B) {
+	const n = 2000
+	rng := rand.New(rand.NewSource(3))
+	g, _ := New(DefaultConfig(benchDim, Cosine))
+	for i := range n {
+		_ = g.Insert(fmt.Sprintf("v%d", i), randomVector(rng, benchDim))
+	}
+	vecs := make([][]float32, b.N)
+	for i := range vecs {
+		vecs[i] = randomVector(rng, benchDim)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		_ = g.Insert(fmt.Sprintf("v%d", i%n), vecs[i])
+	}
+}
+
+// BenchmarkUpsertUnchanged is the WAL-replay path: a record the graph already
+// holds. It has to cost one comparison rather than one insert, or recovery
+// across a snapshot boundary would pay full price for changing nothing.
+func BenchmarkUpsertUnchanged(b *testing.B) {
+	const n = 2000
+	rng := rand.New(rand.NewSource(3))
+	g, _ := New(DefaultConfig(benchDim, Cosine))
+	vecs := make([][]float32, n)
+	for i := range n {
+		vecs[i] = randomVector(rng, benchDim)
+		_ = g.Insert(fmt.Sprintf("v%d", i), vecs[i])
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		_ = g.Insert(fmt.Sprintf("v%d", i%n), vecs[i%n])
+	}
+}
+
 func BenchmarkSearch(b *testing.B) {
 	g, qs := buildFixture()
 	b.ReportAllocs()

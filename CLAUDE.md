@@ -87,6 +87,14 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   never move scratch back onto `Graph`. Concurrent writers still serialize.
 - Insert **copies** the caller's vector (and normalizes it for Cosine), so the graph
   never aliases a reused caller buffer.
+- `Insert` is an **upsert** — there is no `Update`. A second Insert under a live id
+  tombstones the old slot and builds a new one, because that slot's *inbound* edges
+  were chosen for the old vector and pruning makes them impossible to find without
+  an O(N·M) scan. So updates create tombstones exactly like deletes do. Re-inserting
+  an unchanged vector is an early return (`slices.Equal` against the stored form) —
+  that is the WAL-replay path and it must not cost a slot. The tombstone happens
+  *inside* Insert's write lock, never via `Delete`: an update must not be observable
+  as a disappearance.
 - `Delete` is a **tombstone**, never a real removal: the slot keeps its index and
   its edges. In `searchLayer` the frontier (`cands`) admits dead nodes — they are
   still bridges — while `results` admits only live ones. Do not "simplify" this

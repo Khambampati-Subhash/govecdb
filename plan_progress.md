@@ -14,7 +14,7 @@ was built that way, and what it measured. Tasks are only marked done when
 |---|------|--------|
 | 1 | Pool the search scratch, then guard the graph with an `RWMutex` | ✅ |
 | 2 | Tombstone-based `Delete` with stable slot indices and entry re-election | ✅ |
-| 3 | Real upsert semantics for `Insert` | ⬜ |
+| 3 | Real upsert semantics for `Insert` | ✅ |
 | 4 | Compaction pass once tombstones cross a threshold | ⬜ |
 
 ## B · Durability
@@ -354,8 +354,154 @@ Allocations stay at 2/op throughout: tombstones cost time, not memory churn.
 
 ---
 
-## Next: Task 3 — upsert semantics
+## Task 3 — Upsert semantics ✅
 
-Ordering note: `Plan.md` puts the whole of section A ahead of the WAL on
-purpose — the record format should not freeze around an operation set that is
-still missing a real upsert. `docs/MIGRATION.md` has been reordered to match.
+*Plan.md A.3: give `Insert` real upsert semantics so a duplicate id replaces
+instead of silently no-opping, fixing the operation set before the WAL format
+freezes.*
+
+### Why this had to come before the WAL
+
+`Insert` used to return `nil` and do nothing when the id already existed. That is
+not a smaller feature set, it is a *different* one: a caller who re-embeds a
+document and stores it gets a silent no-op and a stale vector, with no error to
+notice.
+
+The sequencing argument is the stronger one. The WAL record format freezes around
+whatever operations exist. A separate UPDATE record would have to mean "insert if
+absent" anyway — replay runs against a snapshot that may or may not already hold
+the id — so it would be a second record type describing one state transition,
+differing only in what it assumes about the past. Upsert collapses that into a
+single PUT whose meaning does not depend on history.
+
+### The decision: replace by tombstone + new slot, not in place
+
+Editing the vector in place is the obvious implementation and it is wrong.
+
+The slot keeps its index, and with it **every neighbor list in the graph that
+references that index**. Those edges were chosen for the *old* vector: they
+encode "these two are close", a claim the new vector does not make. Searches
+would keep being routed into the slot from a region it no longer belongs to, and
+never from the region it now does. Recall would rot in a way no test of the
+updated id alone would catch — the damage is to the neighborhood, not the node.
+
+Repairing the edges is not available either. `pruneConnections` makes adjacency
+asymmetric, so a node's own neighbor list is *not* the list of nodes pointing at
+it; finding every inbound edge means scanning the whole graph, O(N·M) per update.
+
+So a replacement tombstones the old slot and builds a fresh one, which gets
+correct edges by construction. The price is one dead slot per update, and it is
+the same debt `Delete` takes on — payable to the same compaction pass.
+
+### The tombstone happens inside `Insert`'s lock
+
+`Delete` was refactored into a locking shell over an unlocked `tombstone(id)`,
+which `Insert` calls directly. Calling `Delete` instead would have released the
+write lock between the unbind and the re-add, and in that window the id belongs
+to nobody: a concurrent reader would observe an *update* as a *disappearance*.
+
+`TestConcurrentUpsertAndSearch` pins this with `Len`, which must hold constant at
+n while eight readers watch every id being replaced. It dips the moment the
+upsert stops being atomic.
+
+### Unchanged vectors return early
+
+`slices.Equal` against the **stored** form, before anything is tombstoned:
+
+```go
+if prev, exists := g.ids[id]; exists {
+    if slices.Equal(g.nodes[prev].vector, vec) {
+        return nil
+    }
+    g.tombstone(id)
+}
+```
+
+This is the WAL-replay path, not a micro-optimization. Recovery replays records
+across a snapshot boundary that is deliberately conservative, so re-applying
+records the graph already holds is the *normal* case. Without the early return,
+every recovery would inflate the graph with tombstones for vectors that never
+changed — 332 ns against 776 µs, and no slot consumed.
+
+Comparing against the stored form has a second effect worth naming: under Cosine
+the graph stores direction only, so a rescaled vector is correctly recognized as
+unchanged. Doubling is exact in binary floating point, so that case is
+bit-identical rather than approximately equal, and the test asserts it.
+
+### Validation stays ahead of mutation
+
+`ErrEmptyVector` / `ErrDimensionMismatch` are checked before the lock, and the
+tombstone happens after. The reverse order — unbind the id, then discover the
+vector is malformed — turns a caller's bug into data loss.
+`TestUpsertRejectsBadVectorWithoutDestroying` asserts `Stats` is byte-identical
+after a rejected update and that the old vector is still retrievable.
+
+### Measured — Apple M4 Max, 128 dim
+
+| Operation | Cost | |
+|---|---|---|
+| `Insert`, new id | 713 µs, 208 allocs | unchanged |
+| `Insert`, replacing an id | 776 µs, 210 allocs | insert + tombstone, **+9%** |
+| `Insert`, vector unchanged | **332 ns**, 2 allocs | the replay path |
+
+Locked baselines all held — the upsert branch is a map lookup on a path that
+already does one:
+
+| | Before | After |
+|---|---|---|
+| Recall@10, dim 32 | 0.999 | **0.999** |
+| Recall@10, dim 768 | 0.972 | **0.972** |
+| Search allocations | 2 | **2** |
+| Search | 107–113 µs/op | 110 µs/op |
+| Search, 16 goroutines | 8.3–8.6 µs/op | 8.2 µs/op |
+
+New number that matters: **recall@10 after replacing half the graph is 0.999** —
+identical to a graph that was built that way from the start.
+
+### Tests added — `internal/hnsw/upsert_test.go`
+
+- **`TestInsertReplacesVector`** — the new vector answers, the old one does not at
+  any rank, and asking for more results than there are live vectors proves the id
+  did not become two entries.
+- **`TestRepeatedUpsertsResolveToLatest`** — the workload upsert exists for:
+  three full re-embeddings of a 300-vector corpus. Every id must resolve to its
+  *latest* vector after every round, which by round three means staying reachable
+  in a graph that is three-quarters tombstones.
+- **`TestUpsertUnchangedVectorIsFree`** — `Stats` must be unchanged after
+  re-inserting every vector, both identically and rescaled (Cosine).
+- **`TestUpsertRejectsBadVectorWithoutDestroying`** — validation before mutation.
+- **`TestUpsertEntryPointReelects`** — 20 consecutive updates *of the entry
+  point*, asserting both entry invariants each time; the tombstone and the insert
+  have to agree about the entry within one lock.
+- **`TestUpsertCountsTheOldSlotAsATombstone`** — `Stats{Live, Deleted, Slots}`
+  accounting: an update adds no live vectors and exactly one dead slot.
+- **`TestRecallAfterUpserts`**, **`TestConcurrentUpsertAndSearch`** (`-race`).
+- **`BenchmarkUpsert`**, **`BenchmarkUpsertUnchanged`**.
+
+### Files touched
+
+| File | Change |
+|---|---|
+| `internal/hnsw/insert.go` | Upsert branch: unchanged-vector early return, then `tombstone` + fresh slot. |
+| `internal/hnsw/delete.go` | `Delete` split into a locking shell over an unlocked `tombstone`. |
+| `internal/hnsw/upsert_test.go` | **New.** The eight tests above. |
+| `internal/hnsw/bench_test.go` | `BenchmarkUpsert`, `BenchmarkUpsertUnchanged`. |
+| `doc.go`, both `README.md`s, `CLAUDE.md`, `docs/MIGRATION.md`, `docs/diagrams/02` | Upsert semantics documented; the "duplicate id is a no-op" claim removed. |
+
+### Follow-ups this opened
+
+- **Compaction is now the only thing standing between this index and unbounded
+  memory growth** (task 4). Deletes leak slots for vectors a caller asked to
+  remove; updates leak slots for vectors that are *still live*, at whatever rate
+  the corpus is re-embedded. `Stats` already reports the ratio a policy needs.
+- The graph has no way to report *what* was replaced. Once a payload store exists
+  (task 12), an upsert will need to evict the old payload too, and that is where
+  "did this create or replace?" stops being an internal detail.
+
+---
+
+## Next: Task 4 — compaction
+
+Both remaining sources of dead slots now exist, so the threshold can be set
+against a real curve rather than a guess: `BenchmarkSearchTombstones` says search
+costs 1.2× at 25% tombstones and 2.5× at 75%.
