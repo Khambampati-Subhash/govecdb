@@ -249,7 +249,21 @@ lifecycle: A slot outlives its vector — delete AND update {
     1.2× at 25% dead, 2.5× at 75%. `pruneConnections` demotes
     tombstones so they cannot evict a fresh live edge.
 
-    Memory comes back only from a compaction rebuild.
+    ### `Compact()` — the only thing that gives the memory back
+
+    Builds a **new** graph over the live vectors and swaps it in
+    whole. It cannot renumber the live one: neighbor lists are
+    slot indices, so removing a slot invalidates every list in the
+    graph at once.
+
+    Out comes exactly the graph you would have built if the dead
+    vectors had never existed — same seeded RNG, same order — so
+    it is testable by equality rather than by sampling recall.
+
+    Stop-the-world, and the pause tracks **survivors**: 2.6 s at
+    25% dead against 0.8 s at 75%, per 5k x 128. Compacting early
+    costs more and reclaims less, so the index never self-triggers
+    — callers poll `Stats().DeadRatio()` and pick the moment.
   |
 }
 

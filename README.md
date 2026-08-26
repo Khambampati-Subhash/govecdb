@@ -95,6 +95,10 @@ for _, r := range results {
 }
 
 g.Delete("doc1") // tombstone; the slot keeps routing, never answers
+
+if g.Stats().DeadRatio() > 0.5 {
+    g.Compact() // rebuild over the live vectors; stop-the-world
+}
 ```
 
 | Knob | Where | Adaptable? |
@@ -125,7 +129,7 @@ Recall is measured against brute-force ground truth in `graph_test.go`, not esti
 2. ~~**Concurrent reads**~~ — done; pooled search scratch + `RWMutex`, parallel `Search`
 3. ~~**Delete**~~ — done; tombstones that keep routing, filtered out of results
 4. ~~**Upsert**~~ — done; `Insert` replaces an existing id, tombstoning the old slot
-5. **Compaction** — rebuild the graph to reclaim slots left by deletes and updates
+5. ~~**Compaction**~~ — done; `Compact()` rebuilds over the live vectors and swaps in
 6. **WAL** — write-ahead log; write to WAL first, then apply to the in-memory graph
 7. **Snapshots + recovery** — replay the WAL to rebuild the graph (the graph is derived state)
 8. **Public API** — `vector.go` / `db.go` / `options.go` facade over the internals

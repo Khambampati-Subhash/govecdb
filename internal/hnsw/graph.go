@@ -54,6 +54,15 @@ func New(cfg Config) (*Graph, error) {
 	if cfg.Dimension <= 0 {
 		return nil, errors.New("hnsw: dimension must be > 0")
 	}
+	return newGraph(cfg), nil
+}
+
+// newGraph builds a graph from a config that has already been validated, and
+// fills in the optional knobs. Compact uses it directly: the config it passes
+// came out of a graph that already exists, so there is no error to handle, and
+// an impossible one plumbed through Compact's signature would be worse than
+// none.
+func newGraph(cfg Config) *Graph {
 	if cfg.M <= 0 {
 		cfg.M = 16
 	}
@@ -78,7 +87,7 @@ func New(cfg Config) (*Graph, error) {
 		maxLevel:   0,
 	}
 	g.pool.New = func() any { return new(searchState) }
-	return g, nil
+	return g
 }
 
 // Len reports how many vectors Search can return — live vectors only.
@@ -101,6 +110,28 @@ type Stats struct {
 	Deleted int
 	// Slots is the total allocated slots, Live + Deleted.
 	Slots int
+}
+
+// DeadRatio is the fraction of slots that are tombstones, in [0,1]. It exists so
+// a compaction policy is a one-liner — `if g.Stats().DeadRatio() > 0.5` — while
+// the policy itself stays outside the index, where the caller can pick a moment
+// that tolerates Compact's stop-the-world pause.
+//
+// 0.5, and not the 0.25 that the search-cost curve alone suggests. Two
+// benchmarks have to be read together:
+//
+//	BenchmarkSearchTombstones  search costs 1.2× at 0.25, 1.6× at 0.5, 2.5× at 0.75
+//	BenchmarkCompact           the pause tracks SURVIVORS: 2.6s at 0.25, 0.8s at 0.75
+//
+// Compacting early is therefore the worst of both — a longer pause, more often,
+// reclaiming less. What waiting actually costs is a slower search and a graph
+// holding 2× the slots it needs; that is the trade to tune, not the search curve
+// on its own.
+func (s Stats) DeadRatio() float64 {
+	if s.Slots == 0 {
+		return 0
+	}
+	return float64(s.Deleted) / float64(s.Slots)
 }
 
 // Stats reports the graph's live/tombstoned occupancy.

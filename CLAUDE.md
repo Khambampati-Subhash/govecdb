@@ -101,6 +101,15 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   into filtering the final result slice; that silently returns fewer than `k`.
   `pruneConnections` **demotes** tombstones so they cannot evict a fresh live
   edge and strand a vector. `Len` is live-only; `Stats` shows the tombstones.
+- `Compact()` is the only thing that reclaims dead slots. It **rebuilds** — a new
+  graph over the live vectors, swapped in whole — because neighbor lists are slot
+  indices, so nothing may ever be renumbered in place. It re-inserts *stored*
+  vectors via `insertPrepared` (no re-copy, and no re-normalize: that drifts a
+  unit vector by an ulp and the rebuild would stop being bit-equal to a fresh
+  build, which `TestCompactMatchesAFreshBuild` asserts). It **stops the world**;
+  the index never self-triggers, callers poll `Stats().DeadRatio()`. Threshold
+  ~0.5, not 0.25: the pause tracks *survivors*, so compacting early costs more
+  and reclaims less.
 - Durability model *(phase 2, not yet built)*: **write to WAL first, then apply to
   the in-memory graph**; on recovery, replay the WAL to rebuild the graph — the
   graph is derived state, never the source of truth.

@@ -21,6 +21,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `graph.go` | The `Graph` type: state, `New`, `Len`, and the shared helpers (`randomLevel`, `prepare`). |
 | `insert.go` | `Insert` — building the graph, and replacing an id that is already in it. |
 | `delete.go` | `Delete` — tombstoning a slot, and re-electing the entry point when it is the one deleted. |
+| `compact.go` | `Compact` — rebuilding the graph over its live vectors to reclaim tombstoned slots. |
 | `search.go` | `Result`, `Search`, and the primitives it rides on: `greedyClosest`, `searchLayer`. |
 | `neighbors.go` | Edge management: alpha-pruned `selectNeighbors`, `pruneConnections`, `connect`, adjacency lookups. |
 | `node.go` | A single vector: `id`, `vector`, per-layer neighbor lists. |
@@ -32,6 +33,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `concurrent_test.go` | Parallel-vs-serial equivalence, mixed reader/writer race coverage. |
 | `delete_test.go` | Tombstone semantics, recall under deletes, entry re-election, stranding. |
 | `upsert_test.go` | Replacement semantics, replay no-ops, recall under updates, atomicity. |
+| `compact_test.go` | Slot reclamation, equality against a fresh build, recall after rebuild. |
 | `bench_test.go` | Insert / search / distance benchmarks. |
 
 ## The knobs
@@ -171,6 +173,31 @@ The whole upsert commits under **one** write lock — `Insert` tombstones direct
 rather than calling `Delete` — so a concurrent reader never observes the moment
 where the id belongs to nobody. An update is never visible as a disappearance.
 
+### 9. Compaction rebuilds; it never renumbers
+`Compact()` is the only thing that gives tombstoned memory back. It builds a
+**new** graph from the live vectors and swaps it in whole, rather than removing
+dead slots from the existing one.
+
+It has to. Every neighbor list in the graph is a list of indices into `nodes`,
+so dropping one slot shifts every index above it and invalidates every list at
+once. Repairing them in place is the same O(N·M) scan that ruled out in-place
+updates, except now it runs per dead slot instead of once.
+
+What comes out is **exactly the graph you would have built if the dead vectors
+had never existed** — the replacement seeds a fresh RNG from the same config and
+re-inserts in slot order, so `TestCompactMatchesAFreshBuild` can assert equality
+against a directly-built reference, rank for rank, rather than sampling recall
+and hoping. That test is also what guards `insertPrepared`: stored vectors move
+across as-is, because re-normalizing an already-unit vector drifts it by an ulp
+and the compacted graph would quietly stop holding the same numbers.
+
+`Compact` **stops the world** — it holds the write lock for a full index build.
+That is deliberate for v1: building the replacement outside the lock means
+writes landing in the old graph while the new one is built, and reconciling them
+needs a change log and a double-buffered swap that the durability layer should
+shape first. So the index does not decide *when*; `Stats().DeadRatio()` reports
+the ratio and the caller picks a moment that tolerates the pause.
+
 ## Measured results
 
 Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
@@ -218,6 +245,24 @@ force over the survivors is 1.000.
 Recall@10 after replacing half the graph is 0.999 — updates are held to the same
 bar as inserts.
 
+### When to compact — read both curves, not one
+
+| Dead slots | Search | `Compact()` pause, 5k × 128 | Reclaims |
+|---|---|---|---|
+| 25% | 1.2× | 2.61 s | 25% of slots |
+| 50% | 1.6× | 1.69 s | 50% of slots |
+| 75% | 2.5× | 0.79 s | 75% of slots |
+
+A compaction is a full index build over the **survivors**, so its pause tracks
+how many vectors live, not how many get reclaimed — which makes compacting early
+the worst of both: a longer stop-the-world pause, more often, handing back less
+memory.
+
+The search curve on its own argues for a 25% threshold. Both curves together
+argue for **~50%**, where the standing cost is 1.6× on search and a graph
+carrying 2× the slots it needs. That is the trade to tune; `Stats().DeadRatio()`
+is the number to tune it on.
+
 ## Usage
 
 ```go
@@ -241,12 +286,15 @@ entry point if it reached a new top level.
 **Search(query, k, ef):** normalize query → greedily descend upper layers → one
 wide `searchLayer` on layer 0 → return the `k` closest.
 
+**Compact():** nothing to do if no slot is dead → otherwise build a replacement
+graph, re-inserting every live vector in slot order with its stored vector →
+swap `nodes` / `ids` / `entry` / `maxLevel` across and zero the tombstone count.
+
 ## Not implemented yet (deliberately)
 
-Compaction — tombstones never release memory on their own, and both `Delete` and
-`Insert`-as-update create them — plus persistence (WAL + snapshots), fine-grained
-write locking, and SIMD assembly. Each is a separate upcoming slice — see
-`docs/MIGRATION.md`.
+Persistence (WAL + snapshots), fine-grained write locking, **online** compaction
+— `Compact` exists but stops the world — and SIMD assembly. Each is a separate
+upcoming slice — see `docs/MIGRATION.md`.
 
 ```bash
 go test ./internal/hnsw/ -v                      # correctness + recall

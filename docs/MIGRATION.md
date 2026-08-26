@@ -75,14 +75,26 @@ govecdb/
    entry re-election. **Done.** Upsert and compaction are the remaining index work.
 4. ~~**Upsert**~~ — `Insert` replaces an existing id by tombstoning its slot and
    building a new one; an unchanged vector is an early return. **Done.**
-5. **Compaction** — tombstones (from deletes *and* updates) never release memory,
-   so they need a rebuild pass once they cross a threshold. **Next.**
-6. **`internal/wal`** — append-only log behind a `WAL` interface, with segment rotation.
+5. ~~**Compaction**~~ — `Compact()` rebuilds over the live vectors and swaps the
+   graph in whole; `Stats().DeadRatio()` is the signal, the policy stays outside
+   the index. **Done.** Online (non-blocking) compaction is deferred — see below.
+6. **`internal/wal`** — append-only log behind a `WAL` interface, with segment
+   rotation. **Next.**
 7. **`internal/snapshot`** — point-in-time graph snapshot + recovery that replays the WAL.
 8. **`internal/store`** — vector + metadata storage behind a `Store` interface.
 9. **`internal/filter`** — metadata query engine, with tests from day one.
 10. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users import.
 11. **Examples + README** for the real API.
+
+### Deferred on purpose, not overlooked
+
+- **Online compaction.** `Compact()` holds the write lock for a full index build:
+  2.6 s per 5k×128 vectors at a 25% dead ratio. Building the replacement outside
+  the lock means writes landing in the old graph while the new one is built, and
+  reconciling them wants a change log and a double-buffered swap — both of which
+  the WAL should shape first, since it will already be recording those writes.
+- **Fine-grained write locking**, for the same reason: the WAL's ordering
+  constraint decides what a finer lock is allowed to do.
 
 ## Phase — WAL
 

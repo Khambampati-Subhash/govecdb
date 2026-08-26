@@ -18,12 +18,18 @@
 // old vector and would misroute searches if the vector underneath them changed.
 // So updates pay into the same tombstone debt that deletes do.
 //
+// Compact settles that debt. It rebuilds the graph over its live vectors and
+// swaps it in whole — never a renumbering of the live graph, because every
+// neighbor list is a list of slot indices. It stops the world for the duration,
+// so the index reports Stats().DeadRatio() and leaves the timing to the caller.
+//
 // The package is split one responsibility per file:
 //
 //	config.go     Config knobs, defaults, and the sentinel errors callers see.
 //	graph.go      The Graph type: state, construction, and shared helpers.
 //	insert.go     Insert — building the graph, and replacing an existing id.
 //	delete.go     Delete — tombstoning, and re-electing the entry point.
+//	compact.go    Compact — rebuilding the graph to reclaim tombstoned slots.
 //	search.go     Search and the layer-walking primitives it is built from.
 //	neighbors.go  Edge management: selection, pruning, adjacency lookups.
 //	node.go       A single vector and its per-layer neighbor lists.

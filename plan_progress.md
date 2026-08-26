@@ -15,7 +15,7 @@ was built that way, and what it measured. Tasks are only marked done when
 | 1 | Pool the search scratch, then guard the graph with an `RWMutex` | ✅ |
 | 2 | Tombstone-based `Delete` with stable slot indices and entry re-election | ✅ |
 | 3 | Real upsert semantics for `Insert` | ✅ |
-| 4 | Compaction pass once tombstones cross a threshold | ⬜ |
+| 4 | Compaction pass once tombstones cross a threshold | ✅ |
 
 ## B · Durability
 
@@ -500,8 +500,153 @@ identical to a graph that was built that way from the start.
 
 ---
 
-## Next: Task 4 — compaction
+## Task 4 — Compaction ✅
 
-Both remaining sources of dead slots now exist, so the threshold can be set
-against a real curve rather than a guess: `BenchmarkSearchTombstones` says search
-costs 1.2× at 25% tombstones and 2.5× at 75%.
+*Plan.md A.4: add a compaction pass that rebuilds the graph once tombstones cross
+a threshold, since tombstoned slots never release memory on their own.*
+
+### What it does
+
+`Compact() int` rebuilds the graph over its live vectors and reports the slots
+reclaimed. On a graph with no tombstones it returns 0 without touching anything,
+so it is cheap to poll.
+
+### Rebuild, never renumber
+
+Removing dead slots from the existing graph is not available, for the reason that
+has now shaped three tasks in a row: **every neighbor list is a list of indices
+into `nodes`**, so dropping one slot shifts every index above it and invalidates
+every list in the graph at once. Repairing in place is the same O(N·M) scan that
+ruled out in-place updates, except it runs per dead slot instead of once.
+
+So compaction builds a *new* graph from the live vectors and swaps `nodes`,
+`ids`, `entry` and `maxLevel` across in one assignment under the write lock. The
+slot-index invariant is never violated — it is retired along with the graph that
+held it. That is now written down as invariant 5 in `docs/diagrams/README.md`,
+because compaction is precisely the change that *looks* like it breaks it.
+
+### The rebuild is equal to a fresh build, and that is testable
+
+The replacement seeds a fresh RNG from the same config and re-inserts the live
+vectors in slot order, so it produces **exactly the graph you would have built if
+the dead vectors had never existed** — not merely an equally good one.
+
+`TestCompactMatchesAFreshBuild` asserts that against a directly-built reference:
+same `Stats`, and 50 queries agreeing rank for rank on both id *and* distance.
+Equality rather than sampled recall, which is a much sharper instrument.
+
+It is also what guards the quiet half of the change. `Insert` was split into the
+public entry point and `insertPrepared`, which takes a vector already in stored
+form. Compaction has to use it: sending stored vectors back through `prepare`
+would copy every vector for nothing, and re-normalizing an already-unit vector
+drifts it by an ulp — the compacted graph would hold *almost* the same numbers,
+every recall test would still pass, and only an equality test would notice.
+
+### Compaction is a repair, not just a reclaim
+
+Edges that pointed at tombstones become edges between live nodes, and `results`
+fills at full speed again so the pruning bound in `searchLayer` tightens. The
+rebuilt graph is strictly better than the one it replaced; the memory is only the
+headline.
+
+### Stop-the-world, and why the policy lives outside
+
+`Compact` holds the write lock for a full index build. Building the replacement
+outside the lock means writes landing in the old graph while the new one is
+built, and reconciling them wants a change log plus a double-buffered swap — both
+of which the WAL should shape first, since it will already be recording those
+writes. Recorded as deferred in `docs/MIGRATION.md`, not overlooked.
+
+Because the pause is real, the index does not decide when to take it. There is no
+`CompactionThreshold` config and no background goroutine: an automatic trigger
+inside `Delete` would mean an innocuous call occasionally blocking for seconds.
+`Stats().DeadRatio()` reports the number and the caller picks the moment.
+
+### Measured — the threshold guess was wrong
+
+Task 2 recorded that the search-cost curve "is the argument for a threshold
+somewhere near 25–30%". Measuring the *other* side of the trade inverts that:
+
+| Dead slots | Search | `Compact()` pause, 5k × 128 | Reclaims |
+|---|---|---|---|
+| 25% | 1.2× | **2.61 s** | 25% of slots |
+| 50% | 1.6× | **1.69 s** | 50% of slots |
+| 75% | 2.5× | **0.79 s** | 75% of slots |
+
+A compaction is a full build over the **survivors**, so the pause tracks how many
+vectors live, not how many are reclaimed. Compacting early is therefore the worst
+of both: a longer pause, more often, giving back less memory. Read together the
+curves argue for **~0.5**, where the standing cost is 1.6× search and a graph
+carrying twice the slots it needs. The documented threshold hint moved from 0.25
+to 0.5 on the strength of that.
+
+Locked baselines held — compaction adds no work to any hot path:
+
+| | Before | After |
+|---|---|---|
+| Recall@10, dim 32 | 0.999 | **0.999** |
+| Recall@10, dim 768 | 0.972 | **0.972** |
+| Search allocations | 2 | **2** |
+| Search | 110 µs/op | 105 µs/op |
+
+Recall after compacting a 50%-tombstoned graph is 1.000, unchanged from before
+the rebuild — at that ratio tombstones were costing time, not accuracy.
+
+### Tests added — `internal/hnsw/compact_test.go`
+
+- **`TestCompactMatchesAFreshBuild`** — the load-bearing one, described above.
+- **`TestCompactKeepsEveryLiveVector`** — compaction rebuilds every neighbor list
+  in the graph, so a bug here does not corrupt a vector, it silently drops one.
+  Every survivor must return itself at distance ~0, and 100 queries must never
+  surface a compacted-away id.
+- **`TestCompactIsANoOpWithoutTombstones`** — the early return, pinned by
+  comparing search results across the call: `DeadRatio` invites polling, and
+  rebuilding a clean graph would burn a full build to reclaim nothing.
+- **`TestCompactAfterUpserts`** — three re-embedding rounds, then compaction must
+  keep each id's *latest* vector, not an earlier generation of the same id.
+- **`TestCompactRecall`** — recall before and after, asserting the rebuild never
+  costs recall.
+- **`TestCompactAllDeleted`**, **`TestCompactEmptyGraph`** (also pins
+  `DeadRatio` returning 0 rather than NaN on an empty graph),
+  **`TestCompactReclaimsSlots`**, **`TestConcurrentCompactAndSearch`** (`-race`;
+  `Len` must hold constant across five compactions, since the live population is
+  identical either side of the swap).
+- **`BenchmarkCompact`** at 25/50/75% dead, rebuilding the fixture outside the
+  timer because a compacted graph is clean and the second call measures nothing.
+
+### Files touched
+
+| File | Change |
+|---|---|
+| `internal/hnsw/compact.go` | **New.** `Compact`. |
+| `internal/hnsw/compact_test.go` | **New.** The nine tests above. |
+| `internal/hnsw/graph.go` | `New` split over `newGraph`; `Stats.DeadRatio()`. |
+| `internal/hnsw/insert.go` | `insertPrepared` extracted for the rebuild path. |
+| `internal/hnsw/bench_test.go` | `BenchmarkCompact`. |
+| `doc.go`, both `README.md`s, `CLAUDE.md`, `docs/MIGRATION.md`, `docs/diagrams/04` | Compaction documented; the 25% threshold hint corrected to 50%. |
+
+### Follow-ups this opened
+
+- **Online compaction** — the pause is the price of a coarse write lock, and the
+  fix (change log + double-buffered swap) wants the WAL to exist first.
+- **Nothing calls `Compact` yet.** The policy belongs to the collection/DB layer
+  (task 13), which is also what will own the goroutine that runs it.
+- A compacted graph diverges from what WAL replay would rebuild. Both are correct
+  — the graph is derived state and compaction changes no logical state — but
+  recovery-by-equality tests must compare against an *uncompacted* replay.
+
+---
+
+## A · Finish the graph — complete
+
+All four tasks are done: pooled scratch and concurrent reads, tombstone deletes,
+upsert, compaction. The operation set is now closed — PUT and DELETE, with
+compaction as a physical-layout operation that logs nothing — which is exactly
+the precondition Plan.md set before freezing a record format.
+
+## Next: Task 5 — the WAL record format and writer
+
+Design constraints are already decided in `docs/MIGRATION.md`: versioned records
+from the first commit, CRC per record, truncate the torn tail rather than failing
+recovery, segment rotation built in from the start (not bolted on), and fsync as
+a policy knob.

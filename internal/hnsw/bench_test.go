@@ -134,6 +134,38 @@ func BenchmarkSearchTombstones(b *testing.B) {
 	}
 }
 
+// BenchmarkCompact measures the stop-the-world pause. A compaction is a full
+// index build over the *surviving* vectors, so its cost tracks how many live —
+// reclaiming more is cheaper, not dearer.
+//
+// The fixture is rebuilt outside the timer on every iteration because a
+// compacted graph is clean, and the second call would return immediately and
+// report a pause of nothing.
+func BenchmarkCompact(b *testing.B) {
+	const n = 5000
+	for _, pct := range []int{25, 50, 75} {
+		b.Run(fmt.Sprintf("dead=%d%%", pct), func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				b.StopTimer()
+				rng := rand.New(rand.NewSource(11))
+				g, _ := New(DefaultConfig(benchDim, Cosine))
+				for i := range n {
+					_ = g.Insert(fmt.Sprintf("v%d", i), randomVector(rng, benchDim))
+				}
+				for i := range n {
+					if i%100 < pct {
+						g.Delete(fmt.Sprintf("v%d", i))
+					}
+				}
+				b.StartTimer()
+
+				g.Compact()
+			}
+		})
+	}
+}
+
 func BenchmarkDistance(b *testing.B) {
 	rng := rand.New(rand.NewSource(5))
 	a := randomVector(rng, benchDim)

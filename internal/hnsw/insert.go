@@ -61,6 +61,22 @@ func (g *Graph) Insert(id string, vector []float32) error {
 		g.tombstone(id)
 	}
 
+	g.insertPrepared(id, vec)
+	return nil
+}
+
+// insertPrepared adds a node for an id that is not currently bound, taking
+// ownership of vec — which must already be in stored form: the graph's own
+// copy, normalized if the metric wants it.
+//
+// It is split out for Compact, which rebuilds the graph from vectors that are
+// *already* stored form. Sending those back through prepare would copy every
+// vector for no reason, and re-normalizing an already-unit vector drifts it by
+// an ulp, so a compacted graph would no longer hold quite the same numbers as
+// the one it replaced.
+//
+// Callers hold the write lock.
+func (g *Graph) insertPrepared(id string, vec []float32) {
 	st := g.acquireState()
 	defer g.releaseState(st)
 
@@ -74,7 +90,7 @@ func (g *Graph) Insert(id string, vector []float32) error {
 	if g.entry == -1 {
 		g.entry = idx
 		g.maxLevel = level
-		return nil
+		return
 	}
 
 	// Phase 1: greedily descend from the top down to level+1 with ef=1, just to
@@ -115,5 +131,4 @@ func (g *Graph) Insert(id string, vector []float32) error {
 		g.maxLevel = level
 		g.entry = idx
 	}
-	return nil
 }
