@@ -54,6 +54,24 @@ go test ./internal/hnsw/ -v    # the new HNSW package
 go test ./... -race            # race detector (run before merging)
 ```
 
+Measurement (the sweeps double as the benchmark harness — same code, so a README
+number and a CI threshold cannot disagree):
+
+```bash
+go test ./internal/hnsw/ -run TestSweep -results docs/benchmarks/results.csv -timeout 40m
+go run docs/benchmarks/plot.go   # regenerates the SVGs the READMEs embed
+```
+
+Without `-results` the same sweeps run a small grid and assert thresholds, inside
+the normal `go test ./...`. `docs/benchmarks/plot.go` is `//go:build ignore` and
+stdlib-only — do not add a charting dependency.
+
+The sweeps **skip themselves under `-race`** (`skipUnderRace`, via a `race`
+build-tag constant): they are single-goroutine, so the detector observes nothing
+while costing ~10× and pushing the package past the default 10-minute timeout.
+Race coverage lives in the five `TestConcurrent*` tests. Do not "fix" the skip by
+raising the timeout.
+
 If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 
 ## Conventions
@@ -79,7 +97,11 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - `M` (neighbors/node) is **structural** — set once, changing it needs a rebuild.
 - `EfConstruction` is the build-time search width (kept fixed, ~100–200).
 - `ef` is the **query-time** knob in `Search(query, k, ef)`; must be `>= k`, bigger
-  = higher recall + slower.
+  = higher recall + slower. **Recall at a fixed `ef` falls as `N` or dimension
+  grows** — 0.997 at 500 vectors down to 0.652 at 20,000, all at `ef=64`. That is
+  not degradation, it is a fixed-width beam covering less of a bigger space, and
+  it means `ef=64` is a starting point rather than a default that holds. Measured
+  in `docs/benchmarks/`.
 - Empty graph = empty container: no graph memory until the first insert.
 - The graph is **safe for concurrent use**: `Search` holds `RLock` and runs in
   parallel, `Insert` holds the write lock. Per-traversal scratch comes from a
@@ -123,3 +145,10 @@ Any index change must hold these; they are enforced by tests and `-benchmem`:
 | Recall@10, dim 32 | 0.999 | `TestRecallVsBruteForce` |
 | Recall@10, dim 768 | 0.972 | `TestRecallHighDimension` |
 | Search allocations | 2 allocs/op | `BenchmarkSearch -benchmem` |
+| Recall spread across seeds | ≤ 0.05 | `TestRecallIsStableAcrossSeeds` |
+
+The sweep tests in `recall_test.go` defend **shape**, not absolute values: recall
+must not fall as `ef` rises, nor as `M` rises, must recover under a wide search
+for every metric, and must not drop when a graph is compacted. Their absolute
+floors are deliberately loose — see the note at the top of that file before
+"tightening" one.

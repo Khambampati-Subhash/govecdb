@@ -106,7 +106,7 @@ if g.Stats().DeadRatio() > 0.5 {
 | `M` — neighbors per node (layers > 0; layer 0 uses `2*M`) | `Config`, set once | **No** — structural; changing it means rebuilding |
 | `EfConstruction` — search width during inserts | `Config` | Kept fixed (100–200) |
 | `Alpha` — pruning relaxation | `Config` | Fixed per graph; 1.0–1.4 useful, default 1.2 |
-| `ef` — search width at query time | `Search(query, k, ef)` | **Yes** — per query; auto-clamped to `>= k` |
+| `ef` — search width at query time | `Search(query, k, ef)` | **Yes** — per query; auto-clamped to `>= k`. Raise it as `N` and dimension grow — [see the charts](#measured-behaviour) |
 
 ## Measured performance
 
@@ -122,6 +122,86 @@ Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
 | Recall@10 (dim 768) | **0.972** |
 
 Recall is measured against brute-force ground truth in `graph_test.go`, not estimated.
+
+## Measured behaviour
+
+Every chart below is generated from [`docs/benchmarks/results.csv`](docs/benchmarks/results.csv),
+which is written by the same tests CI runs — there is no separate benchmarking
+script whose numbers can drift from the ones the suite defends. Reproduce with:
+
+```bash
+go test ./internal/hnsw/ -run TestSweep -results docs/benchmarks/results.csv -timeout 40m && go run docs/benchmarks/plot.go
+```
+
+Apple M4 Max · 5,000 vectors · k=10 · recall against brute-force ground truth.
+
+### `ef` is the knob, and its default is a starting point — not a setting
+
+![Recall and latency against ef](docs/benchmarks/recall-vs-ef.svg)
+
+`ef` is the search width, the one parameter you can change per query. At 5,000
+vectors of 128 dimensions it spans **0.310 recall at 27 µs** to **0.999 at
+438 µs**. The suite asserts the shape as well as the numbers: a wider search may
+cost more, but it must never find *less*.
+
+### Recall at a fixed `ef` falls as the corpus grows
+
+![Search latency against corpus size](docs/benchmarks/latency-vs-corpus-size.svg)
+
+This is the most practically useful thing in this README. Hold `ef` at 64 and
+recall slides from 0.997 at 500 vectors to **0.652 at 20,000** — not because the
+index degrades, but because a fixed-width beam covers a shrinking share of a
+growing space. **`ef` has to grow with `N`.** That it is a `Search` argument
+rather than a build-time constant is the whole point.
+
+Latency, meanwhile, grows **3.2× for a 40× corpus** — the sub-linear behaviour
+the index exists for. (Even that overstates it: past ~4 MB of vectors the
+distance kernels start paying for memory rather than arithmetic, so the measured
+curve is nearer `sqrt(N)` than the `log(N)` the algorithm implies.)
+
+### Dimension costs recall and latency at both ends
+
+![Recall and latency across dimensions](docs/benchmarks/recall-vs-dimension.svg)
+
+At `ef=64`, recall runs from 1.000 at 8 dimensions to **0.558 at 1536** while a
+query goes from 17 µs to 1,090 µs. High-dimensional embeddings need a wider `ef`,
+and the build cost rises with them: the same corpus takes 0.65 s to index at 8
+dimensions and 56 s at 1536.
+
+### `M` is structural — read this chart before you build
+
+![Recall and build time against M](docs/benchmarks/recall-vs-m.svg)
+
+`M` cannot be changed without rebuilding, and it buys recall at a steep build
+price: **M=4 gives 0.294 recall for a 0.6 s build; M=48 gives 0.994 for 73 s.**
+The default of 16 sits where the curve turns.
+
+### Tombstones, and what `Compact()` gives back
+
+![Latency with tombstones and after compaction](docs/benchmarks/tombstones-vs-compaction.svg)
+
+Dead slots ride the search frontier, so latency climbs with them — 104 µs clean,
+**243 µs at 75% tombstoned**, back to **69 µs** after `Compact()`.
+
+There is a subtlety worth knowing, because it looks like a regression and isn't:
+compaction *slightly lowers* recall (0.968 → 0.949 at 50% dead). Tombstones keep
+the result set under-filled, which loosens the pruning bound and makes the search
+explore wider than `ef` asked for. That bought recall nobody requested at a
+latency nobody wanted — 184 µs against 88 µs. A marginally larger `ef` on the
+compacted graph recovers the recall and is still twice as fast.
+
+### Metric and data shape
+
+| Metric | recall @ ef=64 | @ ef=256 | | Corpus | recall | latency |
+|---|---|---|---|---|---|---|
+| Cosine | 0.830 | 0.998 | | centered | 0.852 | 120 µs |
+| Euclidean | 0.820 | 0.980 | | positive orthant | 0.865 | 90 µs |
+| DotProduct | 0.848 | 0.999 | | clustered | 0.884 | 38 µs |
+
+All three metrics behave alike — no metric is weak here, and a wide search
+recovers every one of them, which is what rules out the graph rather than the
+data being at fault. Clustered data, which is what real embeddings look like, is
+**3× faster** to search than uniform noise.
 
 ## Roadmap
 

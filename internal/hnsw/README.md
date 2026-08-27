@@ -34,7 +34,11 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `delete_test.go` | Tombstone semantics, recall under deletes, entry re-election, stranding. |
 | `upsert_test.go` | Replacement semantics, replay no-ops, recall under updates, atomicity. |
 | `compact_test.go` | Slot reclamation, equality against a fresh build, recall after rebuild. |
-| `bench_test.go` | Insert / search / distance benchmarks. |
+| `distance_test.go` | Kernels vs a float64 reference across 28 dimensions, tail handling, metric wiring. |
+| `pq_test.go` | Heap invariants under interleaved push/pop, ties, payload integrity. |
+| `visited_test.go` | Generation stamps, reuse across graph sizes, the 2³²-search wraparound. |
+| `recall_test.go` | The sweep harness: dimension / scale / ef / M / metric / distribution / tombstones. |
+| `bench_test.go` | Insert / upsert / search / compaction / distance benchmarks. |
 
 ## The knobs
 
@@ -262,6 +266,64 @@ The search curve on its own argues for a 25% threshold. Both curves together
 argue for **~50%**, where the standing cost is 1.6× on search and a graph
 carrying 2× the slots it needs. That is the trade to tune; `Stats().DeadRatio()`
 is the number to tune it on.
+
+## How this package is tested
+
+Recall numbers are only worth as much as what produced them, so the suite is
+built in three layers that check different things.
+
+**Fixed-configuration tests pin absolute numbers.** `TestRecallVsBruteForce`
+(0.999 at dim 32), `TestRecallHighDimension` (0.972 at dim 768) and
+`TestRecallIsStableAcrossSeeds` vary nothing, so a regression moves them
+immediately. The last one exists because every other recall test pins a single
+seed, which measures that seed as much as the index — it runs five and fails if
+the spread exceeds 0.05.
+
+**Sweeps assert shape.** [`recall_test.go`](recall_test.go) varies dimension,
+corpus size, `ef`, `M`, metric, data distribution and tombstone ratio. Absolute
+floors there are loose on purpose — recall at a fixed `ef` genuinely falls as
+either corpus or dimension grows, so one threshold across the whole grid could
+only ever be its hardest cell's. What the sweeps actually defend are the
+*relationships*: recall must not fall as `ef` rises, must not fall as `M` rises,
+must recover under a wide search whatever the metric, and must not drop when a
+graph is compacted.
+
+**Component tests cover what recall can only measure indirectly.** These were
+the real gaps:
+
+- [`distance_test.go`](distance_test.go) — the kernels are unrolled four-wide
+  with a scalar tail, and every other test in the package uses a dimension
+  divisible by four. They are now checked against a float64 reference at 28
+  dimensions including 1, 2, 3, 5, 129 and 769, plus a case where the *only*
+  difference between two inputs is the tail element.
+- [`pq_test.go`](pq_test.go) — the hand-written heaps exist to avoid
+  `container/heap`'s boxing, which makes the sift loops ours to get right. Their
+  invariant is now checked after every push and pop under randomized interleaving,
+  not just on a clean drain.
+- [`visited_test.go`](visited_test.go) — including the wraparound branch. When
+  the generation counter laps `MaxUint32`, every stale stamp would suddenly match
+  the current generation and a search would treat the whole graph as already
+  visited, returning almost nothing. Real traffic reaches that once every 2³²
+  searches; the test drives the counter there directly.
+
+The sweep harness doubles as the benchmark harness — `-results <path>` widens
+the grid and writes every cell to CSV for [`docs/benchmarks`](../../docs/benchmarks)
+to plot. Same code, so a number in a README and a threshold in CI cannot disagree.
+
+### What measuring changed
+
+Two things in this README were wrong before the sweeps existed, which is the
+argument for having them:
+
+- **A guessed compaction threshold.** The tombstone cost curve alone suggested
+  compacting at ~25% dead. Measuring the *other* side showed the pause tracks
+  survivors, so compacting early costs more and reclaims less — the guidance
+  moved to ~50%.
+- **A plausible explanation that wasn't true.** Recall dropping at larger corpora
+  looked like it might be the all-positive test corpus putting every vector in
+  one orthant. Measured side by side, the centered and positive corpora score
+  within 1.5 points of each other. The cause was corpus size at a fixed `ef`, and
+  nothing to do with the data's shape.
 
 ## Usage
 

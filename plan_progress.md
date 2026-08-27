@@ -644,6 +644,103 @@ upsert, compaction. The operation set is now closed — PUT and DELETE, with
 compaction as a physical-layout operation that logs nothing — which is exactly
 the precondition Plan.md set before freezing a record format.
 
+## Interlude — test depth and a measurement harness
+
+*Not a numbered task. Before freezing a record format around this index, its
+behaviour should be measured rather than assumed, and the parts no recall test
+can see should be tested directly.*
+
+### The gaps that existed
+
+Three files had no direct test at all, and each hid a class of bug that recall
+numbers would have dented rather than broken:
+
+- **The distance kernels** are unrolled four-wide with a scalar tail — and every
+  dimension used anywhere else in the package is divisible by four. A wrong tail
+  loop was invisible. They are now checked against a float64 reference across 28
+  dimensions (1, 2, 3, 5, … 129, 769, 1536), plus a case where the tail element is
+  the *only* difference between two inputs.
+- **The heaps** are hand-written to dodge `container/heap`'s boxing, so the sift
+  loops are ours. The invariant is now asserted after every push and pop under
+  randomized interleaving, with ties, and with payload integrity checked
+  separately from ordering.
+- **`visitedList`'s wraparound.** When the generation counter laps `MaxUint32`,
+  every stale stamp matches the new generation and a search would treat the whole
+  graph as visited — returning almost nothing, silently. Reaching it honestly
+  takes 2³² searches; the test drives the counter to the edge directly.
+
+Recall coverage was also narrower than it looked: every recall test used Cosine,
+so Euclidean and DotProduct had no accuracy coverage above the kernel level, and
+every one pinned a single seed.
+
+### The harness
+
+`recall_test.go` is one piece of code with two jobs, selected by a `-results`
+flag. Without it: a small grid, threshold assertions, ~20 s inside the normal
+test run. With it: a wider grid over 5,000-vector corpora, every cell written to
+CSV. Because it is the same code, a number printed in a README and a threshold
+enforced by CI cannot drift apart.
+
+`docs/benchmarks/plot.go` renders that CSV to SVG. It is `//go:build ignore` and
+stdlib-only — hand-written SVG, because a charting library would have been the
+first crack in "no third-party dependencies", and axes plus polylines are a
+couple hundred lines.
+
+### What the measurements changed
+
+Three claims in this repo were wrong, and would have stayed wrong:
+
+1. **The compaction threshold.** Task 4 already corrected 25% → 50% by measuring
+   the pause instead of only the search cost.
+2. **"Euclidean is weak."** At 5,000 vectors Euclidean scored 0.820 against
+   Cosine's 0.830 at `ef=64`, and the first explanation drafted for that gap was a
+   story about normalization putting Cosine on the unit sphere. Measuring all
+   three metrics at a wide `ef` killed it: 0.998 / 0.980 / 0.999. No metric is
+   weak; the whole grid was simply sitting at a corpus size where `ef=64` is
+   narrow.
+3. **"The all-positive test corpus depresses recall."** Plausible — every vector
+   shares an orthant, so any two are ~0.75 similar before you look at the data. A
+   centred corpus was introduced on that theory. Measured side by side, positive
+   scores *higher* (0.865 vs 0.852). The real driver was corpus size at fixed
+   `ef`, which the scale sweep isolates. The corpus stays centred for being
+   representative, and the positive case stays in the sweep so the correction
+   remains checkable.
+
+A fourth thing surfaced that was not wrong, just unknown: **compaction slightly
+lowers recall** (0.968 → 0.949 at 50% dead). Tombstones keep `results`
+under-filled, which loosens the pruning bound and widens the search past what
+`ef` asked for — recall nobody requested, at 184 µs against 88 µs. The test
+tolerance now documents that as a withdrawn subsidy rather than a regression.
+
+### The headline numbers
+
+5,000 vectors, dim 128, k=10, Apple M4 Max:
+
+| Sweep | Range measured |
+|---|---|
+| `ef` 10 → 512 | recall 0.310 → 0.999, latency 27 µs → 438 µs |
+| `N` 500 → 20,000 at ef=64 | recall 0.997 → 0.652, latency 44 µs → 141 µs (**3.2× for 40× data**) |
+| dim 8 → 1536 at ef=64 | recall 1.000 → 0.558, latency 17 µs → 1,090 µs |
+| `M` 4 → 48 | recall 0.294 → 0.994, build 0.6 s → 73 s |
+| tombstones 0 → 75% | latency 104 µs → 243 µs, and 69 µs after `Compact()` |
+
+The most useful of these for anyone using the library: **`ef` must grow with `N`.**
+A fixed `ef=64` is a starting point, not a setting.
+
+### Files touched
+
+| File | Change |
+|---|---|
+| `internal/hnsw/distance_test.go` | **New.** Kernels vs float64 reference across 28 dims, tails, wiring. |
+| `internal/hnsw/pq_test.go` | **New.** Heap invariants, interleaving, ties, payload. |
+| `internal/hnsw/visited_test.go` | **New.** Stamps, resize reuse, the 2³² wraparound. |
+| `internal/hnsw/recall_test.go` | **New.** Seven sweeps, dual-mode harness, seed stability. |
+| `internal/hnsw/bench_test.go` | `BenchmarkSearchByDimension`, `BenchmarkSearchByScale`. |
+| `docs/benchmarks/` | **New.** `plot.go`, `results.csv`, seven SVGs, and a README. |
+| Root `README.md`, `internal/hnsw/README.md`, `CLAUDE.md` | Charts embedded; `ef` guidance corrected. |
+
+---
+
 ## Next: Task 5 — the WAL record format and writer
 
 Design constraints are already decided in `docs/MIGRATION.md`: versioned records
