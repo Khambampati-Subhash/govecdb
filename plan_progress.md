@@ -727,10 +727,50 @@ tolerance now documents that as a withdrawn subsidy rather than a regression.
 The most useful of these for anyone using the library: **`ef` must grow with `N`.**
 A fixed `ef=64` is a starting point, not a setting.
 
+### The follow-up: measuring the surface, not two slices
+
+The sweeps above vary one knob at a time with the others at their defaults, which
+is enough to show a slope and not enough to choose a configuration. Two 2-D grids
+were added afterwards, and both changed an answer:
+
+**`M` × `ef` at 5,000 vectors.** Reading the `M` chart and the `ef` chart together
+had suggested M=32 was roughly twice as fast as M=16 at matched recall. It is not
+— those charts each hold the *other* knob at its default, so the points being
+compared sat at different recall levels. Measured on the grid, at equal recall:
+
+| Target | via `ef` (M=16) | via `M` | Build |
+|---|---|---|---|
+| ~0.96 | ef=128 → 0.964, 180 µs | M=32/ef=64 → 0.968, **162 µs** | 3.8 s → 23 s |
+| ~0.997 | ef=256 → 0.998, 282 µs | M=32/ef=128 → 0.997, **251 µs** | 3.8 s → 23 s |
+
+**~10% latency for 6× the build and double the memory.** That turns "raise M"
+from general advice into a narrow special case, and confirms M=16 as the default.
+
+**`N` × `ef` across a 20× range.** Holding a recall target needs `ef ∝ n^0.78` —
+sub-linear, but far steeper than the `log N` the hop count follows. Fitted into
+`SuggestedEf(n, k, target)` and `g.SuggestedEf(k, target)`, so the guidance lives
+in the API rather than only in a README.
+
+Calibrated exactly on the sweep, that function **undershot on three of four
+verification corpora** (0.921 against a 0.95 target) — recall on one corpus does
+not transfer precisely to another. The anchors now carry margin and the target is
+documented as a floor to clear: 0.95 measures 0.969 at 1,000 vectors and 0.972 at
+5,000. `TestSuggestedEfAchievesTarget` builds real graphs and fails if a
+suggestion misses, so the constants cannot rot quietly when neighbour selection
+or the default `M` changes.
+
+The grids also surfaced the variance figure that governs how precise any of this
+can be: **the same configuration on three different corpora returned 0.595, 0.646
+and 0.677** — an eight-point spread at mid-range recall, compressing near
+saturation. That number is why the suggestion carries margin rather than aiming
+at a median.
+
 ### Files touched
 
 | File | Change |
 |---|---|
+| `internal/hnsw/suggest.go` | **New.** `SuggestedEf` + the `Graph` method, fitted to the N x ef grid. |
+| `internal/hnsw/suggest_test.go` | **New.** Verifies suggestions against real graphs; shape and clamping. |
 | `internal/hnsw/distance_test.go` | **New.** Kernels vs float64 reference across 28 dims, tails, wiring. |
 | `internal/hnsw/pq_test.go` | **New.** Heap invariants, interleaving, ties, payload. |
 | `internal/hnsw/visited_test.go` | **New.** Stamps, resize reuse, the 2³² wraparound. |

@@ -22,6 +22,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `insert.go` | `Insert` — building the graph, and replacing an id that is already in it. |
 | `delete.go` | `Delete` — tombstoning a slot, and re-electing the entry point when it is the one deleted. |
 | `compact.go` | `Compact` — rebuilding the graph over its live vectors to reclaim tombstoned slots. |
+| `suggest.go` | `SuggestedEf` — the measured `ef ∝ n^0.78` curve, fitted so callers need not guess. |
 | `search.go` | `Result`, `Search`, and the primitives it rides on: `greedyClosest`, `searchLayer`. |
 | `neighbors.go` | Edge management: alpha-pruned `selectNeighbors`, `pruneConnections`, `connect`, adjacency lookups. |
 | `node.go` | A single vector: `id`, `vector`, per-layer neighbor lists. |
@@ -37,7 +38,8 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `distance_test.go` | Kernels vs a float64 reference across 28 dimensions, tail handling, metric wiring. |
 | `pq_test.go` | Heap invariants under interleaved push/pop, ties, payload integrity. |
 | `visited_test.go` | Generation stamps, reuse across graph sizes, the 2³²-search wraparound. |
-| `recall_test.go` | The sweep harness: dimension / scale / ef / M / metric / distribution / tombstones. |
+| `recall_test.go` | The sweep harness: dimension / scale / ef / M / metric / distribution / tombstones, plus the M x ef and N x ef grids. |
+| `suggest_test.go` | Builds real graphs and fails if a suggested `ef` misses its recall target. |
 | `bench_test.go` | Insert / upsert / search / compaction / distance benchmarks. |
 
 ## The knobs
@@ -324,6 +326,12 @@ argument for having them:
   one orthant. Measured side by side, the centered and positive corpora score
   within 1.5 points of each other. The cause was corpus size at a fixed `ef`, and
   nothing to do with the data's shape.
+- **An overstated case for raising `M`.** Reading the `M` and `ef` charts
+  together suggested M=32 was roughly twice as fast as M=16 at matched recall.
+  It is not — those two charts each hold the *other* knob at its default, so the
+  points being compared sat at different recall levels. The 2-D grid puts the
+  real figure at **~10% latency for 6× the build time**, which turns "raise M"
+  from advice into a narrow special case.
 
 ## Usage
 

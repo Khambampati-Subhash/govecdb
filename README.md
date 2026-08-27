@@ -89,7 +89,9 @@ g, _ := hnsw.New(hnsw.DefaultConfig(128, hnsw.Cosine))
 _ = g.Insert("doc1", vec1)
 _ = g.Insert("doc1", vec2) // upsert: same id, new vector replaces the old
 
-results, _ := g.Search(query, 10 /*k*/, 64 /*ef*/)
+// ef must grow with the corpus; SuggestedEf fits the measured curve.
+ef := g.SuggestedEf(10 /*k*/, 0.95 /*target recall*/)
+results, _ := g.Search(query, 10 /*k*/, ef)
 for _, r := range results {
     fmt.Println(r.ID, r.Distance) // ascending; smaller = closer
 }
@@ -106,7 +108,7 @@ if g.Stats().DeadRatio() > 0.5 {
 | `M` — neighbors per node (layers > 0; layer 0 uses `2*M`) | `Config`, set once | **No** — structural; changing it means rebuilding |
 | `EfConstruction` — search width during inserts | `Config` | Kept fixed (100–200) |
 | `Alpha` — pruning relaxation | `Config` | Fixed per graph; 1.0–1.4 useful, default 1.2 |
-| `ef` — search width at query time | `Search(query, k, ef)` | **Yes** — per query; auto-clamped to `>= k`. Raise it as `N` and dimension grow — [see the charts](#measured-behaviour) |
+| `ef` — search width at query time | `Search(query, k, ef)` | **Yes** — per query; auto-clamped to `>= k`. Grows with `N` — use `SuggestedEf`, [see the charts](#measured-behaviour) |
 
 ## Measured performance
 
@@ -175,6 +177,52 @@ dimensions and 56 s at 1536.
 `M` cannot be changed without rebuilding, and it buys recall at a steep build
 price: **M=4 gives 0.294 recall for a 0.6 s build; M=48 gives 0.994 for 73 s.**
 The default of 16 sits where the curve turns.
+
+### Choosing `M` and `ef` together
+
+![Recall against latency for every M and ef](docs/benchmarks/recall-vs-latency-pareto.svg)
+
+The two charts above each vary one knob with the other at its default, which
+shows a slope but cannot answer *"which pair?"* — "M=16 gives 0.823" really means
+"M=16 *at a narrow ef*". This is the surface: one line per `M`, one point per
+`ef`, ringed where nothing beats that point on both axes at once.
+
+Compared at **equal recall**, raising `M` is worth less than the M-chart alone
+suggests:
+
+| Target | via `ef` (M=16) | via `M` (ef=64/128) | Build cost |
+|---|---|---|---|
+| ~0.96 | ef=128 → 0.964, **180 µs** | M=32/ef=64 → 0.968, **162 µs** | 3.8 s → 23 s |
+| ~0.997 | ef=256 → 0.998, **282 µs** | M=32/ef=128 → 0.997, **251 µs** | 3.8 s → 23 s |
+
+**About 10% latency, for 6× the build time and roughly double the graph memory.**
+That is a much weaker case for raising `M` than comparing the two 1-D charts
+implies — which is exactly why the 2-D grid is the one to read. `M=16` is a good
+default; reach for `M=24`–`32` only when query latency is the binding constraint
+and you can afford the build.
+
+### Picking `ef` without a benchmark: `SuggestedEf`
+
+![Recall against ef at three corpus sizes](docs/benchmarks/recall-vs-ef-by-corpus-size.svg)
+
+Holding a recall target needs a wider search as the corpus grows — measured,
+`ef` scales as roughly **n^0.78**. That relationship is fitted into the API so
+the guidance lives where it is used:
+
+```go
+ef := g.SuggestedEf(10 /*k*/, 0.95 /*target recall*/)
+results, _ := g.Search(query, 10, ef)
+```
+
+`targetRecall` is a **floor to clear, not a point to hit** — the calibration
+carries margin, so 0.95 measures 0.969 at 1,000 vectors and 0.972 at 5,000.
+Calibrated exactly on the sweep it undershot on three of four verification
+corpora, because recall on one corpus does not transfer precisely to another.
+
+It is a starting point, not a guarantee: calibrated on uniform random 128-dim
+vectors at M=16, which is the pessimistic case. `TestSuggestedEfAchievesTarget`
+builds real graphs and fails if a suggestion misses, so the constants cannot rot
+quietly.
 
 ### Tombstones, and what `Compact()` gives back
 

@@ -101,7 +101,17 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   grows** — 0.997 at 500 vectors down to 0.652 at 20,000, all at `ef=64`. That is
   not degradation, it is a fixed-width beam covering less of a bigger space, and
   it means `ef=64` is a starting point rather than a default that holds. Measured
-  in `docs/benchmarks/`.
+  in `docs/benchmarks/`. Use `SuggestedEf(n, k, target)` / `g.SuggestedEf(k, target)`
+  rather than a hardcoded number: it fits the measured `ef ∝ n^0.78` curve, treats
+  the target as a **floor** (0.95 measures ~0.97), and is guarded by
+  `TestSuggestedEfAchievesTarget`, which builds real graphs and fails if a
+  suggestion misses. Its constants carry deliberate margin — calibrated exactly on
+  the sweep it undershot on 3 of 4 corpora.
+- **Raising `M` is worth less than the M-vs-recall chart implies.** Compared at
+  *equal recall* on the M×ef grid, M=32 beats M=16 by only ~10% latency (162µs vs
+  180µs at ~0.96) for 6x the build time and ~2x the graph memory. M=16 is the right
+  default; the two 1-D charts overstate the case because they compare points at
+  different recall levels.
 - Empty graph = empty container: no graph memory until the first insert.
 - The graph is **safe for concurrent use**: `Search` holds `RLock` and runs in
   parallel, `Insert` holds the write lock. Per-traversal scratch comes from a
