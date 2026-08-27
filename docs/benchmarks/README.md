@@ -44,6 +44,8 @@ twenty seconds under `-race`.
 | `scale` | 500 → 20,000 vectors | Does search stay sub-linear as the corpus grows? |
 | `ef` | 10 → 512 | The per-query knob: what does recall cost in latency? |
 | `M` | 4 → 48 | The structural knob, fixed at build time — what does it buy? |
+| `grid` | M 8→32 x ef 16→256 | The surface, not two slices: which (M, ef) pair is not beaten on both axes? |
+| `efscale` | N 1k→20k x ef 16→512 | How much wider must the search get to hold a recall target? Fits `SuggestedEf`. |
 | `metric` | Cosine / Euclidean / DotProduct | Do all three metrics actually work, not just the tested one? |
 | `distribution` | centered / positive / clustered | How much does the shape of the data decide the answer? |
 | `tombstones`, `compacted` | 0 → 75% dead | What deferred deletion costs, and what `Compact()` returns. |
@@ -63,7 +65,19 @@ normalization bug cancel itself out on both sides of the comparison.
 - **Recall at a fixed `ef` falls as the corpus grows.** That is not a defect: the
   search width stays constant while the number of plausible candidates rises. It
   is the reason `ef` is an argument to `Search` rather than a build-time
-  constant. Raise it with N to hold recall steady.
+  constant. Measured, holding a target needs `ef` to grow as roughly `n^0.78` —
+  sub-linear, but a good deal steeper than the `log N` the hop count follows.
+  `SuggestedEf` is fitted to that surface.
+- **Recall varies with the corpus, not only its size.** The same configuration
+  (M=16, ef=32, N=5000) measured on three different random corpora returned
+  0.595, 0.646 and 0.677 — an eight-point spread. The variance is widest in the
+  middle of the recall range and compresses near saturation, which is why
+  `SuggestedEf`'s anchors carry margin and why single-seed measurements at
+  mid-recall should not be trusted to three decimal places.
+- **The M-vs-recall chart overstates the case for raising `M`.** Compared at
+  equal recall on the 2-D grid, M=32 beats M=16 by about 10% latency for 6x the
+  build. Comparing two 1-D charts, each taken at the other knob's default, is the
+  mistake the grid exists to prevent.
 - **Corpus shape moves latency, not recall — the opposite of what was expected.**
   `positive` (components in [0,1)) puts every vector in one orthant, where any two
   are already ~0.75 similar, and the prediction was that recall@10 would suffer

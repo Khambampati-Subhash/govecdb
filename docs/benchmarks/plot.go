@@ -173,6 +173,14 @@ func (c *chart) xCentre(i int) float64 {
 	return float64(padLeft) + step*(float64(i)+0.5)
 }
 
+func (a axis) x(v float64) float64 {
+	if a.max == a.min {
+		return float64(padLeft)
+	}
+	frac := (v - a.min) / (a.max - a.min)
+	return float64(padLeft) + frac*float64(plotWidth)
+}
+
 func (a axis) y(v float64) float64 {
 	if a.max == a.min {
 		return float64(padTop + plotHeight)
@@ -410,6 +418,157 @@ func (c *chart) renderLegend(b *strings.Builder) {
 	}
 }
 
+// ------------------------------------------------- scatter (numeric x axis)
+
+// A categorical x axis cannot express the chart that actually answers "what
+// should I pick": recall against *latency*, where both axes are continuous and
+// the question is which configurations are not beaten on both at once.
+
+type point struct {
+	x, y  float64
+	label string // the varying knob at this point, e.g. an ef value
+}
+
+type scatterSeries struct {
+	name   string
+	colour string
+	points []point // in knob order, so the polyline traces the trade-off
+}
+
+type scatter struct {
+	title    string
+	subtitle string
+	xLabel   string
+	xAxis    axis
+	yAxis    axis
+	series   []scatterSeries
+	note     string
+}
+
+// paretoFront marks the points no other point beats on both axes — higher
+// recall AND lower latency. Everything else is strictly the wrong choice, and
+// saying so visually is more useful than leaving the reader to eyeball it.
+func (s *scatter) paretoFront() map[[2]int]bool {
+	front := map[[2]int]bool{}
+	for si, ser := range s.series {
+		for pi, p := range ser.points {
+			dominated := false
+			for _, other := range s.series {
+				for _, q := range other.points {
+					if q.y >= p.y && q.x <= p.x && (q.y > p.y || q.x < p.x) {
+						dominated = true
+						break
+					}
+				}
+				if dominated {
+					break
+				}
+			}
+			if !dominated {
+				front[[2]int{si, pi}] = true
+			}
+		}
+	}
+	return front
+}
+
+func (s *scatter) render() string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d" role="img" aria-label="%s">`,
+		width, height, width, height, esc(s.title))
+	fmt.Fprintf(&b, `<rect width="%d" height="%d" fill="%s"/>`, width, height, colBG)
+	fmt.Fprintf(&b, `<rect x="8" y="8" width="%d" height="%d" rx="10" fill="%s"/>`, width-16, height-16, colPanel)
+
+	text(&b, 26, 38, colText, 19, "start", "600", s.title)
+	if s.subtitle != "" {
+		text(&b, 26, 58, colMuted, 12.5, "start", "400", s.subtitle)
+	}
+
+	// Horizontal gridlines + left axis labels.
+	for _, v := range s.yAxis.ticks() {
+		y := s.yAxis.y(v)
+		fmt.Fprintf(&b, `<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="%s" stroke-width="1"/>`,
+			padLeft, y, padLeft+plotWidth, y, colGrid)
+		text(&b, float64(padLeft)-10, y+4, colMuted, 11.5, "end", "400", s.yAxis.format(v))
+	}
+	// Vertical gridlines + bottom axis labels.
+	for _, v := range s.xAxis.ticks() {
+		x := s.xAxis.x(v)
+		fmt.Fprintf(&b, `<line x1="%.1f" y1="%d" x2="%.1f" y2="%d" stroke="%s" stroke-width="1"/>`,
+			x, padTop, x, padTop+plotHeight, colGrid)
+		text(&b, x, float64(padTop+plotHeight)+22, colMuted, 11.5, "middle", "400", s.xAxis.format(v))
+	}
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="%s" font-family="%s" font-size="12" text-anchor="middle" transform="rotate(-90 %.1f %.1f)">%s</text>`,
+		20.0, float64(padTop+plotHeight/2), colText, fontFamily, 20.0, float64(padTop+plotHeight/2), esc(s.yAxis.label))
+	text(&b, float64(padLeft+plotWidth/2), float64(padTop+plotHeight)+46, colMuted, 12, "middle", "400", s.xLabel)
+
+	front := s.paretoFront()
+
+	// Labels go only on the Pareto front, and only where one fits. Labelling
+	// every point produced an unreadable pile in the crowded regions — and the
+	// front is what a reader is choosing between anyway, so the restriction
+	// carries meaning rather than just saving ink.
+	type placed struct{ x, y float64 }
+	var labels []placed
+	fits := func(x, y float64) bool {
+		for _, p := range labels {
+			if math.Abs(p.x-x) < 46 && math.Abs(p.y-y) < 15 {
+				return false
+			}
+		}
+		labels = append(labels, placed{x, y})
+		return true
+	}
+
+	for si, ser := range s.series {
+		var pts []string
+		for _, p := range ser.points {
+			pts = append(pts, fmt.Sprintf("%.1f,%.1f", s.xAxis.x(p.x), s.yAxis.y(p.y)))
+		}
+		fmt.Fprintf(&b, `<polyline points="%s" fill="none" stroke="%s" stroke-width="2" stroke-opacity="0.75" stroke-linejoin="round"/>`,
+			strings.Join(pts, " "), ser.colour)
+
+		for pi, p := range ser.points {
+			x, y := s.xAxis.x(p.x), s.yAxis.y(p.y)
+			if front[[2]int{si, pi}] {
+				// On the front: filled, ringed, and labelled.
+				fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="7.5" fill="none" stroke="%s" stroke-width="1.5" stroke-opacity="0.9"/>`,
+					x, y, ser.colour)
+				fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="4" fill="%s"/>`, x, y, ser.colour)
+			} else {
+				fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="3.5" fill="%s" fill-opacity="0.45"/>`, x, y, ser.colour)
+			}
+			if p.label != "" && front[[2]int{si, pi}] {
+				dy := -14.0
+				if y < float64(padTop)+18 {
+					dy = 20.0
+				}
+				if fits(x, y+dy) {
+					text(&b, x, y+dy, colText, 10.5, "middle", "500", p.label)
+				}
+			}
+		}
+	}
+
+	// Legend, plus a note on what the ring means.
+	x := float64(padLeft)
+	y := 78.0
+	for _, ser := range s.series {
+		fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="4" fill="%s"/>`, x+6, y-4, ser.colour)
+		text(&b, x+17, y, colText, 12, "start", "500", ser.name)
+		x += 17 + float64(len(ser.name))*7 + 22
+	}
+	fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="6" fill="none" stroke="%s" stroke-width="1.5"/>`, x+6, y-4, colMuted)
+	text(&b, x+17, y, colMuted, 12, "start", "400", "on the Pareto front")
+
+	if s.note != "" {
+		text(&b, 26, height-16, colMuted, 12, "start", "400", s.note)
+	}
+	b.WriteString(`</svg>`)
+	return b.String()
+}
+
 func text(b *strings.Builder, x, y float64, fill string, size float64, anchor, weight, body string) {
 	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" fill="%s" font-family="%s" font-size="%.1f" text-anchor="%s" font-weight="%s">%s</text>`,
 		x, y, fill, fontFamily, size, anchor, weight, esc(body))
@@ -480,6 +639,8 @@ func main() {
 
 	plotDimension(bySweep(all, "dimension"))
 	plotScale(bySweep(all, "scale"))
+	plotPareto(bySweep(all, "grid"))
+	plotEfByScale(bySweep(all, "efscale"))
 	plotEf(bySweep(all, "ef"))
 	plotM(bySweep(all, "M"))
 	plotMetric(bySweep(all, "metric"))
@@ -577,6 +738,129 @@ func plotM(ss []sample) {
 	right := niceAxis("build seconds", buildSecs(ss), true, fmtSecs)
 	c.right = &right
 	write("recall-vs-m.svg", c.render())
+}
+
+// plotPareto is the chart to actually choose a configuration from. Everything
+// else here varies one knob with the other at its default, which shows a slope
+// but cannot answer "which pair". This is the surface.
+func plotPareto(ss []sample) {
+	if len(ss) == 0 {
+		return
+	}
+
+	// Group by M, ordered, with each series running in ef order.
+	byM := map[int][]sample{}
+	var msSeen []int
+	for _, s := range ss {
+		if _, ok := byM[s.M]; !ok {
+			msSeen = append(msSeen, s.M)
+		}
+		byM[s.M] = append(byM[s.M], s)
+	}
+	sort.Ints(msSeen)
+
+	palette := []string{colBlue, colGreen, colYellow, colOrange, colRed, colPurple}
+	var (
+		series           []scatterSeries
+		allX, allY       []float64
+		bestRecall       float64
+		bestLabel        string
+		bestLatencyMicro float64
+	)
+	for i, m := range msSeen {
+		cells := byM[m]
+		sort.Slice(cells, func(a, b int) bool { return cells[a].Ef < cells[b].Ef })
+
+		var pts []point
+		for _, c := range cells {
+			pts = append(pts, point{x: c.searchMicros(), y: c.Recall, label: "ef=" + strconv.Itoa(c.Ef)})
+			allX = append(allX, c.searchMicros())
+			allY = append(allY, c.Recall)
+			if c.Recall > bestRecall {
+				bestRecall, bestLabel, bestLatencyMicro = c.Recall, fmt.Sprintf("M=%d/ef=%d", c.M, c.Ef), c.searchMicros()
+			}
+		}
+		series = append(series, scatterSeries{
+			name:   "M=" + strconv.Itoa(m),
+			colour: palette[i%len(palette)],
+			points: pts,
+		})
+	}
+
+	s := &scatter{
+		title:    "Choosing M and ef: the recall / latency surface",
+		subtitle: "One line per M, one point per ef. Up and to the left is better; ringed points are not beaten on both axes at once.",
+		xLabel:   "µs per query",
+		xAxis:    niceAxis("µs per query", allX, true, fmtMicros),
+		yAxis:    recallAxis("recall@10", allY),
+		series:   series,
+		note: fmt.Sprintf("N=%d · dim=128 · k=10 · best measured: %s at %.0f recall %.3f · M is paid once at build, ef on every query",
+			ss[0].N, bestLabel, bestLatencyMicro, bestRecall),
+	}
+	write("recall-vs-latency-pareto.svg", s.render())
+}
+
+// plotEfByScale is the practical corollary: the same recall target needs a wider
+// search as the corpus grows, which is what makes ef a per-query argument.
+func plotEfByScale(ss []sample) {
+	if len(ss) == 0 {
+		return
+	}
+
+	byN := map[int][]sample{}
+	var nsSeen []int
+	for _, s := range ss {
+		if _, ok := byN[s.N]; !ok {
+			nsSeen = append(nsSeen, s.N)
+		}
+		byN[s.N] = append(byN[s.N], s)
+	}
+	sort.Ints(nsSeen)
+
+	palette := []string{colGreen, colBlue, colOrange}
+	var (
+		series     []series
+		categories []string
+		allRecall  []float64
+	)
+	for i, n := range nsSeen {
+		cells := byN[n]
+		sort.Slice(cells, func(a, b int) bool { return cells[a].Ef < cells[b].Ef })
+
+		if categories == nil {
+			for _, c := range cells {
+				categories = append(categories, strconv.Itoa(c.Ef))
+			}
+		}
+		var vals []float64
+		for _, c := range cells {
+			vals = append(vals, c.Recall)
+			allRecall = append(allRecall, c.Recall)
+		}
+		series = append(series, seriesOf(fmt.Sprintf("N=%s", humanCount(n)), palette[i%len(palette)], vals))
+	}
+
+	c := &chart{
+		title:      "The same recall target needs a wider ef as the corpus grows",
+		subtitle:   "Why ef is an argument to Search rather than a build-time constant — and why one default cannot hold.",
+		xLabel:     "ef (search width at query time)",
+		categories: categories,
+		left:       recallAxis("recall@10", allRecall),
+		series:     series,
+		note:       "dim=128 · M=16 · k=10 · SuggestedEf is fitted to this surface",
+	}
+	write("recall-vs-ef-by-corpus-size.svg", c.render())
+}
+
+func seriesOf(name, colour string, values []float64) series {
+	return series{name: name, colour: colour, values: values}
+}
+
+func humanCount(n int) string {
+	if n >= 1000 && n%1000 == 0 {
+		return strconv.Itoa(n/1000) + "k"
+	}
+	return strconv.Itoa(n)
 }
 
 func plotMetric(ss []sample) {
