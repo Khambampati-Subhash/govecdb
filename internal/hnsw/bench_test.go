@@ -103,6 +103,60 @@ func BenchmarkSearch(b *testing.B) {
 	}
 }
 
+// BenchmarkSearchByDimension is the cost curve that matters for choosing an
+// embedding model: every hop of a traversal computes a distance, so dimension
+// multiplies the whole search, not just the final comparison.
+//
+// The corpus is smaller than benchN so the 1536-dim fixture is affordable to
+// build; the shape across dimensions is the point, not the absolute numbers.
+func BenchmarkSearchByDimension(b *testing.B) {
+	const n = 2000
+	for _, dim := range []int{32, 128, 384, 768, 1536} {
+		b.Run(fmt.Sprintf("dim=%d", dim), func(b *testing.B) {
+			rng := rand.New(rand.NewSource(int64(dim)))
+			g, _ := New(DefaultConfig(dim, Cosine))
+			for i := range n {
+				_ = g.Insert(fmt.Sprintf("v%d", i), randomVector(rng, dim))
+			}
+			qs := make([][]float32, 200)
+			for i := range qs {
+				qs[i] = randomVector(rng, dim)
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				_, _ = g.Search(qs[i%len(qs)], benchK, benchEf)
+			}
+		})
+	}
+}
+
+// BenchmarkSearchByScale exercises the property the whole index exists for: a
+// 40x corpus should not cost 40x the search. Fixtures are built outside the
+// timer, which is why the largest size stays at 20k.
+func BenchmarkSearchByScale(b *testing.B) {
+	for _, n := range []int{1000, 5000, 20000} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			rng := rand.New(rand.NewSource(17))
+			g, _ := New(DefaultConfig(benchDim, Cosine))
+			for i := range n {
+				_ = g.Insert(fmt.Sprintf("v%d", i), randomVector(rng, benchDim))
+			}
+			qs := make([][]float32, 200)
+			for i := range qs {
+				qs[i] = randomVector(rng, benchDim)
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				_, _ = g.Search(qs[i%len(qs)], benchK, benchEf)
+			}
+		})
+	}
+}
+
 // BenchmarkSearchTombstones measures the price of deferred deletion: dead slots
 // stay on the frontier and keep results under-filled, which loosens the pruning
 // bound and widens the search. This is the curve a compaction threshold should
