@@ -487,6 +487,95 @@ func TestSweepM(t *testing.T) {
 	}
 }
 
+// TestSweepGrid measures the M x ef surface rather than two slices through it.
+//
+// TestSweepM and TestSweepEf each vary one knob while the other sits at its
+// default, which is enough to show a slope and not enough to choose a pair:
+// "M=16 gives 0.823" is really "M=16 at a narrow ef gives 0.823". Reading the
+// two charts independently and combining the answers is exactly the mistake this
+// grid exists to prevent.
+//
+// What it produces is a recall-vs-latency Pareto front — one line per M, one
+// point per ef — where the upper-left envelope is the set of configurations that
+// are not beaten on both axes at once.
+func TestSweepGrid(t *testing.T) {
+	skipUnderRace(t)
+
+	ms := []int{8, 16, 32}
+	efs := []int{32, 128}
+	if measuring() {
+		ms = []int{8, 12, 16, 24, 32}
+		efs = []int{16, 32, 64, 128, 256}
+	}
+	n, nq := sweepSize()
+	const (
+		dim = 128
+		k   = 10
+	)
+
+	for _, m := range ms {
+		rng := rand.New(rand.NewSource(1101))
+		c := uniformCorpus(rng, n, dim)
+		cfg := DefaultConfig(dim, Cosine)
+		cfg.M = m
+
+		// One build per M — it is structural — then every ef against it.
+		g, build := buildIndex(t, cfg, c)
+		queries := makeQueries(rng, nq, dim)
+
+		for _, ef := range efs {
+			recall, perQuery := evaluate(t, g, c, Cosine, queries, k, ef)
+			record(t, sample{
+				Sweep: "grid", Label: fmt.Sprintf("M=%d/ef=%d", m, ef),
+				Dim: dim, N: n, M: m, Ef: ef, K: k,
+				Recall: recall, Search: perQuery, Build: build,
+			})
+		}
+	}
+}
+
+// TestSweepEfByScale is the surface SuggestedEf is fitted to: how wide the
+// search has to be to hold a recall target as the corpus grows.
+//
+// TestSweepScale shows recall collapsing at a FIXED ef; this is the same effect
+// viewed usefully, as "what ef would have held it".
+func TestSweepEfByScale(t *testing.T) {
+	skipUnderRace(t)
+
+	sizes := []int{1000, 5000}
+	efs := []int{32, 128}
+	if measuring() {
+		sizes = []int{1000, 5000, 20000}
+		efs = []int{16, 32, 64, 128, 256, 512}
+	}
+	const (
+		dim = 128
+		k   = 10
+	)
+	nq := 50
+	if measuring() {
+		nq = 200
+	}
+
+	for _, n := range sizes {
+		rng := rand.New(rand.NewSource(1201))
+		c := uniformCorpus(rng, n, dim)
+		cfg := DefaultConfig(dim, Cosine)
+
+		g, build := buildIndex(t, cfg, c)
+		queries := makeQueries(rng, nq, dim)
+
+		for _, ef := range efs {
+			recall, perQuery := evaluate(t, g, c, Cosine, queries, k, ef)
+			record(t, sample{
+				Sweep: "efscale", Label: fmt.Sprintf("n=%d/ef=%d", n, ef),
+				Dim: dim, N: n, M: cfg.M, Ef: ef, K: k,
+				Recall: recall, Search: perQuery, Build: build,
+			})
+		}
+	}
+}
+
 // TestSweepMetric closes a real gap: every recall test in this package used
 // Cosine, so Euclidean and DotProduct had no accuracy coverage at all — only
 // the kernels were checked, never the graph built on top of them.
