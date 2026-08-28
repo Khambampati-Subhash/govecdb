@@ -21,7 +21,7 @@ was built that way, and what it measured. Tasks are only marked done when
 
 | # | Task | Status |
 |---|------|--------|
-| 5 | Versioned record format + append-only writer with segment rotation | ⬜ |
+| 5 | Versioned record format + append-only writer with segment rotation | ✅ |
 | 6 | Reader that validates every CRC and truncates the torn tail | ⬜ |
 | 7 | Write-failure policy decided once, at the WAL boundary | ⬜ |
 | 8 | Checkpoint serializer: temp file → fsync → atomic rename | ⬜ |
@@ -781,9 +781,115 @@ at a median.
 
 ---
 
-## Next: Task 5 — the WAL record format and writer
+## Task 5 — WAL record format and writer ✅
 
-Design constraints are already decided in `docs/MIGRATION.md`: versioned records
-from the first commit, CRC per record, truncate the torn tail rather than failing
-recovery, segment rotation built in from the start (not bolted on), and fsync as
-a policy knob.
+*Plan.md B.5: define the versioned record — `magic|version` file header, then
+`crc32 | type | seq | len | payload` per entry — and write the append-only writer
+with segment rotation built in from the first commit.*
+
+### The format
+
+```
+segment file:  magic "GVWL" (4) | version (2) | reserved (2)
+record:        crc32c (4) | type (1) | seq (8) | length (4) | payload
+```
+
+Three decisions in that layout carry weight:
+
+**The checksum covers everything after it** — type, sequence and *length*, not
+just the payload. A flipped bit in a payload gives a wrong answer; a flipped bit
+in a length gives a read of arbitrary size at an arbitrary offset. That is the
+failure that actually hurts, and it is why nothing may be allocated on the
+strength of a length until its checksum has passed. Castagnoli rather than the
+IEEE default, for the hardware support: 11.9 GB/s measured.
+
+**Type 0 is invalid.** Unwritten space, a filesystem hole and a zero-filled block
+all read as zeros, and none of them is a record.
+
+**The payload is opaque to the package.** The log moves bytes durably and knows
+nothing about vectors, which keeps it testable without the index and reusable for
+anything else that needs logging. Domain encoding belongs a layer up.
+
+### Two ordering decisions that are not obvious
+
+**`Open` always starts a new segment**, even when segments already exist. A
+segment whose tail was cut off by power loss ends in a partial record, and
+recovery stops at the first record failing its checksum — so appending after that
+point would put perfectly good writes *behind* a permanent stopping point, where
+replay can never reach them. Silent data loss produced by the recovery mechanism
+itself. A fresh segment per restart costs one mostly-empty file and makes it
+impossible.
+
+**Rotation fsyncs the old segment before creating the new one**, regardless of
+sync policy. Otherwise a crash could leave the new segment on disk while the tail
+of the old one was still in the page cache — a hole in the *middle* of the log
+rather than at its end, and the one shape recovery cannot repair. It costs on
+rotation only, which at the 64 MiB default is rare.
+
+### Failure is sticky
+
+The first write error ends the Writer; every later call returns it. If append N
+never reached the disk, appending N+1 on top produces a log with a hole, and
+replay stops at the hole and silently discards everything after — which is how a
+durability bug becomes a data-loss bug. What the *database* does about it
+(read-only, fail closed) is task 7 and belongs a layer up; this is the half that
+has to live in the log.
+
+### Measured — the knob has a price
+
+| Policy | Per append | Throughput | What an acknowledged write means |
+|---|---|---|---|
+| `SyncAlways` | **4.06 ms** | 295/s | It survived power loss. |
+| `SyncInterval` | 1.01 µs | ~1M/s | It survived the process dying. |
+| `SyncNever` | 0.81 µs | ~1.2M/s | It reached the OS. |
+
+**Durability costs ~4,000×.** That gap is the entire argument for the knob
+existing — and for its zero value being `SyncAlways`, so a caller who configures
+nothing gets the safe answer rather than the fast one. Append is **0 allocs**:
+the header is reused across calls and the payload is written straight through.
+
+Segment rotation costs 5.3 ms (fsync + close + create), which is why
+`MaxSegmentBytes` defaults to 64 MiB rather than something that makes it frequent.
+
+### Tests added — 22, all green under `-race`
+
+- **`TestChecksumCoversEveryField`** — the load-bearing one. Corrupts the
+  payload, the type, the sequence, the length and the checksum field itself, and
+  requires each to be caught. A checksum over the payload alone would leave the
+  fields that decide *how* the payload is read unprotected.
+- **`TestSyncAlwaysIsDurableOnReturn`** — reads the file through a second handle
+  while the writer is still open, so the durability claim is checked rather than
+  assumed.
+- **`TestSyncIntervalFlushesWithoutAnAppend`** — the timer exists because the
+  write that most needs flushing is the last one before traffic stops.
+- **`TestReopenStartsANewSegment`**, **`TestSegmentRotation`**,
+  **`TestOversizedRecordGetsItsOwnSegment`** — the segment decisions above.
+- **`TestLayoutIsFrozen`** — pins 8 and 17 bytes and version 1, so resizing a
+  field fails loudly here rather than quietly making every existing log
+  unreadable.
+- **`TestAppendRejects`** — including that a rejected append burns no sequence
+  number and writes no bytes, since a gap is what replay would stop at.
+- **`TestConcurrentAppends`** — 8 goroutines, sequences must come out unique and
+  contiguous. Ordering is the log's invariant to hold.
+
+### What is deliberately missing
+
+The reader. No CRC-validating scan, no torn-tail truncation — that is task 6, and
+it is why the `WAL` interface has no `Replay` method yet. An interface method
+with no implementation is a promise, not a design.
+
+Recovery may not belong on the live log at all: replaying happens *before* a
+writer exists, to rebuild state, which reads more naturally as a package-level
+function over a directory than as a method on the thing currently appending. That
+gets settled with an implementation in hand rather than guessed at now.
+
+The tests scan segments with a deliberately dumb reader living in the test file —
+a writer nobody can read back is a writer nobody has verified.
+
+---
+
+## Next: Task 6 — the reader, and torn-tail truncation
+
+Validate every CRC, stop at the first bad record, and truncate the torn tail
+rather than failing recovery — because a partial final record is the *normal*
+outcome of power loss, not an exceptional one.

@@ -258,7 +258,7 @@ data being at fault. Clustered data, which is what real embeddings look like, is
 3. ~~**Delete**~~ — done; tombstones that keep routing, filtered out of results
 4. ~~**Upsert**~~ — done; `Insert` replaces an existing id, tombstoning the old slot
 5. ~~**Compaction**~~ — done; `Compact()` rebuilds over the live vectors and swaps in
-6. **WAL** — write-ahead log; write to WAL first, then apply to the in-memory graph
+6. **WAL** — ~~record format + append-only writer with segment rotation~~ done; reader next
 7. **Snapshots + recovery** — replay the WAL to rebuild the graph (the graph is derived state)
 8. **Public API** — `vector.go` / `db.go` / `options.go` facade over the internals
 9. **Metadata filtering**

@@ -58,7 +58,7 @@ govecdb/
 ├── errors.go            # exported sentinel errors
 ├── internal/
 │   ├── hnsw/            # index engine — concurrent reads       ✅ done
-│   ├── wal/             # write-ahead log
+│   ├── wal/             # write-ahead log — writer ✅, reader next
 │   ├── snapshot/        # snapshots + recovery
 │   ├── store/           # in-memory vector store
 │   ├── filter/          # metadata query engine
@@ -78,8 +78,8 @@ govecdb/
 5. ~~**Compaction**~~ — `Compact()` rebuilds over the live vectors and swaps the
    graph in whole; `Stats().DeadRatio()` is the signal, the policy stays outside
    the index. **Done.** Online (non-blocking) compaction is deferred — see below.
-6. **`internal/wal`** — append-only log behind a `WAL` interface, with segment
-   rotation. **Next.**
+6. **`internal/wal`** — record format + append-only writer with segment rotation.
+   **Writer done**; the reader (CRC scan, torn-tail truncation) is **next**.
 7. **`internal/snapshot`** — point-in-time graph snapshot + recovery that replays the WAL.
 8. **`internal/store`** — vector + metadata storage behind a `Store` interface.
 9. **`internal/filter`** — metadata query engine, with tests from day one.

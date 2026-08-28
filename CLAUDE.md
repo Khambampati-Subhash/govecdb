@@ -6,8 +6,8 @@ Guidance for Claude Code (and humans) working in this repository.
 
 **GoVecDB** — a high-performance, embeddable **vector database in pure Go** (no
 CGO). It stores embeddings and answers "what is most similar to this?" using an
-**HNSW** approximate-nearest-neighbor index. WAL persistence is the next phase,
-not yet built.
+**HNSW** approximate-nearest-neighbor index, with a write-ahead log for
+durability (writer built; reader/recovery next).
 
 Module path: `github.com/khambampati-subhash/govecdb` · Go 1.24+ (built with 1.25).
 **Zero third-party dependencies** — `go.mod` has no `require` block and there is no
@@ -15,7 +15,7 @@ Module path: `github.com/khambampati-subhash/govecdb` · Go 1.24+ (built with 1.
 
 ## Current effort: v1 rebuild (active)
 
-Branch **`v1-restructure`**. Strategy: **rebuild from scratch, one subsystem at a
+Work lands on **`main`**. Strategy: **rebuild from scratch, one subsystem at a
 time**, using the old implementation as a reference in git history rather than as a
 source to copy. Read `docs/MIGRATION.md` before making structural changes — it has
 the current state, the ordered steps, and the WAL design constraints.
@@ -23,12 +23,16 @@ the current state, the ordered steps, and the WAL design constraints.
 Scope for v1: **embeddable library only** (no cluster / REST server / gRPC — those
 stay in `main` history and return in v2).
 
-### The codebase is `internal/hnsw/` — that's all of it
-The from-scratch HNSW index (see its `README.md`) is currently the entire tree, and
-it is the reference for style: small single-responsibility files, comments that
-explain *why*, tested against brute-force recall.
+### The codebase is `internal/hnsw/` and `internal/wal/`
+Both have their own `README.md`, and `internal/hnsw/` is the reference for style:
+small single-responsibility files, comments that explain *why*, measured rather
+than assumed.
 
-**Next phase: `internal/wal/`.** Design constraints are in `docs/MIGRATION.md`.
+- `internal/hnsw/` — the index. Complete: concurrent reads, tombstone delete,
+  upsert, compaction, and a measurement harness behind `-results`.
+- `internal/wal/` — durability. The record format and append-only writer exist;
+  **the reader (CRC scan, torn-tail truncation) is the next phase.** Design
+  constraints are in `docs/MIGRATION.md`.
 
 ### The legacy code is gone
 Every previous package (`index/`, `store/`, `persist/`, `api/`, `collection/`,
@@ -144,9 +148,34 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   the index never self-triggers, callers poll `Stats().DeadRatio()`. Threshold
   ~0.5, not 0.25: the pause tracks *survivors*, so compacting early costs more
   and reclaims less.
-- Durability model *(phase 2, not yet built)*: **write to WAL first, then apply to
-  the in-memory graph**; on recovery, replay the WAL to rebuild the graph — the
-  graph is derived state, never the source of truth.
+- Durability model: **write to WAL first, then apply to the in-memory graph**; on
+  recovery, replay the WAL to rebuild the graph — the graph is derived state,
+  never the source of truth.
+
+## WAL quick reference (`internal/wal`) — writer done, reader next
+
+- Format: `magic "GVWL" | version | reserved` (8B file header), then
+  `crc32c | type | seq | len | payload` (17B record header). Little-endian.
+  `TestLayoutIsFrozen` pins those sizes — changing one is a migration, not an edit.
+- **The checksum covers type, seq AND length**, not just the payload. A corrupt
+  length is the dangerous one: it turns a bad read into an arbitrary allocation.
+  Never allocate on a length that has not passed its checksum.
+- **Type 0 is invalid on purpose** — zero-filled space must never decode as a record.
+- The payload is **opaque** to this package; it knows nothing about vectors, which
+  keeps it testable without the index. Domain encoding belongs a layer up.
+- **`Open` always starts a new segment**, even when segments exist. A torn tail
+  from power loss stops replay, so appending after it would bury good records
+  behind a permanent stopping point. Do not "optimize" this into reopening the
+  last segment.
+- Rotation **fsyncs the old segment before creating the new one** regardless of
+  sync policy — otherwise a crash leaves a hole in the *middle* of the log, which
+  is the one shape recovery cannot repair.
+- `MaxSegmentBytes` is a **truncation granularity, not a size cap**: an oversized
+  record gets its own segment rather than being refused.
+- **Failure is sticky.** The first write error ends the Writer; every later call
+  returns it. Appending over a hole is how a durability bug becomes data loss.
+- Sync policy zero value is **`SyncAlways`** — safe by omission. It costs
+  **4.06 ms/append vs 1.01 µs** for interval: ~4,000×. Append is 0 allocs.
 
 ## Locked baselines — do not regress
 
