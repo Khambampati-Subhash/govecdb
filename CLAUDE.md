@@ -87,7 +87,9 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   `internal/hnsw/`.
 
 ### Git
-- Work on the `v1-restructure` branch; do not commit to `main` directly.
+- **Commit and push to `main` directly.** No feature branch, no PR — the repo
+  owner asked for this explicitly (2026-08-28), superseding the earlier
+  `v1-restructure` rule. That branch still exists and is level with `main`.
 - **Commit messages must NOT include a `Co-Authored-By` trailer** (repo owner
   preference).
 - Commit/push only when asked.
