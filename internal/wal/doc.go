@@ -44,12 +44,27 @@
 // the zero value is SyncAlways — a caller who says nothing gets the safe answer,
 // not the fast one.
 //
+// # Recovery
+//
+// Replay walks a directory and hands back every record in order. It is a
+// function rather than a method on WAL because recovery runs before a writer
+// exists — rebuilding state is done to a directory, not to the thing currently
+// appending to it.
+//
+// A segment that ends in a damaged record is truncated at that point and replay
+// continues with the next segment; each stop is reported as a Tear. Tolerating
+// damage anywhere and not only in the last segment is required rather than
+// lenient, because Open starting a fresh segment is exactly what puts a torn
+// tail in the middle of a directory. See replaySegment for why that is safe.
+//
 // The package is split one responsibility per file:
 //
 //	record.go   The wire format: encode, decode, and the checksum.
 //	segment.go  Segment file naming and discovery.
 //	options.go  Options, the sync policy, and their defaults.
 //	writer.go   The append-only writer, rotation, and the sync policies.
+//	reader.go   The validating scan of a single segment.
+//	replay.go   Recovery across a directory, and what it reports.
 //	wal.go      The WAL interface callers depend on, plus a no-op implementation.
 //	errors.go   Sentinel errors callers match on.
 package wal

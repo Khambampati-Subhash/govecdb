@@ -58,7 +58,7 @@ govecdb/
 ├── errors.go            # exported sentinel errors
 ├── internal/
 │   ├── hnsw/            # index engine — concurrent reads       ✅ done
-│   ├── wal/             # write-ahead log — writer ✅, reader next
+│   ├── wal/             # write-ahead log — writer + replay     ✅ done
 │   ├── snapshot/        # snapshots + recovery
 │   ├── store/           # in-memory vector store
 │   ├── filter/          # metadata query engine
@@ -78,9 +78,12 @@ govecdb/
 5. ~~**Compaction**~~ — `Compact()` rebuilds over the live vectors and swaps the
    graph in whole; `Stats().DeadRatio()` is the signal, the policy stays outside
    the index. **Done.** Online (non-blocking) compaction is deferred — see below.
-6. **`internal/wal`** — record format + append-only writer with segment rotation.
-   **Writer done**; the reader (CRC scan, torn-tail truncation) is **next**.
-7. **`internal/snapshot`** — point-in-time graph snapshot + recovery that replays the WAL.
+6. ~~**`internal/wal`**~~ — record format, append-only writer with segment
+   rotation, and `Replay`: a CRC-validating scan that truncates a torn tail and
+   carries the sequence forward. **Done.** Checkpointing and segment truncation
+   wait for step 7, which is what makes a checkpoint mean anything.
+7. **`internal/snapshot`** — point-in-time graph snapshot + recovery that replays
+   the WAL. **Next.**
 8. **`internal/store`** — vector + metadata storage behind a `Store` interface.
 9. **`internal/filter`** — metadata query engine, with tests from day one.
 10. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users import.
@@ -96,24 +99,44 @@ govecdb/
 - **Fine-grained write locking**, for the same reason: the WAL's ordering
   constraint decides what a finer lock is allowed to do.
 
-## Phase — WAL
+## Phase — WAL (done)
 
-Design constraints, decided:
+Design constraints, all decided and now implemented:
 
 - **Write to the WAL first, then apply to the in-memory graph.** On recovery,
   replay the log to rebuild the graph. The graph is *derived state* — it is never
   the source of truth.
-- **The WAL is an interface** (`Append`, `Replay`, `Sync`, `Close`) so the index can
-  be constructed with a no-op WAL in tests and benchmarks.
+- **The WAL is an interface** (`Append`, `Sync`, `Close`) so the index can be
+  constructed with a no-op WAL in tests and benchmarks. `Replay` is deliberately
+  **not** on it: recovery runs before a writer exists, so it is a package-level
+  function over a directory. Putting it on the interface would have meant opening
+  a writer in order to read — creating a segment as a side effect of recovery.
 - **Records are versioned** from the first commit. A log format without a version
   byte cannot be migrated later.
-- **Checksums per record.** A torn write at the tail must be detectable, and
-  recovery must truncate to the last intact record rather than failing outright.
+- **Checksums per record**, covering type, seq and length as well as the payload.
+  Recovery truncates to the last intact record rather than failing outright.
 - **`fsync` policy is a knob**, not a hardcode: always / interval / never trade
-  durability against throughput.
+  durability against throughput. Measured at ~4,000× between the extremes.
+
+Settled while building the reader, and worth carrying into the next phase:
+
+- **A tear is tolerated at the end of *any* segment, not only the last.** `Open`
+  always starts a new segment, so a second crash leaves a torn tail in the middle
+  of the directory — refusing to read past it would make recovery impossible from
+  the shape the writer is designed to produce.
+- **Truncation is logical.** Recovery is a read; the damaged bytes stay on disk.
+- **Nothing is read on an unverified length.** The file size is taken up front
+  and a length is refused against both it and `MaxRecordBytes` before any read.
+
+Still open, and now blocked on snapshots rather than on the log: writing
+`TypeCheckpoint` records and deleting segments below one. A checkpoint has no
+meaning until there is a snapshot for it to point at.
 
 Same bar as the index: small single-responsibility files, comments that explain
-*why*, and tests that verify crash recovery rather than assuming it.
+*why*, and tests that verify crash recovery rather than assuming it. The tear
+tests damage a log by truncating and rewriting it, which reproduces the shapes
+power loss leaves behind; the harness that `SIGKILL`s a child mid-write to
+reproduce the *timing* is still outstanding.
 
 ## SOLID / patterns
 

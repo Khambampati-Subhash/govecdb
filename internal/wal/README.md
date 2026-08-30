@@ -20,6 +20,8 @@ the source of truth.
 | `segment.go` | Segment file naming and discovery. |
 | `options.go` | `Options`, `SyncPolicy`, and their defaults. |
 | `writer.go` | The append-only writer, rotation, and the sync policies. |
+| `reader.go` | The validating scan of a single segment. |
+| `replay.go` | Recovery across a directory, and what it reports. |
 | `wal.go` | The `WAL` interface callers depend on, plus `Nop`. |
 | `errors.go` | Sentinel errors callers match on. |
 
@@ -125,6 +127,85 @@ What the *database* does about that — refuse writes, go read-only, fail closed
 is the wider policy decision and belongs a layer up. This is the half that has to
 live here.
 
+## Recovery
+
+```go
+res, err := wal.Replay(dir, opts, func(r wal.Record) error {
+    return apply(r) // rebuild the graph from the log
+})
+if err != nil {
+    return err
+}
+w, err := wal.Open(dir, wal.Options{FirstSeq: res.NextSeq()})
+```
+
+`Replay` is a **function, not a method on `WAL`** — recovery runs *before* a
+writer exists. Making it a method would have meant either opening a writer in
+order to read (creating a segment as a side effect of recovery) or a second
+constructor handing back a `WAL` that cannot write. Rebuilding state is done to a
+directory, so it takes a path.
+
+### Nothing is read on the strength of an unverified length
+
+A record announces its own payload length, and that length arrives **before** the
+checksum that would prove it. So the file size is taken up front and every length
+is refused unless it fits both what remains of the file *and* `MaxRecordBytes` —
+before a byte of payload is read and before a byte of memory is reserved for it.
+
+That guard is the difference between a flipped bit and a 3 GB allocation, and it
+is why the writer has to enforce the same cap: a record it could write but the
+reader would refuse is a record that can never be read back.
+
+### A tear ends a segment, not the replay
+
+A record that fails to validate — torn, corrupt, oversized, or an unknown type —
+stops that segment's scan. Everything from there to the end of the file is
+dropped, the stop is reported as a `Tear`, and **replay continues with the next
+segment**.
+
+Continuing is required rather than lenient. `Open` always starts a *new* segment,
+so the shape a second crash leaves behind is: segment K torn by the first crash,
+segment K+1 full of good records written after the restart. A reader that only
+forgave damage in the *last* segment would make a database unrecoverable from
+precisely the situation the writer is designed to produce.
+
+It is safe for the same reason it is necessary. A tear can only ever be at the
+end of a segment's written region: the writer's failure is sticky, so it never
+writes past a point it failed at, and rotation fsyncs the old segment before the
+new one exists. Records cannot hide behind a tear, because the writer never put
+any there.
+
+### Truncation is logical, not physical
+
+Recovery is a read. The damaged bytes stay on disk — nothing will ever append to
+them, so rewriting the file would buy nothing and cost the one copy of the
+evidence that a crash happened.
+
+### Sequence numbers must strictly increase
+
+A **gap** is fine and expected; it is what a tear leaves behind. A **repeat** is
+`ErrOutOfOrder`, because two records claiming one identity make the order the log
+specifies unrecoverable. Almost always the cause is a `Writer` opened without
+carrying `FirstSeq` forward from `res.NextSeq()`.
+
+### The payload is only valid during the callback
+
+`fn` receives bytes pointing into a buffer the reader reuses — that is what keeps
+replay at **zero allocations per record**. A callback that keeps a record past
+its return must `Clone()` it first. Same contract as `bufio.Scanner.Bytes`, and
+the same footgun, so it is stated here rather than left to be discovered.
+
+### What is fatal, and what is not
+
+| Condition | Outcome |
+|---|---|
+| Torn / corrupt / oversized record | Tear — segment truncated there, replay continues |
+| Segment file too short to hold a header | Tear at offset 0 (a crash between `create` and the header write) |
+| Zero-filled space | Tear: the checksum rejects it before the type does |
+| Callback returns an error | Fatal — the state built is a prefix, not the log |
+| Sequence rewind | Fatal (`ErrOutOfOrder`) |
+| Bad magic / unknown format version | Fatal — guessing at an unknown layout is worse than failing |
+
 ## Measured
 
 Apple M4 Max, ~2 KB payloads:
@@ -137,6 +218,7 @@ Apple M4 Max, ~2 KB payloads:
 | Append, small (12 B) | 18.9 | 0 |
 | Checksum, 16 KB | 1,373 (11.9 GB/s) | 0 |
 | Segment rotation | 5,344,281 | 7 |
+| **Replay, per record** | **358** (5.8 GB/s) | **0** |
 
 The append path allocates nothing: the record header is reused across calls and
 the payload is written straight through without a copy.
@@ -144,20 +226,22 @@ the payload is written straight through without a copy.
 Rotation costs an fsync, a close and a create — which is why `MaxSegmentBytes`
 defaults to 64 MiB rather than something that would make it frequent.
 
+Replay allocates nothing per record either; the ~16 allocations it does make are
+**per segment** — a 64 KiB read buffer and the file handle. Recovering a
+1 GB log is therefore a few seconds of streaming, not a few seconds of GC. At
+358 ns/record, replaying a million records costs about 0.36 s.
+
 ## Not implemented yet (deliberately)
 
-Reading. There is no reader, no CRC-validating scan, and no torn-tail
-truncation — that is the next slice, and it is why `WAL` has no `Replay` method
-yet: an interface method with no implementation is a promise, not a design.
+Checkpointing and segment truncation. `TypeCheckpoint` is reserved in the format
+so the numbering is not rearranged later, but nothing writes it yet and nothing
+deletes segments below one — that arrives with `internal/snapshot`, which is what
+makes a checkpoint mean anything.
 
-Recovery may not even belong on the live log. Replaying is something done
-*before* a writer exists, to rebuild state, which reads more naturally as a
-package-level function over a directory than as a method on the thing currently
-appending. That gets settled with an implementation in hand.
-
-Also pending: checkpointing, segment truncation, and the crash harness that
-`SIGKILL`s a child mid-write and asserts the surviving prefix is exactly
-consistent. See `docs/MIGRATION.md`.
+Also pending: the crash harness that `SIGKILL`s a child mid-write and asserts the
+surviving prefix is exactly consistent. The tear tests here damage a log by
+truncating and rewriting it, which reproduces the *shapes* power loss leaves
+behind but not the timing that produces them. See `docs/MIGRATION.md`.
 
 ```bash
 go test ./internal/wal/ -v

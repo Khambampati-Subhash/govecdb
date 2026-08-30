@@ -30,8 +30,10 @@ than assumed.
 
 - `internal/hnsw/` — the index. Complete: concurrent reads, tombstone delete,
   upsert, compaction, and a measurement harness behind `-results`.
-- `internal/wal/` — durability. The record format and append-only writer exist;
-  **the reader (CRC scan, torn-tail truncation) is the next phase.** Design
+- `internal/wal/` — durability. Complete: record format, append-only writer with
+  segment rotation and sync policies, and `Replay` — a CRC-validating scan that
+  truncates torn tails and carries the sequence forward. **`internal/snapshot`
+  is the next phase**; checkpointing and segment truncation land with it. Design
   constraints are in `docs/MIGRATION.md`.
 
 ### The legacy code is gone
@@ -152,7 +154,7 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   recovery, replay the WAL to rebuild the graph — the graph is derived state,
   never the source of truth.
 
-## WAL quick reference (`internal/wal`) — writer done, reader next
+## WAL quick reference (`internal/wal`) — writer + replay done
 
 - Format: `magic "GVWL" | version | reserved` (8B file header), then
   `crc32c | type | seq | len | payload` (17B record header). Little-endian.
@@ -176,6 +178,29 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   returns it. Appending over a hole is how a durability bug becomes data loss.
 - Sync policy zero value is **`SyncAlways`** — safe by omission. It costs
   **4.06 ms/append vs 1.01 µs** for interval: ~4,000×. Append is 0 allocs.
+- **Recovery is `Replay(dir, opts, fn)`, a function — not a method on `WAL`.**
+  It runs before a writer exists; a method would mean opening a writer in order
+  to read, which creates a segment as a side effect of recovery. Feed
+  `res.NextSeq()` into `Options.FirstSeq` when reopening.
+- **A tear ends a segment, not the replay.** A damaged record truncates that
+  segment and the scan continues with the next one. This is required, not
+  lenient: `Open` always starts a new segment, so a second crash puts a torn tail
+  in the *middle* of the directory. Do not "harden" this into tolerating damage
+  only in the last segment — that makes a twice-crashed database unrecoverable.
+  It is safe because failure is sticky and rotation fsyncs before the next
+  segment exists, so the writer never put records behind a tear.
+- **Truncation is logical.** The damaged bytes stay on disk; nothing will append
+  to them. Recovery is a read, and rewriting the file would destroy the only
+  evidence a crash happened.
+- **Never read on an unverified length** — the length arrives before the checksum
+  that would prove it. The reader takes the file size up front and refuses a
+  length against both it and `MaxRecordBytes` before allocating or reading.
+- Sequence numbers must **strictly increase**. Gaps are fine (that is what a tear
+  leaves); a repeat is `ErrOutOfOrder`, and almost always means a `Writer` was
+  opened without carrying `FirstSeq` forward.
+- **Replayed payloads alias a reused buffer** — valid only during the callback,
+  `Record.Clone()` to keep one. That contract is what makes replay 0 allocs/record
+  (358 ns/record, 5.8 GB/s); the ~16 allocs are per *segment*, not per record.
 
 ## Locked baselines — do not regress
 
