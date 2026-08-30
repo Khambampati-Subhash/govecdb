@@ -385,6 +385,14 @@ func TestCodecRejects(t *testing.T) {
 			want:  ErrCorruptGraph,
 		},
 		{
+			// A stored config is the effective one, so M=1 is not "unset" here —
+			// it is a value that would take ml to +Inf on a graph that had been
+			// loaded rather than constructed, bypassing New's check entirely.
+			name:  "M of one",
+			build: func(r *rawGraph) { r.cfg.M = 1 },
+			want:  ErrCorruptGraph,
+		},
+		{
 			name:  "zero EfConstruction",
 			build: func(r *rawGraph) { r.cfg.EfConstruction = 0 },
 			want:  ErrCorruptGraph,

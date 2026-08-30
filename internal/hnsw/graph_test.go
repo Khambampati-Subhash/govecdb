@@ -1,6 +1,7 @@
 package hnsw
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -60,6 +61,74 @@ func TestValidation(t *testing.T) {
 	}
 	if err := g.Insert("a", []float32{1, 2, 3}); err != ErrDimensionMismatch {
 		t.Fatalf("want ErrDimensionMismatch, got %v", err)
+	}
+}
+
+// TestNewRejectsInvalidConfig covers the configs that cannot produce a graph.
+//
+// M=1 is the one worth a test rather than a comment. It used to be accepted:
+// ml is 1/ln(M) and ln(1) is zero, so ml came out +Inf, randomLevel returned
+// MaxInt64, and make([][]int, level+1) panicked on the *first* Insert — a crash
+// with nothing in the message connecting it to the line that chose M.
+func TestNewRejectsInvalidConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"zero dimension", Config{Dimension: 0, M: 16}},
+		{"negative dimension", Config{Dimension: -1, M: 16}},
+		{"M of one", Config{Dimension: 4, M: 1}},
+		{"negative M", Config{Dimension: 4, M: -8}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, err := New(tc.cfg)
+			if err == nil {
+				t.Fatalf("New accepted %+v", tc.cfg)
+			}
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("New = %v, want ErrInvalidConfig", err)
+			}
+			if g != nil {
+				t.Fatal("New returned a graph alongside an error")
+			}
+		})
+	}
+
+	// Zero still means "use the default" — that is the documented way to leave a
+	// knob alone, and tightening the check must not take it away.
+	g, err := New(Config{Dimension: 4})
+	if err != nil {
+		t.Fatalf("New rejected an unset M: %v", err)
+	}
+	if g.cfg.M != 16 {
+		t.Fatalf("default M = %d, want 16", g.cfg.M)
+	}
+}
+
+// TestSmallestUsableMWorks is the other half: the fix must refuse M=1 without
+// refusing the smallest M that is actually defined. A 2-neighbor graph is a bad
+// index, not an invalid one, and it has to build and search without panicking.
+func TestSmallestUsableMWorks(t *testing.T) {
+	g, err := New(Config{Dimension: 8, Metric: Euclidean, M: 2, EfConstruction: 32, Alpha: 1, Seed: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rng := rand.New(rand.NewSource(3))
+	for i := range 200 {
+		if err := g.Insert(fmt.Sprintf("v%d", i), randomVector(rng, 8)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if g.Len() != 200 {
+		t.Fatalf("Len = %d, want 200", g.Len())
+	}
+	res, err := g.Search(randomVector(rng, 8), 5, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 5 {
+		t.Fatalf("got %d results, want 5", len(res))
 	}
 }
 
