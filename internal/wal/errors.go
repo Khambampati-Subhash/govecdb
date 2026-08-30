@@ -34,4 +34,11 @@ var (
 
 	// ErrChecksum means a record's contents do not match its checksum.
 	ErrChecksum = errors.New("wal: checksum mismatch")
+
+	// ErrOutOfOrder means replay met a sequence number that did not advance.
+	// Gaps are fine — a torn tail leaves one — but a repeat means two records
+	// claim the same identity, and no ordering can be recovered from that. The
+	// usual cause is a Writer opened without carrying FirstSeq forward from
+	// recovery, so the numbering restarted on top of a log that already had one.
+	ErrOutOfOrder = errors.New("wal: sequence numbers out of order")
 )

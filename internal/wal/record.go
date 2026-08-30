@@ -54,6 +54,17 @@ type Record struct {
 	Payload []byte
 }
 
+// Clone returns a copy that owns its payload.
+//
+// Replay hands out payloads that point into a buffer it reuses, so they are only
+// valid until the next record is read. A callback that keeps a record past its
+// return needs this; one that decodes and discards does not, and should not pay
+// for a copy it will not use.
+func (r Record) Clone() Record {
+	r.Payload = append([]byte(nil), r.Payload...)
+	return r
+}
+
 // The wire layout. Sizes are spelled out as constants rather than derived with
 // unsafe.Sizeof, because this is an on-disk format: it must not change because a
 // Go type did.

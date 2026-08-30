@@ -4,13 +4,15 @@ package wal
 // built against a log rather than against files. Injecting Nop is what lets the
 // benchmarks measure the graph without measuring a disk.
 //
-// Replay is deliberately absent. The design note lists it as part of this
-// interface, and it is not here yet for a reason worth recording: an interface
-// method with no implementation is a promise, not a design. Recovery also may
-// not belong on the live log at all — replaying is something done *before* a
-// writer exists, to rebuild state, which reads more naturally as a package-level
-// function over a directory than as a method on the thing currently appending.
-// That gets settled when the reader lands, with an implementation in hand.
+// Replay is deliberately absent, and now settled: it is the package-level
+// function in replay.go, not a method here.
+//
+// The design note listed it as part of this interface. Writing the reader showed
+// why it does not belong: recovery runs *before* a writer exists. Putting it on
+// WAL would mean either opening a writer in order to read — which creates a
+// segment as a side effect of recovery — or a second constructor handing back a
+// WAL that cannot write. Rebuilding state is done to a directory, so it takes a
+// path.
 type WAL interface {
 	// Append writes one record and returns the sequence number assigned to it.
 	Append(typ RecordType, payload []byte) (uint64, error)
