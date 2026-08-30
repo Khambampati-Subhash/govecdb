@@ -271,7 +271,10 @@ func validateHeader(cfg Config, entry, maxLevel int, nodeCount uint64) error {
 		return fmt.Errorf("%w: dimension %d", ErrCorruptGraph, cfg.Dimension)
 	case cfg.Metric != Cosine && cfg.Metric != Euclidean && cfg.Metric != DotProduct:
 		return fmt.Errorf("%w: unknown metric %d", ErrCorruptGraph, cfg.Metric)
-	case cfg.M <= 0:
+	// At least 2, not merely positive: a stored config is the *effective* one,
+	// so the default has already been applied and M=1 would take ml to +Inf on
+	// a graph that had been loaded rather than constructed.
+	case cfg.M < 2:
 		return fmt.Errorf("%w: M %d", ErrCorruptGraph, cfg.M)
 	case cfg.EfConstruction <= 0:
 		return fmt.Errorf("%w: EfConstruction %d", ErrCorruptGraph, cfg.EfConstruction)

@@ -8,6 +8,9 @@ var (
 	ErrDimensionMismatch = errors.New("hnsw: vector dimension mismatch")
 	// ErrEmptyVector is returned for a nil/zero-length vector.
 	ErrEmptyVector = errors.New("hnsw: empty vector")
+	// ErrInvalidConfig is returned by New for a Config it cannot build a graph
+	// from. The wrapped message names the field and the value.
+	ErrInvalidConfig = errors.New("hnsw: invalid config")
 )
 
 // Config controls how the graph is built. The zero value is not valid; use
@@ -20,6 +23,10 @@ type Config struct {
 	// M is the target number of neighbors per node on layers > 0. Higher M =
 	// better recall, more memory, slower inserts. It is structural: it cannot
 	// be changed after construction without rebuilding.
+	//
+	// Must be 0, meaning "use the default", or at least 2. M=1 is not a thin
+	// graph, it is an undefined one: levels are drawn from -ln(u)/ln(M), and
+	// ln(1) is zero, so every node would land on layer +Inf. New refuses it.
 	M int
 	// EfConstruction is how wide the search is during inserts. Higher = better
 	// graph quality, slower inserts.

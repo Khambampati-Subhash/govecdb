@@ -1,7 +1,7 @@
 package hnsw
 
 import (
-	"errors"
+	"fmt"
 	"math"
 	"math/rand"
 	"sync"
@@ -50,9 +50,26 @@ type Graph struct {
 
 // New creates an empty graph. No memory is spent on the graph itself until the
 // first vector arrives — an empty graph is just an empty container.
+//
+// It is the only place a caller-supplied Config is checked, so what it lets
+// through is what the rest of the package is allowed to assume.
 func New(cfg Config) (*Graph, error) {
 	if cfg.Dimension <= 0 {
-		return nil, errors.New("hnsw: dimension must be > 0")
+		return nil, fmt.Errorf("%w: dimension must be > 0, got %d", ErrInvalidConfig, cfg.Dimension)
+	}
+
+	// Zero means "unset" and newGraph fills in the default. Anything else below
+	// two is refused rather than quietly corrected.
+	//
+	// M=1 is not a thin graph, it is an undefined one: ml is 1/ln(M), and ln(1)
+	// is zero, so ml is +Inf and randomLevel returns MaxInt64 — which panics in
+	// make([][]int, level+1) on the very first Insert, a long way from the line
+	// that chose M. A negative M is simply a mistake, and defaulting it to 16
+	// would hand back a graph the caller did not ask for. M is structural and
+	// cannot be changed without a rebuild, so getting it wrong is worth an error
+	// rather than a surprise.
+	if cfg.M != 0 && cfg.M < 2 {
+		return nil, fmt.Errorf("%w: M must be 0 (default) or >= 2, got %d", ErrInvalidConfig, cfg.M)
 	}
 	return newGraph(cfg), nil
 }
@@ -61,7 +78,12 @@ func New(cfg Config) (*Graph, error) {
 // fills in the optional knobs. Compact uses it directly: the config it passes
 // came out of a graph that already exists, so there is no error to handle, and
 // an impossible one plumbed through Compact's signature would be worse than
-// none.
+// none. Read uses it too, after validateHeader.
+//
+// It has one precondition its callers must hold: M is either zero or at least
+// two. ml below is 1/ln(M), which is +Inf at M=1 and takes randomLevel with it.
+// The check lives in New and validateHeader rather than here, because clamping
+// at this depth would turn a caller's mistake into a silently different graph.
 func newGraph(cfg Config) *Graph {
 	if cfg.M <= 0 {
 		cfg.M = 16
