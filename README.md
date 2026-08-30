@@ -260,8 +260,9 @@ data being at fault. Clustered data, which is what real embeddings look like, is
 5. ~~**Compaction**~~ — done; `Compact()` rebuilds over the live vectors and swaps in
 6. ~~**WAL**~~ — done; record format, append-only writer with segment rotation, and
    `Replay` — a CRC-validating scan that truncates torn tails
-7. **Snapshots + recovery** — rebuild the graph from a snapshot plus the WAL tail
-   (the graph is derived state); checkpointing and segment truncation land here
+7. **Snapshots + recovery** — the durable store is done (atomic writes,
+   checksummed framing keyed by WAL sequence, fallback, retention); the graph
+   codec and restore orchestration are next, and checkpointing lands with them
 8. **Public API** — `vector.go` / `db.go` / `options.go` facade over the internals
 9. **Metadata filtering**
 

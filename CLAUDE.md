@@ -23,8 +23,8 @@ the current state, the ordered steps, and the WAL design constraints.
 Scope for v1: **embeddable library only** (no cluster / REST server / gRPC — those
 stay in `main` history and return in v2).
 
-### The codebase is `internal/hnsw/` and `internal/wal/`
-Both have their own `README.md`, and `internal/hnsw/` is the reference for style:
+### The codebase is `internal/hnsw/`, `internal/wal/` and `internal/snapshot/`
+Each has its own `README.md`, and `internal/hnsw/` is the reference for style:
 small single-responsibility files, comments that explain *why*, measured rather
 than assumed.
 
@@ -32,9 +32,13 @@ than assumed.
   upsert, compaction, and a measurement harness behind `-results`.
 - `internal/wal/` — durability. Complete: record format, append-only writer with
   segment rotation and sync policies, and `Replay` — a CRC-validating scan that
-  truncates torn tails and carries the sequence forward. **`internal/snapshot`
-  is the next phase**; checkpointing and segment truncation land with it. Design
-  constraints are in `docs/MIGRATION.md`.
+  truncates torn tails and carries the sequence forward. Checkpointing and
+  segment truncation are still open, and no longer blocked.
+- `internal/snapshot/` — point-in-time state. The durable **store** is done:
+  atomic writes, checksummed framing keyed by WAL sequence, discovery, fallback
+  and retention, with an **opaque payload**. **The graph codec (`hnsw.Graph` ↔
+  bytes) is the next phase**, and it is a format decision rather than plumbing.
+  Design constraints are in `docs/MIGRATION.md`.
 
 ### The legacy code is gone
 Every previous package (`index/`, `store/`, `persist/`, `api/`, `collection/`,
@@ -53,11 +57,13 @@ rewrite it to the current bar.
 ## Commands
 
 ```bash
-go build ./...                 # build everything
-go vet ./...                   # static checks
-go test ./...                  # all tests
-go test ./internal/hnsw/ -v    # the new HNSW package
-go test ./... -race            # race detector (run before merging)
+go build ./...                   # build everything
+go vet ./...                     # static checks
+go test ./...                    # all tests
+go test ./internal/hnsw/ -v      # the index
+go test ./internal/wal/ -v       # the write-ahead log
+go test ./internal/snapshot/ -v  # point-in-time state
+go test ./... -race              # race detector (run before merging)
 ```
 
 Measurement (the sweeps double as the benchmark harness — same code, so a README
@@ -201,6 +207,41 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - **Replayed payloads alias a reused buffer** — valid only during the callback,
   `Record.Clone()` to keep one. That contract is what makes replay 0 allocs/record
   (358 ns/record, 5.8 GB/s); the ~16 allocs are per *segment*, not per record.
+
+## Snapshot quick reference (`internal/snapshot`) — store done, codec next
+
+- Format: `magic "GVSS" | version | reserved | seq` (16B header), payload, then
+  `crc32c | length` (12B trailer). Little-endian. `TestLayoutIsFrozen` pins the
+  sizes — changing one is a migration, not an edit.
+- **The checksum is in a trailer, not the header,** because the payload is
+  *streamed*. A snapshot is gigabytes where a WAL record is kilobytes, so nothing
+  may hold it all in memory. It covers the header and payload; the length field
+  is cross-checked against the file size instead, which is stronger.
+- **The seq is the point of the file, not metadata on it.** A snapshot whose
+  sequence is wrong by one replays the log from the wrong place. It is inside the
+  file *and* in the name, and a disagreement is `ErrSeqMismatch` — the header
+  wins, because only the header is checksummed.
+- **Atomicity comes from the rename, not the checksum**: temp → fsync → rename →
+  **fsync the directory**. Do not drop that last fsync; without it a crash can
+  leave the snapshot under neither name. The error is propagated on purpose —
+  swallowing it silently downgrades the guarantee.
+- **Nothing unverified reaches the caller.** `Load` hashes end to end *before* the
+  callback sees a byte, so the callback runs at most once and never needs to undo.
+  Costs +37% over streaming once (14.2 ms vs 10.4 at 64 MiB) because the apply
+  pass reads the page cache at 18.8 GB/s. Do not "optimize" this into one pass.
+- **A corrupt snapshot falls back to an older one; a callback error does not.**
+  The first is disk rot, the second is a decoder bug, and falling back would hide
+  it behind a slow startup.
+- `Create` has a **~10 ms floor at any size** — two fsyncs. That is why snapshots
+  ride a checkpoint interval in minutes, not the WAL's fsync interval in ms.
+- **WAL truncation follows the *oldest retained* snapshot, never the newest**, and
+  runs after `Prune` — otherwise the fallback copy is unusable but still stored.
+- Payload is **opaque**: there is no graph codec yet, so nothing produces one.
+  The open question for that slice is graph-vs-live-vectors; `BenchmarkCompact`
+  is the rebuild cost that should decide it.
+- **No `Snapshotter` interface yet** — an implementation without a consumer. The
+  WAL's `Replay` is the precedent: it sat on the interface as a promise until
+  writing it showed it did not belong.
 
 ## Locked baselines — do not regress
 

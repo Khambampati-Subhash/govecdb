@@ -59,7 +59,7 @@ govecdb/
 ├── internal/
 │   ├── hnsw/            # index engine — concurrent reads       ✅ done
 │   ├── wal/             # write-ahead log — writer + replay     ✅ done
-│   ├── snapshot/        # snapshots + recovery
+│   ├── snapshot/        # durable store ✅, graph codec next
 │   ├── store/           # in-memory vector store
 │   ├── filter/          # metadata query engine
 │   └── obs/             # Logger + Metrics interfaces, no-op defaults
@@ -82,8 +82,11 @@ govecdb/
    rotation, and `Replay`: a CRC-validating scan that truncates a torn tail and
    carries the sequence forward. **Done.** Checkpointing and segment truncation
    wait for step 7, which is what makes a checkpoint mean anything.
-7. **`internal/snapshot`** — point-in-time graph snapshot + recovery that replays
-   the WAL. **Next.**
+7. **`internal/snapshot`** — the durable **store** is done: atomic writes,
+   versioned and checksummed framing keyed by WAL sequence, discovery, corruption
+   fallback, and retention. The payload is opaque, so what remains is the **graph
+   codec** (`hnsw.Graph` ↔ bytes) and the restore orchestration on top of it.
+   **The codec is next.**
 8. **`internal/store`** — vector + metadata storage behind a `Store` interface.
 9. **`internal/filter`** — metadata query engine, with tests from day one.
 10. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users import.
@@ -128,15 +131,57 @@ Settled while building the reader, and worth carrying into the next phase:
 - **Nothing is read on an unverified length.** The file size is taken up front
   and a length is refused against both it and `MaxRecordBytes` before any read.
 
-Still open, and now blocked on snapshots rather than on the log: writing
-`TypeCheckpoint` records and deleting segments below one. A checkpoint has no
-meaning until there is a snapshot for it to point at.
+Still open: writing `TypeCheckpoint` records and deleting segments below one.
+No longer blocked — `internal/snapshot` now provides the sequence a checkpoint
+points at. The constraint to respect when it lands is in the snapshot phase below:
+truncate against the **oldest retained** snapshot, not the newest.
 
 Same bar as the index: small single-responsibility files, comments that explain
 *why*, and tests that verify crash recovery rather than assuming it. The tear
 tests damage a log by truncating and rewriting it, which reproduces the shapes
 power loss leaves behind; the harness that `SIGKILL`s a child mid-write to
 reproduce the *timing* is still outstanding.
+
+## Phase — Snapshot (store done, codec next)
+
+The step splits in two, and only the first half is built.
+
+**Done — the durable store.** Atomic writes (temp → fsync → rename → fsync the
+directory), versioned and checksummed framing keyed by the WAL sequence it
+covers, discovery, fallback to an older snapshot when the newest fails
+verification, and retention.
+
+Decided while building it:
+
+- **The payload is opaque**, as it is in the WAL. The package moves bytes durably
+  and knows nothing about vectors, which keeps it testable without the index and
+  puts the format boundary somewhere defensible.
+- **The checksum lives in a trailer**, because the payload is streamed — a
+  snapshot is gigabytes where a WAL record is kilobytes, so nothing may hold it
+  all in memory.
+- **Atomicity comes from the rename, not the checksum.** That lets the checksum
+  mean the narrower and more useful thing: bit rot, not interrupted writes.
+- **Nothing unverified reaches the caller.** Verification is a separate pass
+  before the callback sees a byte; measured at +37% over streaming once, because
+  the second pass reads the page cache.
+- **WAL truncation must follow the oldest *retained* snapshot**, never the
+  newest, or the fallback copy is unusable while still being paid for.
+- **No `Snapshotter` interface yet.** There is an implementation but no consumer,
+  and the WAL taught the lesson directly: `Replay` was on the interface as a
+  promise until writing it showed it did not belong there. It gets defined when
+  `db.go` exists and its needs are known.
+
+**Next — the graph codec.** Turning a `hnsw.Graph` into bytes and back. It is a
+real format decision, not plumbing: writing neighbour lists to disk freezes
+HNSW's internal representation the way `TestLayoutIsFrozen` freezes the WAL's, so
+it gets its own slice rather than being smuggled in behind a blob store. The open
+question is whether to store the **graph** (fast recovery, frozen internals) or
+the **live vectors** (simple format, recovery pays a full rebuild) — the measured
+rebuild cost from `BenchmarkCompact` is what should decide it.
+
+Restore orchestration — load the snapshot, replay the WAL from `Seq+1` — is a
+dozen lines once the codec exists, and lands with the public API that has both a
+graph and a log to hand.
 
 ## SOLID / patterns
 
