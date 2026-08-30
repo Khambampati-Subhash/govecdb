@@ -22,6 +22,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `insert.go` | `Insert` — building the graph, and replacing an id that is already in it. |
 | `delete.go` | `Delete` — tombstoning a slot, and re-electing the entry point when it is the one deleted. |
 | `compact.go` | `Compact` — rebuilding the graph over its live vectors to reclaim tombstoned slots. |
+| `codec.go` | `(*Graph).WriteTo` / `Read` — the graph as bytes, so recovery loads an index instead of rebuilding one. |
 | `suggest.go` | `SuggestedEf` — the measured `ef ∝ n^0.78` curve, fitted so callers need not guess. |
 | `search.go` | `Result`, `Search`, and the primitives it rides on: `greedyClosest`, `searchLayer`. |
 | `neighbors.go` | Edge management: alpha-pruned `selectNeighbors`, `pruneConnections`, `connect`, adjacency lookups. |
@@ -40,6 +41,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `visited_test.go` | Generation stamps, reuse across graph sizes, the 2³²-search wraparound. |
 | `recall_test.go` | The sweep harness: dimension / scale / ef / M / metric / distribution / tombstones, plus the M x ef and N x ef grids. |
 | `suggest_test.go` | Builds real graphs and fails if a suggested `ef` misses its recall target. |
+| `codec_test.go` | Round trips across every metric and graph shape, 18 ways a serialized graph can be rejected, and the whole path through the real snapshot store. |
 | `bench_test.go` | Insert / upsert / search / compaction / distance benchmarks. |
 
 ## The knobs
@@ -360,11 +362,56 @@ wide `searchLayer` on layer 0 → return the `k` closest.
 graph, re-inserting every live vector in slot order with its stored vector →
 swap `nodes` / `ids` / `entry` / `maxLevel` across and zero the tombstone count.
 
+## Serializing the graph
+
+`codec.go` turns the index into bytes and back, so recovery loads an index rather
+than rebuilding one:
+
+```go
+_, err := g.WriteTo(w)   // io.WriterTo
+g, err := hnsw.Read(r)   // the counterpart to New
+```
+
+| | Latency | Throughput | Allocs |
+|---|---|---|---|
+| `WriteTo`, 10k × 128 | 1.36 ms | 4.9 GB/s | **5** |
+| `Read`, 10k × 128 | 2.69 ms | 2.46 GB/s | 50,676 |
+
+`WriteTo` allocates a **constant** five times whatever the graph's size — the
+scratch buffers are reused, so a million vectors costs the same five allocations
+as ten. `Read`'s ~5 per node *are* the graph: the node, its vector, its
+neighbour slices, its id.
+
+**Why the graph and not just the vectors.** Replay reads a log at 368 ns/record
+but *applying* a record costs 703 µs, so the rebuild is essentially all of
+recovery. At 662 bytes per vector, 1M × 128 is ~0.37 s to verify and decode
+against ~703 s to rebuild — about **1,900×**. See
+[`docs/DURABILITY.md`](../../docs/DURABILITY.md).
+
+The price is that this freezes the graph's internal representation on disk:
+neighbour lists are slot indices, so what is written is exactly the structure the
+index depends on. Hence a version field from the first byte and
+`TestCodecLayoutIsFrozen`.
+
+**It carries no checksum**, deliberately. `internal/snapshot` already hashes the
+whole payload before returning a byte of it, and hashing twice would cost a
+second pass over gigabytes to learn the same thing. `Read` trusts its input to
+have been verified — but it still validates *structure*, because a checksum
+proves the bytes are the bytes that were written, not that they describe a graph
+a search can walk. An out-of-range neighbour index would otherwise surface as a
+panic deep inside a search, long after the file that caused it is forgotten.
+
+`WriteTo` holds the read lock for the whole write: searches continue, inserts
+wait. At ~4.9 GB/s a gigabyte of graph blocks writers for about a fifth of a
+second. Doing better needs the same change log and double-buffered swap that
+online compaction needs, and the two should be solved together rather than
+half-solved twice.
+
 ## Not implemented yet (deliberately)
 
-Persistence (WAL + snapshots), fine-grained write locking, **online** compaction
-— `Compact` exists but stops the world — and SIMD assembly. Each is a separate
-upcoming slice — see `docs/MIGRATION.md`.
+Fine-grained write locking, **online** compaction — `Compact` exists but stops
+the world — and SIMD assembly. Each is a separate upcoming slice; see
+`docs/MIGRATION.md`.
 
 ```bash
 go test ./internal/hnsw/ -v                      # correctness + recall

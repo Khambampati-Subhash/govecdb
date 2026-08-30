@@ -59,7 +59,7 @@ govecdb/
 ├── internal/
 │   ├── hnsw/            # index engine — concurrent reads       ✅ done
 │   ├── wal/             # write-ahead log — writer + replay     ✅ done
-│   ├── snapshot/        # durable store ✅, graph codec next
+│   ├── snapshot/        # store + graph codec (in hnsw/)       ✅ done
 │   ├── store/           # in-memory vector store
 │   ├── filter/          # metadata query engine
 │   └── obs/             # Logger + Metrics interfaces, no-op defaults
@@ -82,11 +82,11 @@ govecdb/
    rotation, and `Replay`: a CRC-validating scan that truncates a torn tail and
    carries the sequence forward. **Done.** Checkpointing and segment truncation
    wait for step 7, which is what makes a checkpoint mean anything.
-7. **`internal/snapshot`** — the durable **store** is done: atomic writes,
-   versioned and checksummed framing keyed by WAL sequence, discovery, corruption
-   fallback, and retention. The payload is opaque, so what remains is the **graph
-   codec** (`hnsw.Graph` ↔ bytes) and the restore orchestration on top of it.
-   **The codec is next.**
+7. ~~**`internal/snapshot` + graph codec**~~ — atomic, versioned, checksummed
+   snapshots keyed by WAL sequence, with discovery, corruption fallback and
+   retention; plus `(*Graph).WriteTo` / `hnsw.Read` so a snapshot holds a graph
+   rather than a pile of vectors. **Done.** Wiring them into startup is policy
+   and lands with the public API.
 8. **`internal/store`** — vector + metadata storage behind a `Store` interface.
 9. **`internal/filter`** — metadata query engine, with tests from day one.
 10. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users import.
@@ -142,9 +142,9 @@ tests damage a log by truncating and rewriting it, which reproduces the shapes
 power loss leaves behind; the harness that `SIGKILL`s a child mid-write to
 reproduce the *timing* is still outstanding.
 
-## Phase — Snapshot (store done, codec next)
+## Phase — Snapshot (done)
 
-The step splits in two, and only the first half is built.
+The step split in two, and both halves are built.
 
 **Done — the durable store.** Atomic writes (temp → fsync → rename → fsync the
 directory), versioned and checksummed framing keyed by the WAL sequence it
@@ -171,23 +171,44 @@ Decided while building it:
   promise until writing it showed it did not belong there. It gets defined when
   `db.go` exists and its needs are known.
 
-**Next — the graph codec.** Turning a `hnsw.Graph` into bytes and back. It is a
-real format decision, not plumbing: writing neighbour lists to disk freezes
-HNSW's internal representation the way `TestLayoutIsFrozen` freezes the WAL's, so
-it gets its own slice rather than being smuggled in behind a blob store.
+**Done — the graph codec** (`internal/hnsw/codec.go`). `(*Graph).WriteTo` and
+`hnsw.Read` turn the index into bytes and back, so a snapshot holds a graph
+rather than a pile of vectors.
 
-The open question — store the **graph** or just the **live vectors** — is now
-**answered by measurement**, in `docs/DURABILITY.md` §6. Replay reads a log at
+The open question — store the **graph** or just the **live vectors** — was
+answered by measurement before a line of it was written. Replay reads a log at
 368 ns/record, but *applying* a record costs 703 µs, so reading is 0.05% of
-recovery and the rebuild is all of it. For 1M × 128 that is ~703 s of rebuild
-against ~0.2 s to load a serialized graph: three orders of magnitude. A
-vectors-only snapshot would bound log *size* while leaving recovery *time*
-essentially unimproved, which is half a snapshot. **Serialize the graph**, and
-accept freezing the representation as the price.
+recovery and the rebuild is all of it. A graph of dim 128 at M=16 encodes to
+662 bytes per vector, so 1M × 128 is ~0.37 s to verify and decode against ~703 s
+to rebuild: about **1,900×**. A vectors-only snapshot would bound log *size*
+while leaving recovery *time* essentially unimproved, which is half a snapshot.
 
-Restore orchestration — load the snapshot, replay the WAL from `Seq+1` — is a
-dozen lines once the codec exists, and lands with the public API that has both a
-graph and a log to hand.
+Decided while building it:
+
+- **Store only what cannot be recomputed.** The node array, `entry`, `maxLevel`.
+  The id index and the tombstone count are pure functions of the nodes, so they
+  are derived on load — writing them down creates a second source of truth a
+  corrupt file could put in disagreement with the first.
+- **Validate structure on load, not just integrity.** A checksum proves the bytes
+  are the bytes that were written, not that they describe a graph a search can
+  walk. Neighbour indices in range, counts within `maxConn`, and the entry point
+  live and at `maxLevel` — the last one is a panic in the next `Insert` if it is
+  wrong, a long way from the file that caused it.
+- **No checksum in this format.** `internal/snapshot` already hashes the whole
+  payload before returning a byte of it; hashing twice would cost a second pass
+  over gigabytes to learn the same thing. The contract is that `Read` trusts its
+  input to have been verified, and that is written down where it can be read.
+- **The RNG is not restored.** `math/rand`'s source cannot be marshaled. Levels
+  stay correctly distributed so nothing about recall changes; what differs is
+  that build → save → load → insert is no longer byte-identical to building
+  straight through. A draw counter would not survive `Compact`, which replaces
+  the node array but not the RNG, so it would be subtly wrong rather than absent.
+
+**Next — restore orchestration.** Load the newest snapshot, replay the WAL from
+`Seq+1`, and take snapshots on a schedule. It is a small amount of code and it
+has nowhere to live yet: it is policy, and policy belongs to the public API
+(step 10), which is the first thing to own both a graph and a log. WAL
+checkpointing and segment truncation land in the same place, for the same reason.
 
 ## SOLID / patterns
 

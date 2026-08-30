@@ -7,9 +7,11 @@ Every number here was measured in one session on one machine — **Apple M4 Max,
 darwin/arm64, Go 1.25, APFS on internal NVMe** — so the figures can be compared
 against each other. Reproduce them with the commands at the bottom.
 
-> **Status.** The index, the write-ahead log, and the snapshot *store* are built.
-> The graph codec that would let a snapshot actually hold an index is not, so
-> today's recovery is a full WAL replay. [What is not yet
+> **Status.** The index, the write-ahead log, the snapshot store, and the graph
+> codec are all built and tested — each piece of the persistence path exists and
+> composes with its neighbours. What does not exist yet is the startup path that
+> *wires them together*, because there is no public API to own it, so nothing
+> takes a snapshot on a schedule or loads one on boot. [What is not yet
 > guaranteed](#what-is-not-yet-guaranteed) is explicit about the gap.
 
 ---
@@ -211,20 +213,37 @@ cost:
 
 **Reading the log is 0.05% of recovery.** Rebuilding the index is everything.
 
-That single fact answers the open design question recorded in
-[`MIGRATION.md`](MIGRATION.md) — whether a snapshot should store the **graph** or
-just the **live vectors**:
+That single fact settled the design question the snapshot phase left open —
+whether a snapshot should store the **graph** or just the **live vectors**. The
+graph codec now exists, so this is measured rather than projected. A graph of
+dim 128 at `M=16` encodes to **662 bytes per vector**, so 1M vectors is ~662 MB:
 
 | Snapshot holds | 1M × 128 recovery | Cost |
 |---|---|---|
-| Live vectors | Rebuild every vector | ~703 s |
-| The graph itself | `Load` ~900 MB at 4.6 GB/s | ~0.2 s (~0.5 s cold) |
+| Live vectors | Rebuild every vector at 703 µs | **~703 s** |
+| The graph itself | verify 662 MB at 6.4 GB/s, decode at 2.46 GB/s | **~0.37 s** |
 
-Roughly **three orders of magnitude**. A vectors-only snapshot would bound log
-*size* while leaving recovery *time* essentially unimproved — which is half a
-snapshot. The codec should serialize the graph, and accept that doing so freezes
-HNSW's internal representation on disk the way `TestLayoutIsFrozen` freezes the
-WAL's.
+About **1,900×** — three orders of magnitude. A vectors-only snapshot would bound
+log *size* while leaving recovery *time* essentially unimproved, which is half a
+snapshot. The price of the choice is that the codec freezes HNSW's internal
+representation on disk, the way `TestLayoutIsFrozen` freezes the WAL's.
+
+### The graph codec
+
+| | Latency | Throughput | Allocs |
+|---|---|---|---|
+| `WriteTo`, 10k × 128 | 1.36 ms | 4.9 GB/s | **5** |
+| `Read`, 10k × 128 | 2.69 ms | 2.46 GB/s | 50,676 |
+
+`WriteTo` allocates a **constant** five times regardless of graph size — the
+fixed-field scratch and the payload buffers are reused, so a snapshot of a
+million vectors allocates the same five times as one of ten. `Read` allocates
+~5 per node because those allocations *are* the graph: the node, its vector, its
+neighbour slices, its id.
+
+Reading is slower than writing because it builds a data structure rather than
+copying bytes. It is still ~2,600× faster than rebuilding the index from the
+same vectors.
 
 For reference, `Compact()` is the same rebuild operation and confirms the shape —
 its pause tracks *survivors*, not garbage:
@@ -255,9 +274,11 @@ its pause tracks *survivors*, not garbage:
 Stated plainly, because a durability document that only lists strengths is
 marketing.
 
-- **No graph codec, so snapshots are not yet in the recovery path.** The store is
-  built and tested; nothing produces a payload for it. Today's recovery is a full
-  WAL replay, with the rebuild cost in §6.
+- **Nothing wires the pieces together yet.** The index, the log, the snapshot
+  store and the graph codec each work and compose — `TestCodecThroughTheSnapshotStore`
+  runs the whole path — but no code takes a snapshot on a schedule or loads one at
+  startup, because there is no public API to own that policy. Until it exists,
+  recovery in practice is a full WAL replay, with the rebuild cost in §6.
 - **No checkpointing or segment truncation**, so a log grows without bound. The
   pieces exist — `TypeCheckpoint` is reserved, and a snapshot now supplies the
   sequence a checkpoint points at — but nothing writes one or deletes a segment.

@@ -163,6 +163,16 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - Durability model: **write to WAL first, then apply to the in-memory graph**; on
   recovery, replay the WAL to rebuild the graph — the graph is derived state,
   never the source of truth.
+- **`codec.go` serializes the graph** (`(*Graph).WriteTo` / `hnsw.Read`), which
+  freezes the internal representation on disk — neighbor lists are slot indices,
+  so changing `node` is a format migration. `TestCodecLayoutIsFrozen` pins it.
+  Store only what cannot be recomputed: nodes, `entry`, `maxLevel`. `ids` and
+  `numDeleted` are **derived on load**, so a file cannot contradict itself.
+  `Read` validates *structure* (neighbor indices in range, counts within
+  `maxConn`, entry live and at `maxLevel`) because a checksum proves the bytes
+  are what was written, not that they describe a walkable graph. It carries **no
+  checksum of its own** — `internal/snapshot` verifies the payload first, and
+  `WriteTo` is 5 allocs regardless of graph size; keep it that way.
 
 ## WAL quick reference (`internal/wal`) — writer + replay done
 
@@ -251,13 +261,10 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   ride a checkpoint interval in minutes, not the WAL's fsync interval in ms.
 - **WAL truncation follows the *oldest retained* snapshot, never the newest**, and
   runs after `Prune` — otherwise the fallback copy is unusable but still stored.
-- Payload is **opaque**: there is no graph codec yet, so nothing produces one.
-  **The graph-vs-live-vectors question is now settled by measurement** — replay
-  reads a log at 368 ns/record but *applying* it costs 703 µs/record, so for 1M
-  vectors recovery is 703 s of rebuild against ~0.2 s to load a graph: three
-  orders of magnitude. A vectors-only snapshot would bound log size and leave
-  recovery time essentially unimproved. Serialize the graph. See
-  `docs/DURABILITY.md` §6.
+- Payload is **opaque** to this package; `hnsw.(*Graph).WriteTo` produces it.
+  The graph-vs-live-vectors question was settled by measurement and the answer is
+  **serialize the graph**: for 1M × 128 that is ~0.37 s to verify and decode
+  against ~703 s to rebuild, about 1,900×. See `docs/DURABILITY.md` §6.
 - **No `Snapshotter` interface yet** — an implementation without a consumer. The
   WAL's `Replay` is the precedent: it sat on the interface as a promise until
   writing it showed it did not belong.

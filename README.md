@@ -15,15 +15,17 @@ approximate-nearest-neighbor index.
 > remains in git history on `main` and is recoverable at any time.
 >
 > **What exists today:** `internal/hnsw` — a complete, tested, benchmarked HNSW
-> index with concurrent reads, tombstone deletes, upsert and compaction;
-> `internal/wal` — an append-only write-ahead log with segment rotation, sync
-> policies, and replay that truncates a torn tail; `internal/snapshot` — atomic,
-> checksummed point-in-time state keyed by WAL sequence.
+> index with concurrent reads, tombstone deletes, upsert, compaction, and
+> serialization; `internal/wal` — an append-only write-ahead log with segment
+> rotation, sync policies, and replay that truncates a torn tail;
+> `internal/snapshot` — atomic, checksummed point-in-time state keyed by WAL
+> sequence. Every piece of the persistence path exists and composes.
 >
-> **What does not exist yet:** the public API, the graph codec that would put
-> snapshots in the recovery path, WAL checkpointing and truncation, and metadata
-> filtering. There is no importable package yet — `internal/` is not consumable
-> from outside the module. See [the roadmap](docs/MIGRATION.md), and
+> **What does not exist yet:** the public API that wires them together — nothing
+> yet takes a snapshot on a schedule or loads one at startup, because that is
+> policy and has nowhere to live. Also pending: WAL checkpointing and truncation,
+> and metadata filtering. There is no importable package yet — `internal/` is not
+> consumable from outside the module. See [the roadmap](docs/MIGRATION.md), and
 > [durability and latency](docs/DURABILITY.md) for what is guaranteed today,
 > what it costs, and what is not guaranteed yet.
 
@@ -266,9 +268,9 @@ data being at fault. Clustered data, which is what real embeddings look like, is
 5. ~~**Compaction**~~ — done; `Compact()` rebuilds over the live vectors and swaps in
 6. ~~**WAL**~~ — done; record format, append-only writer with segment rotation, and
    `Replay` — a CRC-validating scan that truncates torn tails
-7. **Snapshots + recovery** — the durable store is done (atomic writes,
-   checksummed framing keyed by WAL sequence, fallback, retention); the graph
-   codec and restore orchestration are next, and checkpointing lands with them
+7. ~~**Snapshots**~~ — done; atomic checksummed store keyed by WAL sequence, plus
+   a graph codec so recovery loads an index (~0.37 s/1M vectors) instead of
+   rebuilding one (~703 s)
 8. **Public API** — `vector.go` / `db.go` / `options.go` facade over the internals
 9. **Metadata filtering**
 
