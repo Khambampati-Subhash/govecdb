@@ -85,6 +85,51 @@ func BenchmarkChecksum(b *testing.B) {
 	}
 }
 
+// BenchmarkReplay measures recovery, which is the number that decides how long
+// a crashed process takes to come back. It is reported per record rather than
+// per replay, since that is the unit the log grows in.
+//
+// The allocation count is the load-bearing part: the reader hands out payloads
+// pointing into a buffer it reuses, so replaying a million records should not
+// allocate a million times. A non-zero number here means that contract broke.
+func BenchmarkReplay(b *testing.B) {
+	const records = 10_000
+	payload := bytes.Repeat([]byte("v"), 2048+32)
+
+	dir := b.TempDir()
+	w, err := Open(dir, Options{SyncPolicy: SyncNever, MaxSegmentBytes: 8 << 20})
+	if err != nil {
+		b.Fatal(err)
+	}
+	for range records {
+		if _, err := w.Append(TypePut, payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		b.Fatal(err)
+	}
+
+	var sink uint64
+	b.SetBytes(int64(records * (len(payload) + recordHeaderSize)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		res, err := Replay(dir, Options{}, func(r Record) error {
+			sink += r.Seq + uint64(len(r.Payload))
+			return nil
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if res.Records != records {
+			b.Fatalf("replayed %d records, want %d", res.Records, records)
+		}
+	}
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*records), "ns/record")
+}
+
 // BenchmarkSegmentRotation measures what a rotation costs, because it lands
 // inside a caller's Append: it fsyncs and closes one file and creates another,
 // which is the most expensive thing an append can do and the reason
