@@ -263,7 +263,24 @@ func (w *Writer) rotate() error {
 	return w.openSegment(w.segIndex + 1)
 }
 
-// openSegment creates a segment file and writes its header.
+// openSegment creates a segment file, writes its header, and makes the file's
+// existence durable.
+//
+// # Why the directory is fsynced
+//
+// fsync on a file makes its *contents* durable. It says nothing about the
+// directory entry that gives the file a name, and a file with no name is a file
+// that is not there after a crash.
+//
+// That is the difference between an inconvenience and a broken promise. Every
+// SyncAlways append fsyncs this file, so its records are on the platter — but if
+// the directory entry linking it was never made durable, power loss can take the
+// whole segment away and those acknowledged writes with it. The window is small
+// and it is exactly the shape of failure this package exists to prevent.
+//
+// One extra fsync per segment, which is once per Open and once per rotation —
+// every 64 MiB of log at the default. Rotation already costs an fsync and a
+// create, so this is not the expensive part of a rare operation.
 func (w *Writer) openSegment(index uint32) error {
 	path := segmentPath(w.dir, index)
 
@@ -282,10 +299,34 @@ func (w *Writer) openSegment(index uint32) error {
 		return fmt.Errorf("wal: write segment header: %w", err)
 	}
 
+	if err := syncDir(w.dir); err != nil {
+		f.Close()
+		return err
+	}
+
 	w.file = f
 	w.buf = bufio.NewWriterSize(f, 64<<10)
 	w.segIndex = index
 	w.segBytes = fileHeaderSize
+	return nil
+}
+
+// syncDir fsyncs a directory, which is what makes a file's creation durable.
+//
+// The error is returned rather than swallowed. Some filesystems refuse to sync a
+// directory, and the temptation is to ignore that so those platforms keep
+// working — but ignoring it silently downgrades the guarantee the call exists to
+// provide. A loud failure on an unusual filesystem beats a quiet loss of
+// durability on every one.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("wal: open dir for fsync: %w", err)
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("wal: fsync dir: %w", err)
+	}
 	return nil
 }
 
