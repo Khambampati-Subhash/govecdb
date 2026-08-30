@@ -90,11 +90,17 @@ cannot repair.
 
 ## Durability is a knob, and here is its price
 
-| Policy | Per append | Throughput | What an acknowledged write means |
-|---|---|---|---|
-| `SyncAlways` | **4.06 ms** | 295 writes/s | It survived power loss. |
-| `SyncInterval` | 1.01 µs | ~1M writes/s | It survived the process dying; up to one interval is lost to power loss. |
-| `SyncNever` | 0.81 µs | ~1.2M writes/s | It reached the OS. A clean shutdown keeps it; power loss may not. |
+| Policy | Per append | Throughput | A crashed process loses | Power loss loses |
+|---|---|---|---|---|
+| `SyncAlways` | **4.04 ms** | 248 writes/s | nothing | nothing |
+| `SyncInterval` | 897 ns | ~1.1M writes/s | ≤ one interval | ≤ one interval |
+| `SyncNever` | 692 ns | ~1.4M writes/s | ≤ 64 KiB (the buffer) | everything not written back |
+
+Note what the fast policies do **not** promise. Records live in a 64 KiB
+user-space buffer until it fills or something flushes it, so under `SyncInterval`
+and `SyncNever` an acknowledged write has not necessarily reached the *kernel*,
+let alone the disk — a process crash loses it just as a power cut does. Only a
+clean `Close` (or an explicit `Sync`) makes that window zero.
 
 **Durability costs about 4,000×.** That gap is why this is a knob and not a
 constant — and why the zero value is `SyncAlways`: a caller who configures
@@ -212,19 +218,28 @@ Apple M4 Max, ~2 KB payloads:
 
 | | ns/op | allocs |
 |---|---|---|
-| Append, `SyncAlways` | 4,058,089 | 0 |
-| Append, `SyncInterval` | 1,013 | 0 |
-| Append, `SyncNever` | 809 | 0 |
-| Append, small (12 B) | 18.9 | 0 |
-| Checksum, 16 KB | 1,373 (11.9 GB/s) | 0 |
-| Segment rotation | 5,344,281 | 7 |
-| **Replay, per record** | **358** (5.8 GB/s) | **0** |
+| Append, `SyncAlways` | 4,036,239 | 0 |
+| Append, `SyncInterval` | 897 | 0 |
+| Append, `SyncNever` | 692 | 0 |
+| Append, small (12 B) | 19.0 | 0 |
+| Checksum, 16 KB | 1,542 (10.6 GB/s) | 0 |
+| Segment rotation | 8,649,214 | 10 |
+| **Replay, per record** | **368** (5.7 GB/s) | **0** |
 
 The append path allocates nothing: the record header is reused across calls and
 the payload is written straight through without a copy.
 
-Rotation costs an fsync, a close and a create — which is why `MaxSegmentBytes`
-defaults to 64 MiB rather than something that would make it frequent.
+Rotation costs **two** fsyncs, a close and a create: one for the outgoing
+segment's data, one for the directory that gives the incoming segment its name.
+The second is what stops a crash from taking a freshly created segment away
+along with the acknowledged writes inside it — `fsync` on a file makes its
+contents durable and says nothing about the directory entry naming it.
+
+It is also why rotation is 8.6 ms rather than 4.8. That sounds expensive until it
+is amortized: at the default 64 MiB it happens once per ~32,000 records of 2 KB,
+which is **0.27 µs per record** — below even `SyncNever`'s per-append cost. It is
+the right place to spend an fsync, and the reason `MaxSegmentBytes` defaults to
+64 MiB rather than something that would make rotation frequent.
 
 Replay allocates nothing per record either; the ~16 allocations it does make are
 **per segment** — a 64 KiB read buffer and the file handle. Recovering a

@@ -18,14 +18,22 @@ const (
 	// default anyone falls into by omission.
 	SyncAlways SyncPolicy = iota
 
-	// SyncInterval fsyncs on a timer, so writes are batched into group commits.
-	// A power loss can lose up to one interval of acknowledged writes. That is a
+	// SyncInterval flushes and fsyncs on a timer, so writes are batched into
+	// group commits. Up to one interval of acknowledged writes is lost to power
+	// loss — and to a process crash as well, since between ticks those records
+	// are still in this process's buffer rather than the kernel's. That is a
 	// documented product decision, not an accident — Redis ships the same trade.
 	SyncInterval
 
-	// SyncNever leaves flushing to the operating system. The process crashing is
-	// survivable, since the data has reached the OS; the machine losing power is
-	// not. For benchmarks and tests, and it should stay there.
+	// SyncNever never flushes on its own: bytes leave the writer's 64 KiB buffer
+	// when it fills, or when Sync or Close is called, and reach the platter
+	// whenever the operating system decides.
+	//
+	// Note what that does *not* say. Until the buffer fills, an appended record
+	// has not reached the OS at all — it is in this process's memory — so a
+	// process crash loses up to a buffer's worth, and power loss additionally
+	// loses whatever the OS had not written back. A clean Close keeps
+	// everything. For benchmarks and tests, and it should stay there.
 	SyncNever
 )
 

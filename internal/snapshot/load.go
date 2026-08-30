@@ -47,12 +47,13 @@ func (r Rejection) String() string {
 // straight into the callback and reporting the checksum failure afterwards would
 // be faster and would make the failure unrecoverable.
 //
-// Measured, at 64 MiB: verifying is 10.4 ms and applying is a further 3.6 ms,
-// against 10.4 ms for streaming once and checking the checksum afterwards. So
-// the property costs about +37%, not the 2× the extra pass suggests — the verify
+// Measured, at 64 MiB: verifying is 10.5 ms and applying is a further 3.7 ms,
+// against 10.5 ms for streaming once and checking the checksum afterwards. So
+// the property costs about +38%, not the 2× the extra pass suggests — the verify
 // pass leaves the file in the page cache, and the apply pass that follows runs at
-// 18.8 GB/s because it is reading memory. On a 1 GiB snapshot that is under 60 ms
-// bought against the alternative, which is rebuilding an index from the log.
+// 18.2 GB/s because it is reading memory. On a 1 GiB snapshot that is under 60 ms
+// bought against the alternative, which is rebuilding an index from the log —
+// three orders of magnitude more, measured in docs/DURABILITY.md.
 //
 // # A failed snapshot falls back to an older one
 //

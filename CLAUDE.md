@@ -19,6 +19,10 @@ Work lands on **`main`**. Strategy: **rebuild from scratch, one subsystem at a
 time**, using the old implementation as a reference in git history rather than as a
 source to copy. Read `docs/MIGRATION.md` before making structural changes — it has
 the current state, the ordered steps, and the WAL design constraints.
+`docs/DURABILITY.md` is the companion: what survives which failure, what each
+guarantee costs, and every latency number in one place. **Update it when you
+change a durability guarantee or move a benchmark** — it is the document a user
+would be misled by if it went stale.
 
 Scope for v1: **embeddable library only** (no cluster / REST server / gRPC — those
 stay in `main` history and return in v2).
@@ -183,7 +187,18 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - **Failure is sticky.** The first write error ends the Writer; every later call
   returns it. Appending over a hole is how a durability bug becomes data loss.
 - Sync policy zero value is **`SyncAlways`** — safe by omission. It costs
-  **4.06 ms/append vs 1.01 µs** for interval: ~4,000×. Append is 0 allocs.
+  **4.04 ms/append vs 692 ns** for never: ~5,800×. Append is 0 allocs.
+- **The fast policies do not survive a process crash either.** Records sit in a
+  64 KiB *user-space* bufio buffer, so under `SyncInterval`/`SyncNever` an
+  acknowledged write may not have reached the kernel at all. Do not restore the
+  older claim that `SyncNever` "reached the OS" — it hasn't, until the buffer
+  fills. Full table in `docs/DURABILITY.md`.
+- **`openSegment` fsyncs the directory.** `fsync` on a file makes its contents
+  durable and says nothing about the directory entry naming it, so without this a
+  crash can take a freshly created segment away along with `SyncAlways` writes
+  already inside it. Do not remove it to make rotation faster: it is why rotation
+  is 8.6 ms rather than 4.8, which amortizes to **0.27 µs/record** at 64 MiB
+  segments — below even `SyncNever`'s per-append cost.
 - **Recovery is `Replay(dir, opts, fn)`, a function — not a method on `WAL`.**
   It runs before a writer exists; a method would mean opening a writer in order
   to read, which creates a segment as a side effect of recovery. Feed
@@ -227,8 +242,8 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   swallowing it silently downgrades the guarantee.
 - **Nothing unverified reaches the caller.** `Load` hashes end to end *before* the
   callback sees a byte, so the callback runs at most once and never needs to undo.
-  Costs +37% over streaming once (14.2 ms vs 10.4 at 64 MiB) because the apply
-  pass reads the page cache at 18.8 GB/s. Do not "optimize" this into one pass.
+  Costs +38% over streaming once (14.5 ms vs 10.5 at 64 MiB) because the apply
+  pass reads the page cache at 18.2 GB/s. Do not "optimize" this into one pass.
 - **A corrupt snapshot falls back to an older one; a callback error does not.**
   The first is disk rot, the second is a decoder bug, and falling back would hide
   it behind a slow startup.
@@ -237,8 +252,12 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - **WAL truncation follows the *oldest retained* snapshot, never the newest**, and
   runs after `Prune` — otherwise the fallback copy is unusable but still stored.
 - Payload is **opaque**: there is no graph codec yet, so nothing produces one.
-  The open question for that slice is graph-vs-live-vectors; `BenchmarkCompact`
-  is the rebuild cost that should decide it.
+  **The graph-vs-live-vectors question is now settled by measurement** — replay
+  reads a log at 368 ns/record but *applying* it costs 703 µs/record, so for 1M
+  vectors recovery is 703 s of rebuild against ~0.2 s to load a graph: three
+  orders of magnitude. A vectors-only snapshot would bound log size and leave
+  recovery time essentially unimproved. Serialize the graph. See
+  `docs/DURABILITY.md` §6.
 - **No `Snapshotter` interface yet** — an implementation without a consumer. The
   WAL's `Replay` is the precedent: it sat on the interface as a promise until
   writing it showed it did not belong.

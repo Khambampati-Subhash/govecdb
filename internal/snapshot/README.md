@@ -94,15 +94,16 @@ for a snapshot that turns out to be bad. It needs no idempotence and no undo.
 
 | 64 MiB snapshot | |
 |---|---|
-| Verify pass (checksum) | 10.4 ms |
-| Apply pass | + 3.6 ms |
-| **`Load` total** | **14.2 ms** |
-| Streaming once, checksum after | 10.4 ms |
+| Verify pass (checksum) | 10.5 ms |
+| Apply pass | + 3.7 ms |
+| **`Load` total** | **14.5 ms** |
+| Streaming once, checksum after | 10.5 ms |
 
-So the property costs about **+37%**, not the 2× an extra pass suggests: the
+So the property costs about **+38%**, not the 2× an extra pass suggests: the
 verify pass leaves the file in the page cache, so the apply pass runs at
-**18.8 GB/s** because it is reading memory. On a 1 GiB snapshot that is under
-60 ms — bought against the alternative, which is rebuilding an index from the log.
+**18.2 GB/s** because it is reading memory. On a 1 GiB snapshot that is under
+60 ms — bought against the alternative, rebuilding an index from the log, which
+is three orders of magnitude more. See [`docs/DURABILITY.md`](../../docs/DURABILITY.md).
 
 ### A failed snapshot falls back to an older one
 
@@ -151,12 +152,12 @@ Apple M4 Max:
 
 | | ns/op | throughput | allocs |
 |---|---|---|---|
-| `Create`, 1 MiB | 10,788,213 | 97 MB/s | 24 |
-| `Create`, 64 MiB | 34,458,633 | 1.9 GB/s | 24 |
-| `Load`, 1 MiB | 457,684 | 2.3 GB/s | 30 |
-| `Load`, 64 MiB | 14,227,774 | 4.7 GB/s | 30 |
-| verify only, 64 MiB | 10,412,794 | 6.4 GB/s | 10 |
-| apply only, 64 MiB | 3,577,630 | 18.8 GB/s | 6 |
+| `Create`, 1 MiB | 10,103,512 | 104 MB/s | 24 |
+| `Create`, 64 MiB | 34,205,718 | 1.96 GB/s | 24 |
+| `Load`, 1 MiB | 451,833 | 2.3 GB/s | 30 |
+| `Load`, 64 MiB | 14,521,713 | 4.6 GB/s | 30 |
+| verify only, 64 MiB | 10,453,687 | 6.4 GB/s | 10 |
+| apply only, 64 MiB | 3,690,253 | 18.2 GB/s | 6 |
 
 `Create` carries a **~10 ms floor** at any size — two fsyncs, one for the file and
 one for the directory. That is the cost of the atomicity guarantee, it does not

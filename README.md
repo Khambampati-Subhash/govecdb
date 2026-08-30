@@ -15,11 +15,17 @@ approximate-nearest-neighbor index.
 > remains in git history on `main` and is recoverable at any time.
 >
 > **What exists today:** `internal/hnsw` — a complete, tested, benchmarked HNSW
-> index (1,075 lines). That is the entire codebase.
+> index with concurrent reads, tombstone deletes, upsert and compaction;
+> `internal/wal` — an append-only write-ahead log with segment rotation, sync
+> policies, and replay that truncates a torn tail; `internal/snapshot` — atomic,
+> checksummed point-in-time state keyed by WAL sequence.
 >
-> **What does not exist yet:** the public API, persistence, compaction.
-> There is no importable package yet — `internal/` is not consumable from outside
-> the module. See [the roadmap](docs/MIGRATION.md).
+> **What does not exist yet:** the public API, the graph codec that would put
+> snapshots in the recovery path, WAL checkpointing and truncation, and metadata
+> filtering. There is no importable package yet — `internal/` is not consumable
+> from outside the module. See [the roadmap](docs/MIGRATION.md), and
+> [durability and latency](docs/DURABILITY.md) for what is guaranteed today,
+> what it costs, and what is not guaranteed yet.
 
 ## What GoVecDB is for
 

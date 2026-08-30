@@ -174,10 +174,16 @@ Decided while building it:
 **Next — the graph codec.** Turning a `hnsw.Graph` into bytes and back. It is a
 real format decision, not plumbing: writing neighbour lists to disk freezes
 HNSW's internal representation the way `TestLayoutIsFrozen` freezes the WAL's, so
-it gets its own slice rather than being smuggled in behind a blob store. The open
-question is whether to store the **graph** (fast recovery, frozen internals) or
-the **live vectors** (simple format, recovery pays a full rebuild) — the measured
-rebuild cost from `BenchmarkCompact` is what should decide it.
+it gets its own slice rather than being smuggled in behind a blob store.
+
+The open question — store the **graph** or just the **live vectors** — is now
+**answered by measurement**, in `docs/DURABILITY.md` §6. Replay reads a log at
+368 ns/record, but *applying* a record costs 703 µs, so reading is 0.05% of
+recovery and the rebuild is all of it. For 1M × 128 that is ~703 s of rebuild
+against ~0.2 s to load a serialized graph: three orders of magnitude. A
+vectors-only snapshot would bound log *size* while leaving recovery *time*
+essentially unimproved, which is half a snapshot. **Serialize the graph**, and
+accept freezing the representation as the price.
 
 Restore orchestration — load the snapshot, replay the WAL from `Seq+1` — is a
 dozen lines once the codec exists, and lands with the public API that has both a
