@@ -271,7 +271,10 @@ data being at fault. Clustered data, which is what real embeddings look like, is
 7. ~~**Snapshots**~~ — done; atomic checksummed store keyed by WAL sequence, plus
    a graph codec so recovery loads an index (~0.37 s/1M vectors) instead of
    rebuilding one (~703 s)
-8. **Public API** — `vector.go` / `db.go` / `options.go` facade over the internals
+8. **Public API** — `vector.go` / `db.go` / `options.go` facade over the internals.
+   **This is the blocker**: restore-on-open, snapshot scheduling, and WAL
+   checkpointing are all built underneath and all waiting for something to own
+   the policy of *when* to call them
 9. **Metadata filtering**
 
 Out of scope for v1 (returns in v2): clustering, REST/gRPC servers, quantization.

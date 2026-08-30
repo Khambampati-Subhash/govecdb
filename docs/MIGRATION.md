@@ -66,6 +66,38 @@ govecdb/
 └── docs/
 ```
 
+## Where this stands
+
+**7 of 11 steps done — the whole durability path exists and composes.**
+
+| | Step | State |
+|---|---|---|
+| 1–5 | `internal/hnsw` — index, concurrent reads, delete, upsert, compaction | ✅ |
+| 6 | `internal/wal` — writer, rotation, sync policies, replay | ✅ |
+| 7 | `internal/snapshot` + graph codec | ✅ |
+| 8 | `internal/store` | ⬜ |
+| 9 | `internal/filter` | ⬜ |
+| 10 | **Public API** | ⬜ ← the blocker |
+| 11 | Examples + README | ⬜ |
+
+Step 10 is now the critical path, and not only because it is next in the list.
+Three separate pieces of finished work are waiting on it, and every one of them
+turned out to be *policy* — something that needs an owner rather than more
+machinery:
+
+- **Restore orchestration.** Load the newest snapshot, replay the WAL from
+  `Seq+1`. Every part exists; nothing calls them in that order.
+- **Snapshot scheduling.** Nothing decides *when* to take one, or prunes on a
+  cadence.
+- **WAL checkpointing and truncation.** `TypeCheckpoint` is reserved and a
+  snapshot supplies the sequence it would point at, but nothing writes one or
+  deletes a segment.
+
+That is a good shape to be in — the hard parts are built and measured, and what
+remains is deciding who calls them — but it does mean **a running database does
+not yet benefit from the snapshot work**, because nothing loads a snapshot at
+startup. `docs/DURABILITY.md` says so plainly rather than implying otherwise.
+
 ## Ordered execution (each = one green-gated commit)
 
 1. ~~**`internal/hnsw`**~~ — from-scratch index, brute-force recall tests, benchmarks. **Done.**
@@ -89,7 +121,9 @@ govecdb/
    and lands with the public API.
 8. **`internal/store`** — vector + metadata storage behind a `Store` interface.
 9. **`internal/filter`** — metadata query engine, with tests from day one.
-10. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users import.
+10. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users
+    import, and the owner of every piece of policy listed above: restore on open,
+    snapshot on a schedule, checkpoint and truncate the log.
 11. **Examples + README** for the real API.
 
 ### Deferred on purpose, not overlooked

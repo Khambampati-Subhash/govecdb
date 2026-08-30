@@ -53,6 +53,16 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `Alpha` — pruning relaxation (see below) | `Config` | Fixed per graph; 1.0–1.4 useful, default 1.2. |
 | `ef` — search width at query time | `Search(query, k, ef)` | **Yes** — per query; auto-clamped to `>= k`. |
 
+`M` must be **0** — meaning "use the default 16" — or **at least 2**. `New`
+returns `ErrInvalidConfig` for anything else, including a negative value, which
+is refused rather than quietly defaulted so a caller's mistake does not become a
+silently different graph.
+
+`M=1` is not a thin graph, it is an undefined one: levels are drawn from
+`-ln(u)/ln(M)`, and `ln(1)` is zero, so `ml` is `+Inf`, `randomLevel` returns
+`MaxInt64`, and `make([][]int, level+1)` panics on the **first** `Insert` — with
+nothing in the message connecting it to the line that chose `M`.
+
 ## Design decisions that matter
 
 ### 1. Normalize on insert, so cosine becomes a dot product

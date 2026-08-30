@@ -113,6 +113,13 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 ## HNSW quick reference
 
 - `M` (neighbors/node) is **structural** — set once, changing it needs a rebuild.
+  Must be **0 (use the default 16) or >= 2**; `New` returns `ErrInvalidConfig`
+  otherwise. `M=1` is undefined, not merely thin: `ml = 1/ln(M)` is `+Inf`, so
+  `randomLevel` returns `MaxInt64` and `make([][]int, level+1)` panics on the
+  *first* `Insert`. Negative M is refused rather than defaulted, so a caller's
+  mistake does not become a silently different graph. `validateHeader` enforces
+  `M >= 2` too — a stored config is the *effective* one, so a loaded graph would
+  otherwise bypass `New` entirely.
 - `EfConstruction` is the build-time search width (kept fixed, ~100–200).
 - `ef` is the **query-time** knob in `Search(query, k, ef)`; must be `>= k`, bigger
   = higher recall + slower. **Recall at a fixed `ef` falls as `N` or dimension
