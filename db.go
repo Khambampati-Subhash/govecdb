@@ -348,10 +348,57 @@ func (db *DB) Snapshot() error {
 	if _, err := snapshot.Prune(dir, db.opts.snapshotsKept); err != nil {
 		return fmt.Errorf("govecdb: prune snapshots: %w", err)
 	}
+	if err := db.truncateLog(dir); err != nil {
+		return err
+	}
 
 	db.mu.Lock()
 	db.snapSeq = max(db.snapSeq, seq)
 	db.mu.Unlock()
+	return nil
+}
+
+// truncateLog deletes log segments that the retained snapshots make redundant.
+//
+// # Against the oldest snapshot, never the newest
+//
+// Retaining more than one snapshot is what makes a corrupt one survivable, and
+// that only works if the log still reaches back far enough for the older one to
+// be usable. Truncating to the newest would delete exactly the records the older
+// copy needs — leaving a second snapshot that is paid for and cannot be used.
+//
+// # And only after checking that snapshot is readable
+//
+// The oldest snapshot is verified before anything is deleted, because the
+// question being asked is "may I delete the records this snapshot stands in
+// for?", and a snapshot nobody has checked cannot stand in for anything. A
+// failure here is deliberately not an error: a log that keeps growing is a disk
+// problem, while deleting records only an unreadable snapshot could replace is a
+// data problem, and the two are not close enough to trade.
+//
+// There is nowhere to report the skip to yet, which is one of the things an
+// observability seam would be for.
+func (db *DB) truncateLog(snapDir string) error {
+	all, err := snapshot.List(snapDir)
+	if err != nil {
+		return fmt.Errorf("govecdb: list snapshots: %w", err)
+	}
+	if len(all) == 0 {
+		return nil
+	}
+
+	// List is newest first.
+	oldest := all[len(all)-1]
+	if err := snapshot.Verify(oldest); err != nil {
+		return nil
+	}
+
+	// Records at or below the snapshot's sequence are reconstructible from it;
+	// everything above has to stay.
+	_, err = wal.Truncate(filepath.Join(db.dir, walSubdir), oldest.Seq+1, wal.Options{})
+	if err != nil {
+		return fmt.Errorf("govecdb: truncate log: %w", err)
+	}
 	return nil
 }
 
