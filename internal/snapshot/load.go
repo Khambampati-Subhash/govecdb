@@ -99,6 +99,22 @@ func Load(dir string, read func(io.Reader) error) (Result, error) {
 	return res, nil
 }
 
+// Verify reads a snapshot end to end and reports whether it is intact, without
+// applying any of it.
+//
+// It exists for one caller and one question: log truncation asks "may I delete
+// the records this snapshot is standing in for?", and the honest answer depends
+// on whether the snapshot can actually stand in for them. Deleting a log because
+// of a snapshot nobody has checked is how two independent problems become one
+// unrecoverable one.
+//
+// It costs a full pass at checksum speed — about 6.4 GB/s — which is cheap
+// against what it is protecting.
+func Verify(s Snapshot) error {
+	_, err := verify(s)
+	return err
+}
+
 // verify hashes a snapshot end to end and returns its payload length.
 //
 // Every cheap check runs before the expensive one: the framing has to fit the
