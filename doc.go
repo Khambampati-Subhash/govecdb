@@ -35,6 +35,13 @@
 // or by setting WithSnapshotInterval; nothing is written automatically by
 // default, because how long a restart may take is the caller's decision.
 //
+// Each snapshot also deletes the log segments it has made redundant, so the log
+// does not grow forever. That is measured against the *oldest retained* snapshot
+// rather than the newest, and only after verifying it reads: retaining more than
+// one snapshot is what makes a corrupt one survivable, and it only survives if
+// the log still reaches back far enough to replay on top of it. WithSnapshotsKept
+// is therefore also the knob deciding how much log is kept.
+//
 // # What this package validates, and why it bothers
 //
 // A library does not know where its arguments came from. An id, a K, a metadata
@@ -62,13 +69,9 @@
 // Metadata filtering: metadata is stored, returned with results, and survives
 // restarts, but there is no query language over it yet.
 //
-// Log truncation: the log grows without bound. A snapshot makes older segments
-// redundant and nothing deletes them, so a long-lived database accumulates disk.
-// The bound to respect when it lands is the *oldest retained* snapshot, not the
-// newest, or the fallback copy becomes unusable while still being stored.
-//
 // Observability: there is no logger or metrics seam, so a torn log tail found
-// during recovery is repaired correctly and reported to nobody.
+// during recovery is repaired correctly and reported to nobody, and a skipped
+// truncation says nothing about why.
 //
 // Collections: one database is one index. Multiple named collections would sit
 // above this rather than change it.

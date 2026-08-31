@@ -7,12 +7,11 @@ Every number here was measured in one session on one machine — **Apple M4 Max,
 darwin/arm64, Go 1.25, APFS on internal NVMe** — so the figures can be compared
 against each other. Reproduce them with the commands at the bottom.
 
-> **Status.** The index, the write-ahead log, the snapshot store, and the graph
-> codec are all built and tested — each piece of the persistence path exists and
-> composes with its neighbours. What does not exist yet is the startup path that
-> *wires them together*, because there is no public API to own it, so nothing
-> takes a snapshot on a schedule or loads one on boot. [What is not yet
-> guaranteed](#what-is-not-yet-guaranteed) is explicit about the gap.
+> **Status.** The durability path is complete and wired together behind
+> `govecdb.Open`: writes go to the log before the index, startup restores from
+> the newest usable snapshot and replays what came after, snapshots can run on a
+> schedule, and log segments a snapshot has made redundant are deleted. [What is
+> not yet guaranteed](#what-is-not-yet-guaranteed) is explicit about what remains.
 
 ---
 
@@ -76,9 +75,12 @@ out of the first only when it fills.
 | Power loss mid-**rotation** | Old segment fsynced before the new one is created | No hole in the middle of the log — the one shape recovery cannot repair |
 | Power loss just after a segment is created | **Directory fsync** on segment creation | The segment cannot vanish along with the acknowledged writes inside it |
 | Power loss mid-**snapshot** | Temp file → fsync → rename → directory fsync | Either no snapshot or a complete one; never a half-written file wearing a finished name |
+| Power loss mid-**truncation** | Oldest segment deleted first, directory fsynced | A contiguous run of the newest segments survives — never a hole in the middle |
+| Truncation against a snapshot that is silently corrupt | The oldest retained snapshot is **verified** before anything is deleted | Truncation is skipped; the log keeps growing rather than losing records |
 | Bit rot in a WAL record | crc32c over type, seq, length **and** payload | Replay stops there; that segment is truncated |
 | Bit rot in a snapshot | crc32c over header and payload, verified before use | Snapshot rejected; falls back to an older one |
 | A corrupt record **length** | Length refused against file size and cap *before* any read | No wild allocation — the failure that actually hurts |
+| A flipped bit in the sequence truncation reads | The segment's first record is read through the checksummed reader | An unverified sequence never authorises deleting a file |
 | A snapshot renamed to the wrong sequence | Sequence checksummed in the header, cross-checked against the name | Rejected — replaying the log from the wrong place is silent data loss |
 | Sequence numbers rewound | Strict-increase check during replay | `ErrOutOfOrder` rather than an ambiguous apply order |
 | A failed write followed by more writes | Sticky failure — the Writer refuses everything after the first error | No hole for replay to stop at |
@@ -252,6 +254,30 @@ its pause tracks *survivors*, not garbage:
 |---|---|---|---|
 | Compact (5,000 × 128) | 2.65 s | 1.69 s | 0.80 s |
 
+### Log truncation, and the rule that keeps the fallback real
+
+After each snapshot, segments holding no record the retained snapshots still need
+are deleted. Two decisions make that safe rather than merely tidy:
+
+**Against the oldest retained snapshot, never the newest.** Keeping two snapshots
+is what makes a corrupt one survivable, and that only works if the log still
+reaches back far enough for the *older* one to be replayed on top of. Truncating
+to the newest would delete exactly those records, leaving a second copy that is
+paid for and cannot be used. `TestTruncationLeavesTheOlderSnapshotUsable`
+destroys the newest snapshot after truncation and requires full recovery from the
+older one.
+
+**And only after verifying that snapshot reads.** The question truncation asks is
+"may I delete the records this snapshot stands in for?", and a snapshot nobody
+has checked cannot stand in for anything. If it fails verification, truncation is
+skipped — a log that keeps growing is a disk problem, while deleting records only
+an unreadable snapshot could replace is a data problem, and the two are not close
+enough to trade.
+
+`WithSnapshotsKept` is therefore the knob that decides how much log survives:
+more retained snapshots means an older oldest, and an older oldest means less is
+deleted.
+
 ### What recovery tolerates
 
 - **A torn tail** in any segment — truncated there, replay continues with the
@@ -274,16 +300,12 @@ its pause tracks *survivors*, not garbage:
 Stated plainly, because a durability document that only lists strengths is
 marketing.
 
-- **Nothing wires the pieces together yet.** The index, the log, the snapshot
-  store and the graph codec each work and compose — `TestCodecThroughTheSnapshotStore`
-  runs the whole path — but no code takes a snapshot on a schedule or loads one at
-  startup, because there is no public API to own that policy. Until it exists,
-  recovery in practice is a full WAL replay, with the rebuild cost in §6.
-- **No checkpointing or segment truncation**, so a log grows without bound. The
-  pieces exist — `TypeCheckpoint` is reserved, and a snapshot now supplies the
-  sequence a checkpoint points at — but nothing writes one or deletes a segment.
-  When it lands, truncation must follow the **oldest retained** snapshot, never
-  the newest, or the fallback copy is unusable while still being stored.
+- **No metadata filtering.** Metadata is stored, returned with results and
+  survives restarts, but there is no query language over it.
+- **`TypeCheckpoint` is reserved and unwritten.** Truncation reads the snapshot
+  directory directly, which is the authority on what is recoverable; a log record
+  duplicating that could disagree with it. The constant stays so the numbering is
+  not rearranged later.
 - **No crash harness.** The recovery tests damage logs by truncating and
   rewriting them, which reproduces the *shapes* power loss leaves behind but not
   the *timing* that produces them. A test that `SIGKILL`s a child mid-write and
@@ -328,4 +350,8 @@ them all. The ones that carry this document:
 | A failed snapshot leaves nothing behind | `TestCreateIsAtomic` |
 | Corrupt snapshots never reach the caller | `TestLoadRejects` |
 | A corrupt snapshot falls back to an older one | `TestLoadFallsBackToAnOlderSnapshot` |
+| The log stops growing | `TestLogDoesNotGrowForever` |
+| Truncation keeps the older snapshot usable | `TestTruncationLeavesTheOlderSnapshotUsable` |
+| Truncation is skipped when the oldest snapshot is unreadable | `TestTruncationIsSkippedWhenTheOldestSnapshotIsUnreadable` |
+| An unverified sequence cannot delete a segment | `TestTruncateRefusesAnUnverifiedSequence` |
 | On-disk layouts cannot drift | `TestLayoutIsFrozen` (wal, snapshot) |

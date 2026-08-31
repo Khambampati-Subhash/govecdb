@@ -244,6 +244,21 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - **Replayed payloads alias a reused buffer** — valid only during the callback,
   `Record.Clone()` to keep one. That contract is what makes replay 0 allocs/record
   (358 ns/record, 5.8 GB/s); the ~16 allocs are per *segment*, not per record.
+- **`Truncate` judges a segment from the *next* one's first sequence**, never by
+  scanning for its own last. Sequences increase across the log, so a later
+  segment starting at or below the line proves this one ends below it. That first
+  record is read through the **checksummed reader** — the sequence authorises
+  deleting files, so an unverified one would let a flipped bit destroy a segment.
+  It never touches the newest segment, nor one whose successor it cannot read.
+- **Truncate against the *oldest retained* snapshot, never the newest**, and only
+  after `snapshot.Verify` passes on it. Retaining two snapshots is what makes a
+  corrupt one survivable; truncating to the newest deletes the records the older
+  one needs. A failed verify skips truncation on purpose — a growing log is a
+  disk problem, deleting records only an unreadable snapshot could replace is a
+  data problem.
+- **`TypeCheckpoint` stays reserved and unwritten.** Truncation reads the
+  snapshot directory, which is the authority on what is recoverable; a log record
+  duplicating that could disagree with it. Do not "finish" it by emitting one.
 
 ## Snapshot quick reference (`internal/snapshot`) — store done, codec next
 

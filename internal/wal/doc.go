@@ -38,6 +38,12 @@
 //
 // Opening an existing directory always starts a NEW segment. See Open for why.
 //
+// Truncate deletes segments a snapshot has made redundant, which is what stops
+// the log growing forever. It judges a segment from the *next* one's first
+// sequence rather than scanning to find its last, and it never touches the
+// newest segment or one whose successor it cannot read. See Truncate for the
+// constraint its caller has to hold.
+//
 // # Durability is a knob
 //
 // SyncAlways / SyncInterval / SyncNever trade durability against throughput, and
@@ -65,6 +71,7 @@
 //	writer.go   The append-only writer, rotation, and the sync policies.
 //	reader.go   The validating scan of a single segment.
 //	replay.go   Recovery across a directory, and what it reports.
+//	truncate.go Deleting segments a snapshot has made redundant.
 //	wal.go      The WAL interface callers depend on, plus a no-op implementation.
 //	errors.go   Sentinel errors callers match on.
 package wal

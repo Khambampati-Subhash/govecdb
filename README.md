@@ -23,8 +23,9 @@ approximate-nearest-neighbor index.
 >
 > **What does not exist yet:** metadata *filtering* — metadata is stored,
 > returned with results and survives restarts, but there is no query language over
-> it. And **the log grows without bound**: a snapshot makes older segments
-> redundant and nothing deletes them yet. See [the roadmap](docs/MIGRATION.md), and
+> it. The durability story itself is complete: writes are logged before they are
+> applied, startup restores from a snapshot and replays the rest, and log segments
+> a snapshot has made redundant are deleted. See [the roadmap](docs/MIGRATION.md), and
 > [durability and latency](docs/DURABILITY.md) for what is guaranteed today,
 > what it costs, and what is not guaranteed yet.
 
@@ -301,7 +302,9 @@ data being at fault. Clustered data, which is what real embeddings look like, is
    rebuilding one (~703 s)
 8. ~~**Public API**~~ — done; `Open` / `Add` / `Get` / `Search` / `Snapshot` /
    `Compact`, with restore-on-open and snapshot scheduling
-9. **Metadata filtering**, and **WAL truncation** — the log still grows forever
+9. ~~**WAL truncation**~~ — done; segments a snapshot has made redundant are
+   deleted after each snapshot, against the *oldest retained* one
+10. **Metadata filtering** — the last feature gap
 
 Out of scope for v1 (returns in v2): clustering, REST/gRPC servers, quantization.
 

@@ -22,6 +22,7 @@ the source of truth.
 | `writer.go` | The append-only writer, rotation, and the sync policies. |
 | `reader.go` | The validating scan of a single segment. |
 | `replay.go` | Recovery across a directory, and what it reports. |
+| `truncate.go` | Deleting segments a snapshot has made redundant. |
 | `wal.go` | The `WAL` interface callers depend on, plus `Nop`. |
 | `errors.go` | Sentinel errors callers match on. |
 
@@ -212,6 +213,56 @@ the same footgun, so it is stated here rather than left to be discovered.
 | Sequence rewind | Fatal (`ErrOutOfOrder`) |
 | Bad magic / unknown format version | Fatal — guessing at an unknown layout is worse than failing |
 
+## Truncation
+
+`Truncate(dir, keepFromSeq, opts)` deletes segments holding no record at or after
+`keepFromSeq`. It is what stops the log growing forever: once a snapshot covers
+sequence N, every record at or below N can be rebuilt from it.
+
+### Judging a segment without a sequence range
+
+A segment does not record which sequences it holds, and finding its **last** one
+means scanning it to the end. So the decision runs the other way round.
+Sequences increase across the whole log, so every record in segment *i* comes
+before every record in any later segment *j*:
+
+> If some later segment starts **at or below** `keepFromSeq`, then segment *i*
+> ends below it too, and segment *i* is disposable.
+
+One record read per segment instead of a full scan. It is deliberately
+conservative — a segment whose last record sits just under the line may survive
+an extra round — and conservative is the right direction for a deletion.
+
+That one record is read through the **ordinary reader**, checksum and all, not by
+pulling the header apart. The sequence is covered by the record's checksum, and
+this number authorises deleting files: trusting an unverified one would let a
+single flipped bit destroy a segment. `TestTruncateRefusesAnUnverifiedSequence`
+is the guard.
+
+### What it refuses to reason about
+
+- **The newest segment**, always. Nothing follows it, so nothing can vouch for
+  where it ends — and it is the one a writer is appending to.
+- **A segment whose successor cannot be read**: an empty one left by a restart, a
+  torn first record, a file that is not a segment. Truncation is an optimization,
+  and declining costs disk while guessing costs data.
+
+Oldest is deleted first, so an interrupted truncation leaves a contiguous run of
+the newest segments rather than holes in the middle. The directory is fsynced
+afterwards, for the same reason creating a segment is.
+
+### The caller's constraint
+
+**`keepFromSeq` must come from the oldest *retained* snapshot, not the newest.**
+
+Retaining two snapshots is what makes a corrupt one survivable, and that only
+works if the log still reaches back far enough for the older one to be replayed
+on top of. Truncating to the newest would delete exactly those records, leaving a
+second copy that is paid for and cannot be used.
+
+Safe to call while a `Writer` is appending: it only ever removes segments below
+the one being written.
+
 ## Measured
 
 Apple M4 Max, ~2 KB payloads:
@@ -248,15 +299,19 @@ Replay allocates nothing per record either; the ~16 allocations it does make are
 
 ## Not implemented yet (deliberately)
 
-Checkpointing and segment truncation. `TypeCheckpoint` is reserved in the format
-so the numbering is not rearranged later, but nothing writes it yet and nothing
-deletes segments below one — that arrives with `internal/snapshot`, which is what
-makes a checkpoint mean anything.
+**`TypeCheckpoint` is reserved and stays unwritten.** It was meant to mark the
+point a snapshot had made durable, so segments below it could be dropped — but
+truncation reads the snapshot directory directly, which is the authority on what
+is actually recoverable. A record duplicating that could disagree with it, and a
+log record claiming a snapshot exists is worth less than the snapshot. The
+constant stays so the numbering is not rearranged later; replay ignores the type
+rather than refusing it, so a log written by a build that does emit them still
+loads.
 
-Also pending: the crash harness that `SIGKILL`s a child mid-write and asserts the
-surviving prefix is exactly consistent. The tear tests here damage a log by
-truncating and rewriting it, which reproduces the *shapes* power loss leaves
-behind but not the timing that produces them. See `docs/MIGRATION.md`.
+**The crash harness** that `SIGKILL`s a child mid-write and asserts the surviving
+prefix is exactly consistent. The tear tests here damage a log by truncating and
+rewriting it, which reproduces the *shapes* power loss leaves behind but not the
+timing that produces them. See `docs/MIGRATION.md`.
 
 ```bash
 go test ./internal/wal/ -v

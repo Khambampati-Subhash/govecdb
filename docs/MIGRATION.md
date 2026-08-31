@@ -87,20 +87,16 @@ Two of the three things that were blocked on step 10 have landed with it:
   records written after it. ✅
 - **Snapshot scheduling** — `Snapshot()` and `WithSnapshotInterval`, with
   retention through `WithSnapshotsKept`. ✅
-- **WAL checkpointing and truncation** — still open, and now the only piece of
-  the durability story with no owner. See below.
+- **WAL truncation** — `wal.Truncate`, run after every snapshot against the
+  oldest retained snapshot's sequence. The log no longer grows forever. ✅
 
-### The one thing still missing from durability
+**The durability story is complete.** What remains is features (metadata
+filtering), not guarantees.
 
-**The log grows without bound.** A snapshot makes every segment below it
-redundant and nothing deletes them.
-
-It needs a new `wal.Truncate(dir, belowSeq)`, which is not free: segments do not
-record their sequence range, so deciding whether one is disposable means reading
-the first record header of the segment *after* it. The constraint to respect when
-it lands is written down in the snapshot phase below — truncate against the
-**oldest retained** snapshot, never the newest, or the fallback copy becomes
-unusable while still being stored.
+`TypeCheckpoint` stays reserved and unwritten, and that is now a decision rather
+than a gap: truncation reads the snapshot directory, which is the authority on
+what is actually recoverable, and a log record duplicating that could disagree
+with it. The constant remains so the numbering is not rearranged later.
 
 ## Ordered execution (each = one green-gated commit)
 
@@ -173,10 +169,19 @@ Settled while building the reader, and worth carrying into the next phase:
 - **Nothing is read on an unverified length.** The file size is taken up front
   and a length is refused against both it and `MaxRecordBytes` before any read.
 
-Still open: writing `TypeCheckpoint` records and deleting segments below one.
-No longer blocked — `internal/snapshot` now provides the sequence a checkpoint
-points at. The constraint to respect when it lands is in the snapshot phase below:
-truncate against the **oldest retained** snapshot, not the newest.
+Truncation landed with the public API: `Truncate(dir, keepFromSeq, opts)` deletes
+segments holding no record at or after the line. Two things decided while
+building it:
+
+- **A segment is judged from the *next* one's first sequence**, not by scanning
+  to find its own last. Sequences increase across the log, so if a later segment
+  starts at or below the line, this one ends below it. One record read per
+  segment instead of a full scan, and conservative in the safe direction.
+- **That record goes through the checksummed reader.** The sequence authorises
+  deleting files, and an unverified one would let a flipped bit destroy a
+  segment.
+
+`TypeCheckpoint` stays reserved and unwritten — see the note above.
 
 Same bar as the index: small single-responsibility files, comments that explain
 *why*, and tests that verify crash recovery rather than assuming it. The tear
