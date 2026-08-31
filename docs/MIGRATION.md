@@ -68,35 +68,39 @@ govecdb/
 
 ## Where this stands
 
-**7 of 11 steps done — the whole durability path exists and composes.**
+**9 of 11 steps done — there is a working, importable database.**
 
 | | Step | State |
 |---|---|---|
 | 1–5 | `internal/hnsw` — index, concurrent reads, delete, upsert, compaction | ✅ |
 | 6 | `internal/wal` — writer, rotation, sync policies, replay | ✅ |
 | 7 | `internal/snapshot` + graph codec | ✅ |
-| 8 | `internal/store` | ⬜ |
-| 9 | `internal/filter` | ⬜ |
-| 10 | **Public API** | ⬜ ← the blocker |
-| 11 | Examples + README | ⬜ |
+| 8 | `internal/store` — metadata storage | ✅ |
+| 9 | `internal/filter` — metadata queries | ⬜ |
+| 10 | **Public API** — `govecdb.Open/Add/Get/Search/Snapshot/Compact` | ✅ |
+| 11 | Examples + README | ⬜ (godoc examples exist) |
 
-Step 10 is now the critical path, and not only because it is next in the list.
-Three separate pieces of finished work are waiting on it, and every one of them
-turned out to be *policy* — something that needs an owner rather than more
-machinery:
+Two of the three things that were blocked on step 10 have landed with it:
 
-- **Restore orchestration.** Load the newest snapshot, replay the WAL from
-  `Seq+1`. Every part exists; nothing calls them in that order.
-- **Snapshot scheduling.** Nothing decides *when* to take one, or prunes on a
-  cadence.
-- **WAL checkpointing and truncation.** `TypeCheckpoint` is reserved and a
-  snapshot supplies the sequence it would point at, but nothing writes one or
-  deletes a segment.
+- **Restore orchestration** — `Open` loads the newest snapshot that passes its
+  checksum, falls back to an older one if it does not, and replays the log
+  records written after it. ✅
+- **Snapshot scheduling** — `Snapshot()` and `WithSnapshotInterval`, with
+  retention through `WithSnapshotsKept`. ✅
+- **WAL checkpointing and truncation** — still open, and now the only piece of
+  the durability story with no owner. See below.
 
-That is a good shape to be in — the hard parts are built and measured, and what
-remains is deciding who calls them — but it does mean **a running database does
-not yet benefit from the snapshot work**, because nothing loads a snapshot at
-startup. `docs/DURABILITY.md` says so plainly rather than implying otherwise.
+### The one thing still missing from durability
+
+**The log grows without bound.** A snapshot makes every segment below it
+redundant and nothing deletes them.
+
+It needs a new `wal.Truncate(dir, belowSeq)`, which is not free: segments do not
+record their sequence range, so deciding whether one is disposable means reading
+the first record header of the segment *after* it. The constraint to respect when
+it lands is written down in the snapshot phase below — truncate against the
+**oldest retained** snapshot, never the newest, or the fallback copy becomes
+unusable while still being stored.
 
 ## Ordered execution (each = one green-gated commit)
 
@@ -119,12 +123,16 @@ startup. `docs/DURABILITY.md` says so plainly rather than implying otherwise.
    retention; plus `(*Graph).WriteTo` / `hnsw.Read` so a snapshot holds a graph
    rather than a pile of vectors. **Done.** Wiring them into startup is policy
    and lands with the public API.
-8. **`internal/store`** — vector + metadata storage behind a `Store` interface.
+8. ~~**`internal/store`**~~ — metadata storage behind a `Store` interface. **Done.**
+   Metadata *only*: values live once, in the index. A store that owned whole
+   records would mean two copies of every vector in memory, and vectors are the
+   largest thing the process holds.
 9. **`internal/filter`** — metadata query engine, with tests from day one.
-10. **Public API** — `vector.go` / `db.go` / `options.go` facade; this is what users
-    import, and the owner of every piece of policy listed above: restore on open,
-    snapshot on a schedule, checkpoint and truncate the log.
-11. **Examples + README** for the real API.
+10. ~~**Public API**~~ — `vector.go` / `db.go` / `options.go` / `codec.go` /
+    `recovery.go` / `validate.go`. **Done.** Owns restore-on-open and snapshot
+    scheduling; WAL truncation is still outstanding.
+11. **Examples + README** for the real API. Godoc examples exist and run as
+    tests; the root README still describes the module as un-importable.
 
 ### Deferred on purpose, not overlooked
 
@@ -243,6 +251,63 @@ Decided while building it:
 has nowhere to live yet: it is policy, and policy belongs to the public API
 (step 10), which is the first thing to own both a graph and a log. WAL
 checkpointing and segment truncation land in the same place, for the same reason.
+
+## Phase — Public API (done)
+
+The facade at the module root, and the first thing a user actually imports.
+
+Decided while building it:
+
+- **No internal type appears in an exported signature.** `internal/` cannot be
+  named from outside the module, so aliasing `hnsw.Metric` would have produced a
+  public surface callers can use but not write down. `Metric`, `SyncPolicy`,
+  `Match` and `Stats` are this package's own, with adapters underneath.
+- **`Index` is an interface stated in this package's types**, so a flat or
+  quantized index is a different implementation rather than a different database.
+  Serialization is deliberately *not* on it: an index that cannot write itself
+  out is still a usable index, so `Snapshot` asks for the capability and says so
+  plainly when it is absent.
+- **Fail closed.** The WAL's sticky failure is surfaced as `ErrReadOnly`: once a
+  write could not be made durable, writes stop permanently and reads keep
+  working. This is the policy the WAL explicitly deferred to "a layer above" —
+  this is that layer.
+- **No `context.Context`.** Every operation is local and bounded; the only long
+  one is `Snapshot`, and it cannot be abandoned halfway without leaving the index
+  locked. A ctx no method could honour is a promise of cancellation never kept.
+- **`SearchRequest.Ef` defaults to zero, meaning "choose it"**, because recall at
+  a fixed width *falls* as a corpus grows — any constant a caller picks today is
+  wrong later.
+- **One writer per directory**, enforced within the process. The log and the
+  snapshot store both assume it; two would interleave segment numbering and
+  delete each other's temporary files. Cross-process locking is a deliberate gap:
+  a lock file left by a crash blocks a restart that should have succeeded.
+- **Reopening with a different dimension, metric or M is refused.** Those are
+  structural — a graph's edges were chosen under one set of rules, and searching
+  it under another returns quietly wrong answers rather than failing.
+
+### Input validation, and why a library bothers
+
+A library does not know where its arguments came from. Every id, `K`, and
+metadata map may be relaying input from somewhere the process does not trust, and
+each one multiplies an allocation — so all of them are bounded, configurably
+through `WithLimits` but not removably.
+
+Two checks are worth naming because their absence would be silent rather than
+loud:
+
+- **Vector values must be finite.** A NaN compares false against everything, so
+  one of them poisons the ordering the whole index rests on: heap invariants stop
+  holding and searches return wrong answers with no error anywhere.
+- **Metadata values are a closed set of four types.** Decoding metadata is where
+  bytes from a disk become live objects, and a decoder that reconstructs
+  arbitrary types from names on the wire is a far larger surface than filtering
+  needs. Nothing here uses `encoding/gob` or reflection.
+
+Directories this package creates are `0700`. An *existing* directory is left
+alone — if an operator set its mode, quietly tightening it would revoke access
+somebody granted on purpose — but `wal/` and `snapshots/` are created here rather
+than left to those packages' `0755` default, and a directory that cannot be
+traversed is what protects the ordinary-mode files inside it.
 
 ## SOLID / patterns
 

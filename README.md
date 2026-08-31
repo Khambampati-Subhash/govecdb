@@ -14,20 +14,48 @@ approximate-nearest-neighbor index.
 > several competing index variants — has been removed from the working tree. It
 > remains in git history on `main` and is recoverable at any time.
 >
-> **What exists today:** `internal/hnsw` — a complete, tested, benchmarked HNSW
-> index with concurrent reads, tombstone deletes, upsert, compaction, and
-> serialization; `internal/wal` — an append-only write-ahead log with segment
-> rotation, sync policies, and replay that truncates a torn tail;
-> `internal/snapshot` — atomic, checksummed point-in-time state keyed by WAL
-> sequence. Every piece of the persistence path exists and composes.
+> **What exists today:** an importable database. `govecdb.Open` gives you add,
+> get, delete, search, snapshot and compact over one directory, durable through a
+> write-ahead log and recoverable from snapshots. Underneath: `internal/hnsw` (the
+> index, with serialization), `internal/wal` (append-only log with replay that
+> truncates a torn tail), `internal/snapshot` (atomic checksummed state keyed by
+> log sequence), and `internal/store` (metadata).
 >
-> **What does not exist yet:** the public API that wires them together — nothing
-> yet takes a snapshot on a schedule or loads one at startup, because that is
-> policy and has nowhere to live. Also pending: WAL checkpointing and truncation,
-> and metadata filtering. There is no importable package yet — `internal/` is not
-> consumable from outside the module. See [the roadmap](docs/MIGRATION.md), and
+> **What does not exist yet:** metadata *filtering* — metadata is stored,
+> returned with results and survives restarts, but there is no query language over
+> it. And **the log grows without bound**: a snapshot makes older segments
+> redundant and nothing deletes them yet. See [the roadmap](docs/MIGRATION.md), and
 > [durability and latency](docs/DURABILITY.md) for what is guaranteed today,
 > what it costs, and what is not guaranteed yet.
+
+## Quick start
+
+```go
+db, err := govecdb.Open("data", govecdb.WithDimension(768))
+defer db.Close()
+
+db.Add(govecdb.Vector{
+    ID:       "doc-1",
+    Values:   embedding,
+    Metadata: govecdb.Metadata{"source": "handbook.pdf", "page": int64(12)},
+})
+
+matches, err := db.Search(govecdb.SearchRequest{Query: query, K: 10})
+```
+
+Leaving `Ef` zero lets the search width be chosen from the corpus size, which is
+what keeps recall steady as the database grows — recall at a *fixed* width falls
+as a corpus gets bigger, so any constant you pick today is wrong later.
+
+Durability is a knob and the zero value is the safe one: `SyncAlways` means an
+acknowledged write has survived power loss, at roughly 4 ms each.
+`WithSyncPolicy(govecdb.SyncInterval)` is about a thousand times faster and loses
+up to one interval to a crash. See [durability and latency](docs/DURABILITY.md).
+
+Nothing snapshots automatically. Call `db.Snapshot()`, or set
+`WithSnapshotInterval` — without one, a restart replays the whole log and rebuilds
+the index at ~700 µs per vector; with one, it loads a graph at gigabytes per
+second.
 
 ## What GoVecDB is for
 
@@ -271,11 +299,9 @@ data being at fault. Clustered data, which is what real embeddings look like, is
 7. ~~**Snapshots**~~ — done; atomic checksummed store keyed by WAL sequence, plus
    a graph codec so recovery loads an index (~0.37 s/1M vectors) instead of
    rebuilding one (~703 s)
-8. **Public API** — `vector.go` / `db.go` / `options.go` facade over the internals.
-   **This is the blocker**: restore-on-open, snapshot scheduling, and WAL
-   checkpointing are all built underneath and all waiting for something to own
-   the policy of *when* to call them
-9. **Metadata filtering**
+8. ~~**Public API**~~ — done; `Open` / `Add` / `Get` / `Search` / `Snapshot` /
+   `Compact`, with restore-on-open and snapshot scheduling
+9. **Metadata filtering**, and **WAL truncation** — the log still grows forever
 
 Out of scope for v1 (returns in v2): clustering, REST/gRPC servers, quantization.
 

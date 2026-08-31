@@ -27,10 +27,13 @@ would be misled by if it went stale.
 Scope for v1: **embeddable library only** (no cluster / REST server / gRPC — those
 stay in `main` history and return in v2).
 
-### The codebase is `internal/hnsw/`, `internal/wal/` and `internal/snapshot/`
-Each has its own `README.md`, and `internal/hnsw/` is the reference for style:
-small single-responsibility files, comments that explain *why*, measured rather
-than assumed.
+### The codebase is the root package plus `internal/`
+The root package (`db.go`, `vector.go`, `options.go`, `validate.go`, `index.go`,
+`codec.go`, `recovery.go`, `errors.go`) is the public API. Under it:
+`internal/hnsw`, `internal/wal`, `internal/snapshot`, `internal/store`. Each
+internal package has its own `README.md`, and `internal/hnsw/` is the reference
+for style: small single-responsibility files, comments that explain *why*,
+measured rather than assumed.
 
 - `internal/hnsw/` — the index. Complete: concurrent reads, tombstone delete,
   upsert, compaction, and a measurement harness behind `-results`.
@@ -64,9 +67,11 @@ rewrite it to the current bar.
 go build ./...                   # build everything
 go vet ./...                     # static checks
 go test ./...                    # all tests
+go test . -v                     # the public API
 go test ./internal/hnsw/ -v      # the index
 go test ./internal/wal/ -v       # the write-ahead log
 go test ./internal/snapshot/ -v  # point-in-time state
+go test ./internal/store/ -v     # metadata
 go test ./... -race              # race detector (run before merging)
 ```
 
@@ -275,6 +280,45 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - **No `Snapshotter` interface yet** — an implementation without a consumer. The
   WAL's `Replay` is the precedent: it sat on the interface as a promise until
   writing it showed it did not belong.
+
+## Public API quick reference (root package)
+
+- **No internal type may appear in an exported signature.** `internal/` cannot be
+  named from outside the module, so an alias would give callers a type they can
+  use but not write down. `Metric`, `SyncPolicy`, `Match`, `Stats`, `Metadata`
+  are the root package's own, with adapters in `index.go`.
+- **`Index` is an interface in this package's types** so a flat or quantized
+  index is a different implementation, not a different database. Serialization is
+  deliberately *off* it (`indexSerializer`, checked at snapshot time): an index
+  that cannot write itself out is still a usable index.
+- **Fail closed** — a WAL failure makes the DB permanently `ErrReadOnly`; reads
+  keep working. This is the policy `internal/wal` explicitly deferred upward.
+- **No `context.Context`**, on purpose. Everything is local and bounded, and
+  `Snapshot` cannot be abandoned halfway without leaving the index locked. Do not
+  add a ctx no method can honour.
+- **`SearchRequest.Ef == 0` means "choose it"** via `SuggestedEf`. Do not
+  substitute a constant: recall at a fixed width falls as the corpus grows.
+- **Validation is the security boundary** (`validate.go`). Two checks matter most
+  because their absence is silent: **values must be finite** (one NaN compares
+  false against everything and poisons the ordering the index rests on), and
+  **metadata is a closed set of string/bool/int64/float64** — no `gob`, no
+  reflection, because decoding is where disk bytes become live objects. Limits
+  (`WithLimits`) are configurable but not removable.
+- **Recovery order is snapshot then log**, skipping records at or below the
+  snapshot's sequence. Do not "simplify" into replaying everything: re-applying a
+  PUT that replaced a vector tombstones a slot on *every* start.
+- **The snapshot payload is two self-delimiting sections sharing one
+  `*bufio.Reader`.** That works because `bufio.NewReaderSize` returns the reader
+  it is given when already large enough — so `hnsw.Read` reuses it instead of
+  swallowing the metadata section. `TestSnapshotPayloadSectionsDoNotOverread` is
+  the guard; getting it wrong corrupts a restore rather than failing to compile.
+- **One writer per directory**, enforced in-process via `openDirs`. Cross-process
+  locking is a deliberate gap — a lock file left by a crash blocks a restart that
+  should have succeeded.
+- **Directories this package creates are 0700**; an existing directory's mode is
+  left alone (`MkdirAll` only applies its mode on creation, and silently
+  tightening an operator's choice would revoke access granted on purpose).
+- Reopening with a different **dimension, metric or M** is refused — structural.
 
 ## Locked baselines — do not regress
 
