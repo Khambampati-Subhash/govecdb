@@ -121,6 +121,50 @@ func (g *Graph) Len() int {
 	return len(g.nodes) - g.numDeleted
 }
 
+// Config returns the effective config this graph was built with — defaults
+// applied, so what comes back is what is actually in force rather than what a
+// caller happened to pass.
+//
+// It matters most after Read: the config travels inside a serialized graph, so
+// this is how a layer above checks that the index on disk was built the way the
+// process reopening it expects. M and the metric are structural, and a mismatch
+// there is not a preference, it is a different index.
+//
+// Config is a value type holding no references, so this hands back a copy and
+// there is nothing for a caller to mutate.
+func (g *Graph) Config() Config {
+	// cfg is written once in newGraph and only read afterwards, so no lock.
+	return g.cfg
+}
+
+// Vector returns the stored form of the vector held under id, and whether the
+// id is live. Tombstoned slots are invisible here, exactly as they are to Search.
+//
+// # The stored form, not the caller's
+//
+// For Cosine the graph normalizes on insert, so what comes back is the unit
+// vector, not the magnitude that was handed in. That is not a lossy accident: a
+// cosine index is a statement that only direction is meaningful, and keeping a
+// second copy purely to return a magnitude nothing uses would double the memory
+// of the largest thing in the process.
+//
+// The result is a copy. Handing back the graph's own slice would let a caller
+// mutate the vector every neighbor list was chosen for, silently corrupting the
+// index from the outside — the same reason Insert copies on the way in.
+func (g *Graph) Vector(id string) ([]float32, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	idx, ok := g.ids[id]
+	if !ok {
+		return nil, false
+	}
+	stored := g.nodes[idx].vector
+	out := make([]float32, len(stored))
+	copy(out, stored)
+	return out, true
+}
+
 // Stats describes how much of the graph is still worth carrying. It exists to
 // answer one question — "is it time to compact?" — without exposing the graph's
 // internals to whatever ends up deciding that.
