@@ -4,29 +4,60 @@ An embeddable **vector database in pure Go** — no CGO, no dependencies. Stores
 embeddings and answers *"what is most similar to this?"* using an HNSW
 approximate-nearest-neighbor index.
 
+[![CI](https://github.com/khambampati-subhash/govecdb/actions/workflows/ci.yml/badge.svg)](https://github.com/khambampati-subhash/govecdb/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/khambampati-subhash/govecdb.svg)](https://pkg.go.dev/github.com/khambampati-subhash/govecdb)
+[![Go Report Card](https://goreportcard.com/badge/github.com/khambampati-subhash/govecdb)](https://goreportcard.com/report/github.com/khambampati-subhash/govecdb)
 [![Go Version](https://img.shields.io/badge/go-1.24+-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> ## Status: the v1 rebuild is complete
->
-> GoVecDB was rewritten from the ground up. The previous implementation — ~45,700
-> lines covering clustering, gRPC, REST, segments and several competing index
-> variants — was removed from the working tree. It remains in git history and is
-> recoverable at any time.
->
-> **What exists today:** an importable database. `govecdb.Open` gives you add,
-> get, delete, search, **filter**, snapshot and compact over one directory,
-> durable through a write-ahead log and recoverable from snapshots. Underneath:
-> `internal/hnsw` (the index, with serialization), `internal/wal` (append-only log
-> with replay that truncates a torn tail), `internal/snapshot` (atomic checksummed
-> state keyed by log sequence), `internal/store` (metadata) and `internal/filter`
-> (the query engine over it).
->
-> **What is deliberately out of scope for v1:** clustering, REST/gRPC servers,
-> collections and quantization. Those are
-> [v2](docs/MIGRATION.md#v2-scope), along with online compaction and an
-> observability seam. See [durability and latency](docs/DURABILITY.md) for what is
-> guaranteed today, what it costs, and what is not guaranteed yet.
+```go
+db, _ := govecdb.Open("data", govecdb.WithDimension(768))
+defer db.Close()
+
+db.Add(govecdb.Vector{ID: "doc-1", Values: embedding})
+matches, _ := db.Search(govecdb.SearchRequest{Query: query, K: 10})
+```
+
+## Status
+
+**v1.0.0 — released and usable.** `govecdb.Open` gives you add, get, delete,
+search, filter, snapshot and compact over one directory, durable through a
+write-ahead log and recoverable from snapshots.
+
+GoVecDB was rewritten from the ground up; the previous ~45,700-line
+implementation remains in git history. See [the record](docs/MIGRATION.md) for
+what was built and why, and [the changelog](CHANGELOG.md) for what is in this
+release.
+
+### Stability and compatibility
+
+- **The public API is covered by semver.** Everything exported from the root
+  package is additive from here — a breaking change would force the import path
+  to `.../govecdb/v2`, which is not something to do casually.
+- **`internal/` is not part of that promise**, and cannot be imported from
+  outside the module. That is where the design still has room to move.
+- **The on-disk formats are versioned and frozen.** The WAL record header, the
+  snapshot framing, the graph codec and the metadata encoding each have a
+  `TestLayoutIsFrozen` guarding them, so a v1.x release will read a v1.0
+  directory.
+
+### Known limitations
+
+Worth knowing before you adopt it, rather than after:
+
+| | |
+|---|---|
+| **Linux and macOS only** | The log and snapshot store fsync the containing *directory*, which is not portable to Windows. Untested there. |
+| **`Compact()` stops the world** | It holds the write lock for a full rebuild. You choose the moment; the database never triggers it. |
+| **Writers serialize** | Reads scale across cores, writes do not. |
+| **One database is one index** | Collections are [v2](docs/MIGRATION.md#v2-scope). |
+| **No logger or metrics seam** | A torn log tail found during recovery is repaired correctly and reported to nobody. |
+| **Selective filters approach a scan** | Past roughly one vector in a hundred, scanning the metadata is the better tool. |
+
+Out of scope for v1 and planned for [v2](docs/MIGRATION.md#v2-scope): clustering,
+REST/gRPC servers, collections, quantization, online compaction, and that
+observability seam. See [durability and latency](docs/DURABILITY.md) for what is
+guaranteed today and what it costs.
 
 ## Install
 
