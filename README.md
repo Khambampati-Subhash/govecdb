@@ -22,27 +22,81 @@ approximate-nearest-neighbor index.
 > state keyed by log sequence), `internal/store` (metadata) and `internal/filter`
 > (the query engine over it).
 >
-> **What is deliberately out of scope for v1:** clustering, REST/gRPC servers and
-> quantization — they return in v2. Still owed: online (non-blocking) compaction,
-> a logger/metrics seam, and a crash harness that kills a process mid-write rather
-> than reproducing the damage shapes by hand. See
-> [the roadmap](docs/MIGRATION.md), and [durability and latency](docs/DURABILITY.md)
-> for what is guaranteed today, what it costs, and what is not guaranteed yet.
+> **What is deliberately out of scope for v1:** clustering, REST/gRPC servers,
+> collections and quantization. Those are
+> [v2](docs/MIGRATION.md#v2-scope), along with online compaction and an
+> observability seam. See [durability and latency](docs/DURABILITY.md) for what is
+> guaranteed today, what it costs, and what is not guaranteed yet.
+
+## Install
+
+Requires **Go 1.24+**.
+
+```bash
+go get github.com/khambampati-subhash/govecdb
+```
+
+That is the whole installation. There is no server to run, no CGO toolchain, and
+no third-party packages come with it — GoVecDB is a library that stores its data
+in a directory you choose.
 
 ## Quick start
 
+A complete program. Save it as `main.go`, `go mod tidy`, `go run .`:
+
 ```go
-db, err := govecdb.Open("data", govecdb.WithDimension(768))
-defer db.Close()
+package main
 
-db.Add(govecdb.Vector{
-    ID:       "doc-1",
-    Values:   embedding,
-    Metadata: govecdb.Metadata{"source": "handbook.pdf", "page": int64(12)},
-})
+import (
+	"fmt"
+	"log"
 
-matches, err := db.Search(govecdb.SearchRequest{Query: query, K: 10})
+	"github.com/khambampati-subhash/govecdb"
+)
+
+func main() {
+	// Creates ./data if it does not exist. Dimension is required — it is
+	// structural, and reopening with a different one is refused.
+	db, err := govecdb.Open("data", govecdb.WithDimension(4))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	// Metadata values must be string, bool, int64 or float64.
+	// Note int64(12), not 12 — an untyped constant is an int, and Add says so
+	// rather than guessing.
+	err = db.AddBatch([]govecdb.Vector{
+		{ID: "cat", Values: []float32{1, 0, 0, 0}, Metadata: govecdb.Metadata{"kind": "animal"}},
+		{ID: "dog", Values: []float32{0.9, 0.1, 0, 0}, Metadata: govecdb.Metadata{"kind": "animal"}},
+		{ID: "car", Values: []float32{0, 0, 1, 0}, Metadata: govecdb.Metadata{"kind": "vehicle"}},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	matches, err := db.Search(govecdb.SearchRequest{
+		Query: []float32{1, 0, 0, 0},
+		K:     2,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, m := range matches {
+		// Distance is "smaller = closer" whatever the metric.
+		fmt.Printf("%-4s  %.4f  %v\n", m.ID, m.Distance, m.Metadata)
+	}
+
+	// Bounds how long the next start takes. Without one, reopening replays the
+	// whole log; with one, it loads a graph.
+	if err := db.Snapshot(); err != nil {
+		log.Fatal(err)
+	}
+}
 ```
+
+Run it twice — the second run finds the data still there, because every write
+went to a write-ahead log before it reached the index.
 
 Searches can be restricted by metadata:
 
@@ -192,6 +246,79 @@ thing to implement yourself.
 | `EfConstruction` — search width during inserts | `Config` | Kept fixed (100–200) |
 | `Alpha` — pruning relaxation | `Config` | Fixed per graph; 1.0–1.4 useful, default 1.2 |
 | `ef` — search width at query time | `SearchRequest.Ef` | **Yes** — per query; auto-clamped to `>= k`. Grows with `N`, so leave it zero and it is chosen for you, [see the charts](#measured-behaviour) |
+
+### Configuration
+
+Everything is a functional option on `Open`. Only `WithDimension` is required.
+
+| Option | Default | Notes |
+|---|---|---|
+| `WithDimension(int)` | — | **Required.** Structural; reopening with a different one is refused. |
+| `WithMetric(Metric)` | `Cosine` | `Cosine`, `Euclidean`, `DotProduct`. Structural. |
+| `WithM(int)` | `16` | Neighbours per node. **Structural** — changing it needs a rebuild. |
+| `WithEfConstruction(int)` | `200` | Build-time search width. |
+| `WithSeed(int64)` | `1` | Makes index construction reproducible. |
+| `WithSyncPolicy(SyncPolicy)` | `SyncAlways` | `SyncAlways`, `SyncInterval`, `SyncNever`. |
+| `WithSyncInterval(time.Duration)` | `50ms` | Only meaningful under `SyncInterval`. |
+| `WithMaxSegmentBytes(int64)` | `64 MiB` | Log truncation granularity, not a size cap. |
+| `WithSnapshotInterval(time.Duration)` | off | Snapshot on a timer. Off means you call `Snapshot()`. |
+| `WithSnapshotsKept(int)` | `2` | Also decides how much log is kept — see below. |
+| `WithSearchTargetRecall(float64)` | `0.95` | What a zero `Ef` aims for. Treated as a floor. |
+| `WithLimits(id, k, ef, batch, mdKeys)` | `512, 10k, 100k, 10k, 256` | Per-call bounds. Configurable, not removable. |
+
+Three of these interact in a way worth stating plainly:
+
+- **`WithSnapshotsKept` is also the log-retention knob.** Truncation runs against
+  the *oldest retained* snapshot, never the newest, because keeping more than one
+  is what makes a corrupt one survivable — and that only works if the log still
+  reaches back far enough to replay on top of the older copy.
+- **`SyncAlways` is the zero value on purpose**, so a caller who configures
+  nothing gets the safe answer rather than the fast one. It costs ~4 ms per write
+  against ~692 ns for `SyncNever`.
+- **The fast policies do not survive a process crash either.** Records sit in a
+  64 KiB user-space buffer, so under `SyncInterval` or `SyncNever` an
+  acknowledged write may not have reached the kernel at all. See
+  [durability](docs/DURABILITY.md).
+
+## Project layout
+
+```
+govecdb/
+├── *.go                  ← the public API. This IS package govecdb.
+├── internal/
+│   ├── hnsw/             the index: graph, search, delete, compaction, codec
+│   ├── wal/              write-ahead log: writer, replay, truncation
+│   ├── snapshot/         atomic checksummed state keyed by log sequence
+│   ├── store/            metadata storage
+│   └── filter/           the metadata query engine
+└── docs/                 durability, roadmap, benchmarks, diagrams
+```
+
+**The `.go` files at the repository root are not loose files — they are the
+package you import.** Go resolves `github.com/khambampati-subhash/govecdb` to the
+module root, so moving them into a subdirectory would change the import path to
+`.../govecdb/pkg/govecdb`. A flat root package is the standard layout for a Go
+library whose main import path is the module path.
+
+One responsibility per file:
+
+| File | What it holds |
+|---|---|
+| `doc.go` | Package documentation — start here. |
+| `vector.go` | `Vector`, `SearchRequest`, `Match`, `Stats`. |
+| `filter.go` | `Filter` and its constructors. |
+| `db.go` | The `DB` facade and its lifecycle. |
+| `options.go` | `Open`'s functional options and defaults. |
+| `index.go` | The `Index` interface and the HNSW adapter. |
+| `validate.go` | The input boundary: what is checked, and the limits. |
+| `codec.go` | Domain encoding: log payloads and the snapshot payload. |
+| `recovery.go` | Rebuilding state on `Open`: snapshot first, then the log. |
+| `errors.go` | Sentinel errors to match with `errors.Is`. |
+
+Each `internal/` package has its own README explaining the decisions behind it —
+[`hnsw`](internal/hnsw/README.md), [`wal`](internal/wal/README.md),
+[`snapshot`](internal/snapshot/README.md), [`store`](internal/store/README.md),
+[`filter`](internal/filter/README.md).
 
 ## Measured performance
 
@@ -381,26 +508,63 @@ data being at fault. Clustered data, which is what real embeddings look like, is
 10. ~~**Metadata filtering**~~ — done; a query engine applied inside the traversal,
     so a filtered search still returns `K`
 
-Out of scope for v1 (returns in v2): clustering, REST/gRPC servers, quantization.
+**v1 is complete.** [v2 is scoped](docs/MIGRATION.md#v2-scope) in dependency
+order — an observability seam, online compaction, fine-grained write locking,
+collections, filter selectivity estimation, a quantized index, then REST/gRPC and
+clustering. The last two almost certainly land in a separate module: gRPC and
+Raft are not stdlib, and this one keeps its zero-dependency guarantee.
 
-Still owed, and tracked in [the roadmap](docs/MIGRATION.md): online compaction
-(`Compact` currently stops the world), finer-grained write locking, a
-logger/metrics seam, and a crash harness that `SIGKILL`s a process mid-write.
-
-## Development
+## Running the tests and benchmarks
 
 ```bash
-go build ./...
-go vet ./...
+go build ./... && go vet ./... && go test ./...
+```
+
+The race detector is the gate before merging anything:
+
+```bash
 go test ./... -race
 ```
+
+Per package, when you want the detail:
+
+```bash
+go test . -v                     # the public API
+go test ./internal/hnsw/ -v      # the index
+go test ./internal/wal/ -v       # the write-ahead log
+go test ./internal/snapshot/ -v  # point-in-time state
+go test ./internal/store/ -v     # metadata
+go test ./internal/filter/ -v    # the metadata query engine
+```
+
+Benchmarks, including the filter-selectivity and durability numbers quoted above:
 
 ```bash
 go test ./internal/hnsw/ -run='^$' -bench=. -benchmem
 ```
 
-Requires Go 1.24+. The module has **zero third-party dependencies** — `go.mod` has no
-`require` block, and there is no `go.sum`. Keep it that way.
+Regenerating the charts. The sweeps *are* the benchmark harness — the same code
+runs in CI asserting thresholds and, with `-results`, writes the CSV the charts
+are drawn from, so a README number and a CI threshold cannot disagree:
+
+```bash
+go test ./internal/hnsw/ -run TestSweep -results docs/benchmarks/results.csv -timeout 40m
+```
+
+```bash
+go run docs/benchmarks/plot.go
+```
+
+Two things that look like problems and are not. The sweeps **skip themselves
+under `-race`** — they are single-goroutine, so the detector observes nothing
+while costing ~10× and pushing the package past the default timeout; race
+coverage lives in the `TestConcurrent*` tests instead. And the crash harness
+(`internal/wal/crash_test.go`) re-executes the test binary as a child process and
+`SIGKILL`s it, so seeing a child appear and die during `go test ./internal/wal/`
+is the test working.
+
+Requires Go 1.24+. The module has **zero third-party dependencies** — `go.mod` has
+no `require` block, and there is no `go.sum`. Keep it that way.
 
 ## Contributing
 
