@@ -1,7 +1,11 @@
-# GoVecDB v1 — Clean Rebuild
+# GoVecDB — the v1 rebuild, and what v2 is scoped to
 
-> Branch: `main` · Same module path · Embeddable library only.
+> Branch: `main` · Same module path.
 > Gate: `go build ./... && go vet ./... && go test ./... -race` green after every step.
+>
+> **v1 is complete** — an embeddable library, no server, no cluster. The record of
+> how it was built is below, because the reasoning is the part worth keeping.
+> **[v2 scope starts here](#v2-scope).**
 
 ## What changed about the plan
 
@@ -57,19 +61,25 @@ chroma-go, onnxruntime, uuid. The module is now pure stdlib.
 
 ```
 govecdb/
-├── vector.go            # public API: Vector, SearchRequest, SearchResult
-├── db.go                # DB + Collection interfaces + facade
-├── options.go           # functional-options construction
-├── errors.go            # exported sentinel errors
+├── vector.go            # public API: Vector, SearchRequest, Match, Stats
+├── filter.go            # Filter and its constructors                 ✅ done
+├── db.go                # the DB facade                               ✅ done
+├── options.go           # functional-options construction             ✅ done
+├── errors.go            # exported sentinel errors                    ✅ done
 ├── internal/
-│   ├── hnsw/            # index engine — concurrent reads       ✅ done
-│   ├── wal/             # write-ahead log — writer + replay     ✅ done
-│   ├── snapshot/        # store + graph codec (in hnsw/)       ✅ done
-│   ├── store/           # metadata storage                      ✅ done
-│   ├── filter/          # metadata query engine                 ✅ done
-│   └── obs/             # Logger + Metrics interfaces, no-op defaults
+│   ├── hnsw/            # index engine — concurrent reads             ✅ done
+│   ├── wal/             # write-ahead log — writer + replay + truncate ✅ done
+│   ├── snapshot/        # store + graph codec (in hnsw/)              ✅ done
+│   ├── store/           # metadata storage                            ✅ done
+│   ├── filter/          # metadata query engine                       ✅ done
+│   └── obs/             # Logger + Metrics interfaces, no-op defaults  ⬜ v2
 └── docs/
 ```
+
+`internal/obs` is the only box still empty, and it is [v2 item 1](#1-the-observability-seam).
+Note what is *not* here: no `collection/`, no `api/`, no `cluster/`. Those are
+v2, and they are layers above this rather than changes to it — which is what made
+cutting them from v1 clean rather than costly.
 
 ## Where this stands
 
@@ -95,16 +105,150 @@ All three things that were blocked on step 10 landed with it:
 - **WAL truncation** — `wal.Truncate`, run after every snapshot against the
   oldest retained snapshot's sequence. The log no longer grows forever. ✅
 
-**The durability story is complete, and so is the feature scope for v1.** What
-remains is not a gap in what the database does — it is the deferred work listed
-below: online compaction, finer write locking, an observability seam, and a crash
-harness that kills a process mid-write rather than reproducing the shapes by
-hand.
+**The durability story is complete, and so is the feature scope for v1.** The
+crash harness landed too — `internal/wal/crash_test.go` `SIGKILL`s a child
+mid-write and asserts every acknowledged record survives — so what remains is not
+a gap in what the database does or in what proves it. It is [v2](#v2-scope).
 
 `TypeCheckpoint` stays reserved and unwritten, and that is now a decision rather
 than a gap: truncation reads the snapshot directory, which is the authority on
 what is actually recoverable, and a log record duplicating that could disagree
 with it. The constant remains so the numbering is not rearranged later.
+
+---
+
+## v2 scope
+
+v1 deliberately shipped one thing: a database you import. Everything below either
+was cut to get there, or became worth doing only once there was something to
+operate.
+
+The order is a dependency order, not a priority list. Each item says what blocks
+it, because several of these look independent and are not.
+
+| | Item | Blocked on |
+|---|---|---|
+| 1 | `internal/obs` — Logger + Metrics seam | nothing |
+| 2 | Online (non-blocking) compaction | 1, for the same reason everything wants 1 |
+| 3 | Fine-grained write locking | 2 |
+| 4 | Collections / namespaces | nothing, but wants 1 |
+| 5 | Filter selectivity estimation | 4 is unrelated; needs store statistics |
+| 6 | Quantized index | nothing — the `Index` interface was built for it |
+| 7 | REST / gRPC server | 4 |
+| 8 | Clustering and replication | 7 |
+
+### 1. The observability seam
+
+The first thing, because it is the thing every other item needs and the one gap
+that is currently *silent*. Today a torn log tail found during recovery is
+repaired correctly and reported to nobody; a truncation skipped because a
+snapshot failed verification says nothing about why. Both are exactly the events
+an operator needs to see, and both currently reach a `_`.
+
+`Logger` and `Metrics` as interfaces with no-op defaults, injected through the
+existing functional options. Deliberately **not** `log/slog` in the signatures:
+the module has no third-party dependencies and should not acquire an opinion
+about logging, and a no-op default keeps the zero value useful.
+
+The design constraint that makes this non-trivial: the events worth reporting
+happen inside `internal/`, which cannot name a root-package type. So the seam is
+defined in `internal/obs` and adapted at the root, the same shape `Index` already
+uses.
+
+### 2. Online compaction
+
+`Compact()` stops the world — it holds the write lock for a full index rebuild,
+2.6 s per 5k×128 vectors at a 25% dead ratio. That is acceptable for a library
+where the caller picks the moment, and not acceptable for a server where nobody
+can.
+
+Building the replacement outside the lock means writes landing in the old graph
+while the new one is built, and reconciling them wants a change log and a
+double-buffered swap. The WAL should shape that, since it is already recording
+exactly those writes — which is why this was deferred rather than attempted in v1.
+
+### 3. Fine-grained write locking
+
+Concurrent writers currently serialize: one `RWMutex` over the whole graph. HNSW
+inserts mutate neighbour lists several hops from the new node, so there is no
+obvious small region to lock instead.
+
+It follows online compaction rather than leading it, because the WAL's ordering
+constraint — write to the log, then apply — decides what a finer lock is allowed
+to do, and the double-buffered swap decides what it must not break.
+
+### 4. Collections / namespaces
+
+One database is one index. Many workloads want many independent indexes in one
+process, with load-on-demand and idle eviction so an idle collection costs no
+memory.
+
+This sits *above* `DB` rather than changing it, which is why it was cut cleanly
+from v1 and why it is not a rewrite. The parts that need thought are lifecycle,
+not indexing: one directory per collection, the one-writer-per-directory rule
+already enforced by `openDirs`, and eviction that cannot race a search.
+
+### 5. Filter selectivity estimation
+
+Measured, a filter admitting fewer than about one vector in a hundred makes the
+graph the wrong tool — a scan over the metadata, distance-checking only what
+matches, beats a traversal that is visiting most of the graph anyway. Today that
+is documented and left to the caller.
+
+Deciding it automatically needs statistics over the metadata store: per-key
+cardinality, and enough of a distribution to estimate a predicate's selectivity
+before running it. That is a bigger thing than the filter itself, and it is the
+point at which this stops being a filter and starts being a query planner.
+
+### 6. Quantized index
+
+`Index` is an interface stated in the root package's own types precisely so that
+a flat brute-force index for small corpora, or a scalar/product-quantized one for
+large ones, is a *different implementation* rather than a different database.
+Nothing about this needs the interface to change.
+
+Product quantization trades recall for memory — the graph currently holds full
+float32 vectors, which is the dominant cost at scale. The measurement harness
+already reports recall against brute-force ground truth, so the trade is
+measurable on day one rather than argued about.
+
+### 7. REST / gRPC server
+
+Returns from git history rather than from scratch: `api/`, `proto/` and `client/`
+all exist on `main` before the clean-slate commit. They should be rewritten to
+the current bar rather than restored — the note in *Deleted (recoverable)* above
+applies to them as much as to the index.
+
+It follows collections because a server with exactly one index is not a useful
+server, and because the collection lifecycle decides what the API's resource
+model looks like.
+
+**This is where the dependency rule gets its first real test.** A server needs
+HTTP and probably gRPC, and the module has no third-party dependencies today.
+`net/http` is stdlib; gRPC is not. The likely answer is that the server lives in
+a *separate module* so the library stays stdlib-only, and that decision should be
+made before code is written rather than discovered afterwards.
+
+### 8. Clustering and replication
+
+The largest item and the last, for the obvious reason. Raft was in the legacy
+tree and is not stdlib, so item 7's module decision governs this one too.
+
+The useful observation is that the WAL is already the replication stream: it is
+an ordered, checksummed, sequence-numbered record of every state change, which is
+exactly what a follower needs to apply. Replication should be built on `Replay`
+and the existing record format rather than beside them — and if that turns out to
+require changing the record format, doing it *before* v2 ships is much cheaper
+than after.
+
+### Out of scope for v2 as well
+
+- **Cross-process locking.** Still deliberate. A lock file left behind by a crash
+  blocks a restart that should have succeeded, and the in-process `openDirs`
+  check already catches the case worth catching.
+- **Point-in-time recovery and audit.** Time-based log retention serves those,
+  and truncation-to-snapshot serves recovery. They are different features and
+  only the second is needed.
 
 ## Ordered execution (each = one green-gated commit)
 
@@ -142,13 +286,14 @@ with it. The constant remains so the numbering is not rearranged later.
 
 ### Deferred on purpose, not overlooked
 
-- **Online compaction.** `Compact()` holds the write lock for a full index build:
-  2.6 s per 5k×128 vectors at a 25% dead ratio. Building the replacement outside
-  the lock means writes landing in the old graph while the new one is built, and
-  reconciling them wants a change log and a double-buffered swap — both of which
-  the WAL should shape first, since it will already be recording those writes.
-- **Fine-grained write locking**, for the same reason: the WAL's ordering
-  constraint decides what a finer lock is allowed to do.
+Both of these were decided during v1 and are now [v2 items 2 and 3](#2-online-compaction):
+**online compaction**, because `Compact()` holds the write lock for a full
+rebuild and doing it outside the lock wants a change log the WAL should shape
+first; and **fine-grained write locking**, for the same reason — the WAL's
+ordering constraint decides what a finer lock is allowed to do.
+
+They are recorded here as well because the reasoning is a v1 finding: neither was
+an oversight, and neither should be attempted without the WAL work in front of it.
 
 ## Phase — WAL (done)
 
@@ -196,8 +341,13 @@ building it:
 Same bar as the index: small single-responsibility files, comments that explain
 *why*, and tests that verify crash recovery rather than assuming it. The tear
 tests damage a log by truncating and rewriting it, which reproduces the shapes
-power loss leaves behind; the harness that `SIGKILL`s a child mid-write to
-reproduce the *timing* is still outstanding.
+power loss leaves behind. The harness that reproduces the *timing* now exists
+too: `crash_test.go` re-executes the test binary, lets the child acknowledge
+appends under `SyncAlways`, `SIGKILL`s it, and asserts every acknowledged record
+survives. It reports zero torn segments reliably — under `SyncAlways` the bytes
+reach the file before fsync, so the wide window is one where the log already ends
+at a record boundary. The two approaches cover different things and neither
+replaces the other.
 
 ## Phase — Snapshot (done)
 
@@ -376,18 +526,47 @@ Decided while building it:
 
 ## SOLID / patterns
 
+As built, rather than as planned — two of these ended up narrower than the
+original sketch, and the narrowing is the interesting part.
+
 - **SRP** — one package = one responsibility.
-- **DIP** — `DB`/`Collection` depend on `Index`, `Store`, `WAL`, `Snapshotter`,
-  `DistanceFunc`, `Logger` interfaces; concrete impls injected.
-- **OCP / Strategy** — distance metric, index type, persistence pluggable.
-- **Factory + Functional Options** — `govecdb.Open(cfg, WithWAL(dir), WithMetric(...))`.
-- **ISP / Liskov** — small interfaces so a flat index and HNSW are interchangeable.
+- **DIP** — `DB` depends on `Index`, `Store`, `WAL` and `Filter` as interfaces,
+  with concretes injected. `Snapshotter` and `Logger` were in the sketch and are
+  **not** here: the first had an implementation and no consumer, the second is
+  [v2 item 1](#1-the-observability-seam). An interface written before its caller
+  is a guess.
+- **OCP / Strategy** — distance metric, index type and persistence are
+  pluggable. `Index` is stated in the root package's own types precisely so a
+  quantized index is a different implementation and not a different database.
+- **ISP** — serialization is deliberately *off* `Index`: an index that cannot
+  write itself out is still a usable index, so `Snapshot` asks for the capability
+  with a type assertion instead of widening the interface for everyone.
+- **Factory + Functional Options** — `govecdb.Open(dir, WithDimension(768),
+  WithMetric(...))`. Note there is no `WithWAL(dir)`: the log lives in a
+  subdirectory of the database directory, because two directories to configure is
+  two directories to get out of sync.
 
 ## Risks
 
-- **Recall regression** — the baseline is locked in `graph_test.go` (0.999 @ dim 32,
-  0.972 @ dim 768). Any index change must keep those numbers.
-- **Allocation regression** — search is 2 allocs/op; `-benchmem` guards it. The
-  scratch pool must keep it there: allocating a `searchState` per search would
-  undo the whole zero-allocation path.
+**Carried from v1, still guarded:**
+
+- **Recall regression** — the baselines are locked (0.999 @ dim 32, 0.972 @ dim
+  768) and asserted against brute force. Any index change must keep them.
+- **Allocation regression** — search is 2 allocs/op, including under a filter;
+  `-benchmem` guards both. The scratch pool must keep it there, and
+  `store.Match` must keep not copying.
 - Every step is a separate commit and reverts cleanly.
+
+**New with v2:**
+
+- **The dependency rule is the one most likely to break.** The module has no
+  third-party dependencies and that is a design goal, not an accident. gRPC and
+  Raft are not stdlib. Decide the multi-module split *before* writing item 7,
+  because retrofitting one after a server exists means moving every import path.
+- **The record format is now load-bearing for two things.** Replication (item 8)
+  wants to be built on `Replay` and the existing records. If it turns out to need
+  a format change, that change is far cheaper before v2 ships than after — the
+  frozen-layout tests will say so loudly, which is what they are for.
+- **Online compaction is the one item that can corrupt data**, rather than merely
+  fail. It swaps a live graph while writes are landing; everything else on the v2
+  list is additive.

@@ -13,19 +13,32 @@ Module path: `github.com/khambampati-subhash/govecdb` · Go 1.24+ (built with 1.
 **Zero third-party dependencies** — `go.mod` has no `require` block and there is no
 `go.sum`. Do not add a dependency without asking; stdlib-only is a design goal.
 
-## Current effort: v1 rebuild (active)
+## Where the project is: v1 complete, v2 scoped
 
-Work lands on **`main`**. Strategy: **rebuild from scratch, one subsystem at a
-time**, using the old implementation as a reference in git history rather than as a
-source to copy. Read `docs/MIGRATION.md` before making structural changes — it has
-the current state, the ordered steps, and the WAL design constraints.
+Work lands on **`main`**. v1 was a **rebuild from scratch, one subsystem at a
+time**, using the old implementation as a reference in git history rather than as
+a source to copy — and it is **done**: an embeddable library with durability,
+recovery and metadata filtering.
+
+Read `docs/MIGRATION.md` before making structural changes. It now holds both the
+v1 record (why each subsystem is shaped the way it is) and **the v2 scope**, in
+dependency order: observability seam → online compaction → fine-grained write
+locking → collections → selectivity estimation → quantized index → REST/gRPC →
+clustering. Do not start one of those without reading what blocks it; several
+look independent and are not.
+
 `docs/DURABILITY.md` is the companion: what survives which failure, what each
 guarantee costs, and every latency number in one place. **Update it when you
 change a durability guarantee or move a benchmark** — it is the document a user
-would be misled by if it went stale.
+would be misled by if it went stale. `docs/PLAN.md` and `docs/PLAN_PROGRESS.md`
+are the original plan and its execution log.
 
-Scope for v1: **embeddable library only** (no cluster / REST server / gRPC — those
-stay in `main` history and return in v2).
+**Two v2 constraints worth knowing before writing any of it:** the module has
+**zero third-party dependencies** and gRPC and Raft are not stdlib, so a server
+or a cluster almost certainly means a *separate module* — decide that before
+writing code, not after. And replication should be built on the WAL's existing
+`Replay` and record format; if it needs a format change, making it before v2
+ships is far cheaper than after.
 
 ### The codebase is the root package plus `internal/`
 The root package (`db.go`, `vector.go`, `filter.go`, `options.go`, `validate.go`,
