@@ -103,7 +103,9 @@ func (g *Graph) insertPrepared(id string, vec []float32) {
 	// Phase 2: from min(maxLevel, level) down to 0, find neighbors and connect.
 	start := min(level, g.maxLevel)
 	for lc := start; lc >= 0; lc-- {
-		w := g.searchLayer(st, vec, cur, g.cfg.EfConstruction, lc)
+		// nil: a build never filters. The graph's shape has to be the same
+		// whatever queries later run against it.
+		w := g.searchLayer(st, vec, cur, g.cfg.EfConstruction, lc, nil)
 		neighbors := g.selectNeighbors(st, w, g.maxConn(lc))
 
 		// searchLayer yields live nodes only, so inserting into a region whose
