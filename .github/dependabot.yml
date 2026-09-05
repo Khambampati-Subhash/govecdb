@@ -1,0 +1,18 @@
+version: 2
+
+updates:
+  # GitHub Actions only. There is deliberately no `gomod` entry: the module has
+  # no third-party dependencies, so there is nothing for Dependabot to bump —
+  # and if that ever changes, the CI job asserting go.mod has no require block
+  # is the thing that should fail first.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies

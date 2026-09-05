@@ -1,0 +1,192 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  # So a dependency-free module still notices a toolchain regression rather than
+  # finding out on the next push, which might be months away.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The module has no third-party dependencies and must keep it that way, so
+  # nothing here should ever need the network at build time.
+  GOFLAGS: -mod=readonly
+
+jobs:
+  build:
+    name: build & test (go ${{ matrix.go }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported and current. Windows is deliberately absent — see the
+        # note in README's Project layout: the WAL and snapshot store fsync the
+        # containing *directory*, which is not a portable operation there. It is
+        # an open item rather than a silent gap.
+        go: ["1.24.x", "1.25.x"]
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+
+      - name: go.mod has no dependencies
+        shell: bash
+        run: |
+          # The zero-dependency guarantee is a design goal, so it is a test.
+          if grep -qE '^\s*require' go.mod; then
+            echo "::error file=go.mod::go.mod gained a require block; the module is meant to be stdlib-only"
+            exit 1
+          fi
+          if [ -f go.sum ]; then
+            echo "::error::go.sum exists; the module is meant to be stdlib-only"
+            exit 1
+          fi
+
+      - run: go build ./...
+
+      - run: go vet ./...
+
+      - name: go test
+        run: go test ./... -timeout 20m
+
+  race:
+    name: race detector (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          check-latest: true
+
+      # The gate before merging. Generous timeout on purpose: the detector costs
+      # roughly 10x, and a CI runner is slower than a developer laptop, so the
+      # default 10m per package is not enough for internal/hnsw.
+      #
+      # The recall sweeps skip themselves under -race (they are single-goroutine,
+      # so the detector observes nothing while costing the whole budget).
+      # Concurrency coverage lives in the TestConcurrent* tests.
+      - name: go test -race
+        run: go test ./... -race -timeout 40m
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt'd:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      # Pinned rather than @latest: a linter that changes under you turns an
+      # unrelated PR red. Run via `go run`, which does not touch go.mod, so the
+      # zero-dependency guarantee survives having a linter.
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          check-latest: true
+
+      - name: go test -cover
+        run: go test ./... -coverprofile=coverage.out -covermode=atomic -timeout 20m
+
+      # Reported, not gated. A coverage threshold measures how much code a test
+      # touched, not whether it checked anything, and gating on it reliably
+      # produces tests written to move the number.
+      - name: summarise
+        run: |
+          {
+            echo "### Coverage"
+            echo
+            echo '```'
+            go tool cover -func=coverage.out | tail -20
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 14
+
+  examples:
+    name: README quick start actually runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          check-latest: true
+
+      # A README example that does not compile is worse than no example, and it
+      # rots silently because nothing builds it. This extracts the quick start
+      # from the README verbatim and runs it twice — the second run is the
+      # persistence claim the README makes.
+      - name: extract and run
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/quickstart
+          awk '/^A complete program\./{f=1} f&&/^```go$/{c=1;next} c&&/^```$/{exit} c{print}' \
+            README.md > /tmp/quickstart/main.go
+          if [ ! -s /tmp/quickstart/main.go ]; then
+            echo "::error file=README.md::could not extract the quick-start program from the README"
+            exit 1
+          fi
+          cd /tmp/quickstart
+          cat > go.mod <<EOF
+          module quickstart
+
+          go 1.24
+
+          require github.com/khambampati-subhash/govecdb v0.0.0
+
+          replace github.com/khambampati-subhash/govecdb => $GITHUB_WORKSPACE
+          EOF
+          GOFLAGS= go mod tidy
+          echo "--- first run"
+          go run .
+          echo "--- second run (data must survive)"
+          go run .
