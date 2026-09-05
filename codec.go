@@ -26,16 +26,10 @@ import (
 // Metadata is encoded by internal/store, which owns that format because it owns
 // the closed set of types that makes it safe to decode.
 
-const (
-	// recordVersion is bumped when a payload layout changes incompatibly. It is
-	// per-record rather than per-file so a future format can be introduced
-	// without rewriting logs that already exist.
-	recordVersion uint8 = 1
-
-	recordVersionSize = 1
-	recordIDLenSize   = 2
-	recordDimSize     = 4
-)
+// recordVersion is bumped when a payload layout changes incompatibly. It is
+// per-record rather than per-file so a future format can be introduced without
+// rewriting logs that already exist.
+const recordVersion uint8 = 1
 
 var byteOrder = binary.LittleEndian
 
