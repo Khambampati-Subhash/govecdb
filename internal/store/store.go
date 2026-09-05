@@ -50,6 +50,10 @@ type Store interface {
 	// Get returns the metadata for id and whether there was any.
 	Get(id string) (Metadata, bool)
 
+	// Match evaluates pred against id's metadata and returns its answer. An id
+	// with no metadata is passed a nil map rather than skipped.
+	Match(id string, pred func(Metadata) bool) bool
+
 	// Delete removes id's metadata, reporting whether there was any.
 	Delete(id string) bool
 
@@ -110,6 +114,24 @@ func (s *Map) Get(id string) (Metadata, bool) {
 	cp := make(Metadata, len(md))
 	maps.Copy(cp, md)
 	return cp, true
+}
+
+// Match evaluates pred against the metadata under id without copying it.
+//
+// Get copies because a caller keeps what it is given. This one does not, and the
+// difference is the reason it exists: it is called once per candidate node
+// inside a search, and copying a map per candidate would cost more than the
+// distance arithmetic the search is actually there to do. The price is that pred
+// runs under the read lock and borrows a map it must not retain or mutate —
+// which is a contract a predicate can keep, unlike an arbitrary caller.
+//
+// An id with no metadata is passed a nil map rather than being skipped. "Has no
+// metadata" is a thing a filter can legitimately ask about, and a nil map reads
+// as empty for every operation a predicate performs on one.
+func (s *Map) Match(id string, pred func(Metadata) bool) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return pred(s.m[id])
 }
 
 func (s *Map) Delete(id string) bool {
