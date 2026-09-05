@@ -1,6 +1,6 @@
 # v1 Progress
 
-Execution log for [`Plan.md`](Plan.md). One entry per task: what shipped, why it
+Execution log for [`PLAN.md`](PLAN.md). One entry per task: what shipped, why it
 was built that way, and what it measured. Tasks are only marked done when
 `go build ./... && go vet ./... && go test ./... -race` is green.
 
@@ -22,28 +22,42 @@ was built that way, and what it measured. Tasks are only marked done when
 | # | Task | Status |
 |---|------|--------|
 | 5 | Versioned record format + append-only writer with segment rotation | ✅ |
-| 6 | Reader that validates every CRC and truncates the torn tail | ⬜ |
-| 7 | Write-failure policy decided once, at the WAL boundary | ⬜ |
-| 8 | Checkpoint serializer: temp file → fsync → atomic rename | ⬜ |
-| 9 | Recovery: newest valid snapshot → replay above its seq → open for writes | ⬜ |
-| 10 | Background flusher with an fsync policy knob + checkpoint scheduler | ⬜ |
-| 11 | Crash harness: `SIGKILL` mid-write, reopen, assert the surviving prefix | ⬜ |
+| 6 | Reader that validates every CRC and truncates the torn tail | ✅ |
+| 7 | Write-failure policy decided once, at the WAL boundary | ✅ |
+| 8 | Checkpoint serializer: temp file → fsync → atomic rename | ✅ |
+| 9 | Recovery: newest valid snapshot → replay above its seq → open for writes | ✅ |
+| 10 | Background flusher with an fsync policy knob + checkpoint scheduler | ✅ |
+| 11 | Crash harness: `SIGKILL` mid-write, reopen, assert the surviving prefix | ✅ |
 
 ## C · Make it a library
 
 | # | Task | Status |
 |---|------|--------|
-| 12 | Payload/metadata store so an id carries more than a vector | ⬜ |
-| 13 | Collections/namespaces with load-on-demand and idle eviction | ⬜ |
-| 14 | `Index` / `Store` / `WAL` interfaces + the public facade | ⬜ (stub early — see the sequencing warning in `Plan.md`) |
-| 15 | `Close()` — flush, final fsync, optional checkpoint | ⬜ |
-| 16 | Examples + README rewritten against the real API | ⬜ |
+| 12 | Payload/metadata store so an id carries more than a vector | ✅ |
+| 13 | Collections/namespaces with load-on-demand and idle eviction | ⬜ **deferred to v2** |
+| 14 | `Index` / `Store` / `WAL` interfaces + the public facade | ✅ |
+| 15 | `Close()` — flush, final fsync, optional checkpoint | ✅ |
+| 16 | Examples + README rewritten against the real API | ✅ |
+
+## D · Added after the plan was written
+
+| # | Task | Status |
+|---|------|--------|
+| 17 | Log truncation: delete segments the retained snapshots make redundant | ✅ |
+| 18 | Metadata filtering — a query engine applied inside the traversal | ✅ |
+
+**15 of 16 planned tasks are done, plus two the plan did not anticipate.** The
+one open item is 13, and it is deferred rather than pending: collections are a
+layer *above* one database rather than a change to it, and v1 is scoped to the
+embeddable library. See [MIGRATION.md](MIGRATION.md) for what else is
+deliberately deferred — online compaction, finer write locking, and an
+observability seam.
 
 ---
 
 ## Task 1 — Concurrent reads ✅
 
-*Plan.md A.1: move the scratch off `Graph` into a pooled `searchState`, then
+*PLAN.md A.1: move the scratch off `Graph` into a pooled `searchState`, then
 guard the graph with an `RWMutex` and re-baseline the benchmarks.*
 
 ### The problem
@@ -164,7 +178,7 @@ the serial path.
 
 ## Task 2 — Tombstone `Delete` ✅
 
-*Plan.md A.2: tombstone-based `Delete` that keeps slot indices stable, keeps
+*PLAN.md A.2: tombstone-based `Delete` that keeps slot indices stable, keeps
 traversing through dead nodes while filtering them out of results, and re-elects
 the entry point when the entry node itself is deleted.*
 
@@ -356,7 +370,7 @@ Allocations stay at 2/op throughout: tombstones cost time, not memory churn.
 
 ## Task 3 — Upsert semantics ✅
 
-*Plan.md A.3: give `Insert` real upsert semantics so a duplicate id replaces
+*PLAN.md A.3: give `Insert` real upsert semantics so a duplicate id replaces
 instead of silently no-opping, fixing the operation set before the WAL format
 freezes.*
 
@@ -502,7 +516,7 @@ identical to a graph that was built that way from the start.
 
 ## Task 4 — Compaction ✅
 
-*Plan.md A.4: add a compaction pass that rebuilds the graph once tombstones cross
+*PLAN.md A.4: add a compaction pass that rebuilds the graph once tombstones cross
 a threshold, since tombstoned slots never release memory on their own.*
 
 ### What it does
@@ -642,7 +656,7 @@ the rebuild — at that ratio tombstones were costing time, not accuracy.
 All four tasks are done: pooled scratch and concurrent reads, tombstone deletes,
 upsert, compaction. The operation set is now closed — PUT and DELETE, with
 compaction as a physical-layout operation that logs nothing — which is exactly
-the precondition Plan.md set before freezing a record format.
+the precondition PLAN.md set before freezing a record format.
 
 ## Interlude — test depth and a measurement harness
 
@@ -783,7 +797,7 @@ at a median.
 
 ## Task 5 — WAL record format and writer ✅
 
-*Plan.md B.5: define the versioned record — `magic|version` file header, then
+*PLAN.md B.5: define the versioned record — `magic|version` file header, then
 `crc32 | type | seq | len | payload` per entry — and write the append-only writer
 with segment rotation built in from the first commit.*
 
@@ -888,8 +902,291 @@ a writer nobody can read back is a writer nobody has verified.
 
 ---
 
-## Next: Task 6 — the reader, and torn-tail truncation
+## Tasks 6–10 — recovery, snapshots and the fsync knob ✅
 
-Validate every CRC, stop at the first bad record, and truncate the torn tail
-rather than failing recovery — because a partial final record is the *normal*
-outcome of power loss, not an exceptional one.
+Entries below are shorter than the four above by design. The full reasoning for
+each of these was written down as it was built, in the place a reader would
+actually look for it: [`internal/wal/README.md`](../internal/wal/README.md),
+[`internal/snapshot/README.md`](../internal/snapshot/README.md), and the phase
+sections of [MIGRATION.md](MIGRATION.md). Repeating it here would create a second
+copy to keep in sync, and the first thing to rot is the copy nobody reads.
+
+**Task 6 — `Replay`, and torn-tail truncation.** A CRC-validating scan that stops
+at the first bad record, truncates the tail, and carries the sequence forward.
+
+Two things settled while writing it, both of which changed the design:
+
+- **`Replay` is a package-level function over a directory, not a method on
+  `WAL`.** Recovery runs *before* a writer exists, so a method would have meant
+  opening a writer in order to read — creating a segment as a side effect of
+  recovery. The interface had carried a `Replay` method as a promise until the
+  implementation showed it did not belong there.
+- **A tear ends a segment, not the replay.** `Open` always starts a new segment,
+  so a second crash leaves a torn tail in the *middle* of the directory.
+  Refusing to read past it would make recovery impossible from the shape the
+  writer is designed to produce.
+
+Truncation is logical: the damaged bytes stay on disk. Recovery is a read, and
+rewriting the file would destroy the only evidence a crash happened.
+
+Measured: 358 ns/record, 5.8 GB/s, **0 allocs per record** — the ~16 allocations
+are per *segment*. That is bought by a contract worth knowing: replayed payloads
+alias a reused buffer and are valid only during the callback.
+
+**Task 7 — the write-failure policy.** Decided once, and in two halves. The WAL
+makes failure **sticky**: the first write error ends the `Writer` and every later
+call returns it, because appending over a hole is how a durability bug becomes
+silent data loss. What that *means* for a database was explicitly deferred
+upward, and the public API is that layer: a failed append makes the DB
+permanently `ErrReadOnly`, reads keep working, and the condition is not
+recoverable in place.
+
+**Task 8 — the snapshot store.** `internal/snapshot`: atomic writes (temp →
+fsync → rename → **fsync the directory**), versioned and checksummed framing
+keyed by the WAL sequence it covers, discovery, corruption fallback, retention.
+
+The decisions that mattered: **atomicity comes from the rename, not the
+checksum**, which lets the checksum mean the narrower and more useful thing —
+bit rot rather than an interrupted write. The **checksum lives in a trailer**
+because the payload is streamed and a snapshot is gigabytes. And **nothing
+unverified reaches the caller**: verification is a separate pass, costing +38%
+(14.5 ms against 10.5 at 64 MiB) because the second pass reads the page cache at
+18.2 GB/s.
+
+The plan called this a "checkpoint serializer that dumps in-memory state". What
+it actually became is a store with an **opaque payload** — it moves bytes durably
+and knows nothing about vectors, which is what keeps it testable without an index
+and puts the format boundary somewhere defensible.
+
+**Task 9 — recovery.** `Open` loads the newest snapshot that passes its checksum,
+falls back to an older one if it does not, and replays the log records above its
+sequence.
+
+The graph-versus-vectors question was settled by measurement before a line was
+written: replay reads a log at 358 ns/record but *applying* a record costs
+~703 µs, so reading is 0.05% of recovery and the rebuild is all of it. For 1M ×
+128 that is ~0.37 s to verify and decode a serialized graph against ~703 s to
+rebuild one — about **1,900×**. So a snapshot holds a graph, and
+`internal/hnsw/codec.go` is what puts one on disk.
+
+Recovery skips records at or below the snapshot's sequence. Replaying everything
+would be simpler and wrong: re-applying a PUT that replaced a vector tombstones a
+slot on *every* start.
+
+**Task 10 — the fsync knob and the snapshot scheduler.** `SyncAlways` /
+`SyncInterval` / `SyncNever`, with the zero value being `SyncAlways` — safe by
+omission. Measured at **4.04 ms/append against 692 ns**, about 5,800×.
+
+One claim was corrected rather than carried forward: the fast policies do **not**
+survive a process crash either. Records sit in a 64 KiB *user-space* buffer, so
+under `SyncInterval` or `SyncNever` an acknowledged write may not have reached
+the kernel at all. An earlier draft of the docs said `SyncNever` "reached the
+OS"; it does not, until the buffer fills.
+
+---
+
+## Task 11 — the crash harness ✅
+
+*PLAN.md B.11: `SIGKILL` a child mid-write, reopen, and assert the surviving
+prefix is exactly consistent — "the highest-value test here".*
+
+`internal/wal/crash_test.go`. A parent test re-executes the test binary as a
+child, the child appends under `SyncAlways` and prints a line **after each
+`Append` returns**, and the parent kills it once it has read enough of them.
+
+**Why the acknowledgement line is the whole design.** Under `SyncAlways`,
+`Append` returns only after fsync, so a line the parent has read is a record the
+log has already committed to. That makes the assertion the durability contract
+stated exactly — *every acknowledged record must be readable after the kill* —
+rather than a guess about how far the child got. Records written after the last
+line read are unconstrained, and either outcome is correct.
+
+`SIGKILL` specifically: it cannot be caught, blocked or handled, so no deferred
+`Close` runs and nothing is flushed on the way out. A clean shutdown would prove
+nothing about power loss.
+
+`MaxSegmentBytes` is set to 256 — a rotation every 7 records — so the crash lands
+in a directory that already has several segments. The dangerous shape is damage
+in the *middle* of a multi-segment log, and a single-segment test cannot produce
+it. A first version used 1024 and quietly never rotated at all; the log line
+reporting segment count is what caught it.
+
+A second test closes the other half of the contract, and it is the one a crash
+makes tempting to forget: after recovering from a torn log the writer must reopen
+at `NextSeq()`, or it reuses sequence numbers that already exist on disk.
+
+**What it measured, which was not what was expected.** It reliably reports
+**zero torn segments**. That is a finding rather than a weak test: under
+`SyncAlways` the record's bytes reach the file *before* fsync is called, so the
+wide window — the milliseconds spent inside fsync — is one where the log already
+ends at a record boundary. Tearing needs the kill to land inside the `write`
+itself, a far narrower target.
+
+So the two halves of recovery testing divide cleanly, and the harness did not
+make the existing tests redundant: torn tails stay covered **deterministically**
+in `replay_test.go` by damaging a log directly, and this covers the one thing
+that cannot be simulated — real timing, with no cleanup on the way out.
+
+---
+
+## Tasks 12, 14, 15 — the store, the facade, and `Close` ✅
+
+**Task 12 — `internal/store`.** Metadata *only*, not whole records. A store that
+owned id + values + metadata would mean two copies of every vector in memory, and
+vectors are the largest thing the process holds: a million 768-dimension
+embeddings is 3 GB per copy. So values live once, in the index.
+
+The cost is real and is written down rather than hidden: for a normalizing metric
+the index keeps the *unit* vector, so the magnitude a caller passed in is not
+recoverable. A cosine index is already a statement that magnitude is not
+meaningful, which is what makes the trade defensible rather than merely cheap.
+
+Metadata values are a closed set of `string`/`bool`/`int64`/`float64`. Decoding
+metadata is the one place where untrusted bytes become live objects, and a
+reflection-based decoder — `gob`, or anything reconstructing types from names on
+the wire — is a far larger surface than filtering needs.
+
+**Task 14 — the interfaces and the facade.** `db.go`, `vector.go`, `options.go`,
+`index.go`, `codec.go`, `recovery.go`, `validate.go`, `errors.go`.
+
+The sequencing warning in PLAN.md said not to leave this to the end. It was left
+to the end, and the warning was half right: nothing failed to compose, but two
+decisions would have been cheaper to discover early —
+
+- **No internal type may appear in an exported signature.** `internal/` cannot be
+  named from outside the module, so aliasing `hnsw.Metric` would have produced a
+  public surface callers can use but not write down. `Metric`, `SyncPolicy`,
+  `Match`, `Stats` are the root package's own, with adapters underneath.
+- **Serialization is deliberately *off* the `Index` interface.** An index that
+  cannot write itself out is still a usable index, so `Snapshot` asks for the
+  capability with a type assertion and says so plainly when it is absent.
+
+**Task 15 — `Close`.** Flush, sync, release; idempotent, because `Close` belongs
+in a `defer` and a shutdown path should not have to track whether it already ran.
+
+It does **not** take a final snapshot, which the plan left open. Doing so would
+make shutdown take seconds on a large index and would fail in exactly the
+situations — a full or failing disk — where shutting down cleanly matters most.
+
+**Task 13 — collections — is deferred to v2**, not skipped by accident. One
+database is one index; named collections with load-on-demand and idle eviction
+sit *above* this rather than changing it, and v1 is scoped to the embeddable
+library.
+
+---
+
+## Task 17 — log truncation ✅
+
+Not in the original plan as its own item — PLAN.md folded it into task 10 and an
+earlier draft dropped it entirely as "not needed". It is needed: without it the
+log grows forever, and that is the one durability property a snapshot alone does
+not buy.
+
+`wal.Truncate(dir, keepFromSeq, opts)` deletes segments holding no record at or
+above the line, and runs after every snapshot.
+
+- **A segment is judged from the *next* one's first sequence**, never by scanning
+  for its own last. Sequences increase across the log, so a later segment
+  starting at or below the line proves this one ends below it. One record read
+  per segment instead of a full scan, and conservative in the safe direction.
+- **That record goes through the checksummed reader.** The sequence authorises
+  deleting files, and an unverified one would let a flipped bit destroy a segment.
+- **Truncate against the *oldest retained* snapshot, never the newest**, and only
+  after `Verify` passes on it. Retaining two snapshots is what makes a corrupt one
+  survivable, and truncating to the newest would delete exactly the records the
+  older copy needs — leaving a second snapshot that is paid for and cannot be
+  used. A failed verify skips truncation on purpose: a growing log is a disk
+  problem, deleting records only an unreadable snapshot could replace is a data
+  problem.
+
+`TypeCheckpoint` stays **reserved and unwritten**, and that is a decision rather
+than a gap. Truncation reads the snapshot directory, which is the authority on
+what is actually recoverable; a log record duplicating that could disagree with
+it. The constant remains so the numbering is not rearranged later.
+
+---
+
+## Task 18 — metadata filtering ✅
+
+The last feature gap, and it turned out to be two decisions rather than a pile of
+predicates. Full reasoning in
+[`internal/filter/README.md`](../internal/filter/README.md).
+
+**Where it is applied: inside the traversal, not over the results.** Filtering the
+returned slice is one line and wrong for exactly the reason the tombstone design
+had already written down — a selective filter would leave far fewer than `k` hits
+rather than making the search look wider for `k` matching ones. So the filter
+gates entry to the *result set* while the frontier still admits everything, since
+a rejected vector is very often the bridge to one that matches.
+
+Measured, a one-in-fifty filter returns **10 results this way against 2 by
+post-filtering**. That comparison is computed inside the test rather than
+asserted from memory, so it fails if the two ever stop differing.
+
+**What crosses the boundary: a `func(id string) bool`, not a filter and not
+metadata.** `internal/hnsw` stores vectors, and giving it a second data model
+would make every future index implementation responsible for one too. The layer
+that owns metadata closes over it and the index pays one parameter.
+
+`internal/store` grew `Match` for that path — it evaluates a predicate against
+the stored map **without copying it**, because it runs once per candidate node
+and `Get`'s per-call copy would have become the dominant cost of a search.
+
+### Measured — the cost is travel, not garbage
+
+| Admitted | none | 1 in 2 | 1 in 10 | 1 in 50 |
+|---|---|---|---|---|
+| Latency | 85 µs | 165 µs | 385 µs | 965 µs |
+| Allocs | 2 | 2 | 2 | 2 |
+
+The same curve tombstones produce and the same mechanism: `results` fills slowly,
+the pruning bound stays loose, the traversal widens. **The allocation count does
+not move** — the 2 allocs/op search baseline survives filtering intact.
+
+Past roughly one in a hundred the graph stops being the right tool, and a scan
+over the metadata beats a traversal that is visiting most of the graph anyway.
+That is written down rather than hidden.
+
+### The semantics that needed deciding
+
+- **Absent keys are false, uniformly — `Ne` included.** SQL's three-valued logic
+  is out of place in a function returning a `bool`, so there is one rule and
+  `Not(Eq(...))` is how to ask "absent, or different".
+- **`int64` and `float64` compare exactly**, never through `float64(i) < f`. That
+  rounds past 2^53, and `time.Now().UnixNano()` is ~1.7e18 — so the naive
+  spelling breaks on ordinary data, by silently comparing numbers that are not
+  the ones stored. The range check is written against **2^63, not `MaxInt64`**,
+  because `float64(MaxInt64)` rounds *up* to 2^63.
+- **Operands are normalized where stored values are not.** `Add` refuses an `int`
+  because its width is a platform property and the value gets written down; an
+  operand never does, so `Eq("page", 12)` is accepted rather than becoming a
+  filter that matches nothing forever.
+- **Constructors return `Filter`, not `(Filter, error)`**, so a nested query reads
+  well. The error rides in the node that found it and `Validate` reports it once,
+  before a search runs.
+
+### Follow-ups this opened
+
+- No `String()`, no wire format, no clause reordering. All three are one method
+  away and none has a consumer — the same rule that kept `Snapshotter` undefined
+  until `db.go` existed.
+- Selectivity is not estimated, so the database cannot yet decide for itself when
+  a scan would beat the graph. That needs statistics over the metadata store,
+  which is a bigger thing than the filter.
+
+---
+
+## Where this leaves v1
+
+Every planned task is done except collections, which is deferred to v2. The
+remaining work is not feature work:
+
+- **Online compaction.** `Compact()` holds the write lock for a full rebuild —
+  2.6 s per 5k×128 at a 25% dead ratio. Doing it outside the lock means writes
+  landing in the old graph while the new one is built, which wants a change log
+  and a double-buffered swap.
+- **Fine-grained write locking**, for the same reason: the WAL's ordering
+  constraint decides what a finer lock is allowed to do.
+- **An observability seam.** A torn tail found during recovery is repaired
+  correctly and reported to nobody, and a skipped truncation says nothing about
+  why.
