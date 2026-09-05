@@ -209,6 +209,112 @@ func ExampleDB_Add_validation() {
 	// true
 }
 
+// A filter narrows a search to vectors whose metadata matches. It is applied
+// while the index is traversed rather than to the results, so this returns two
+// matching vectors rather than "whichever of the nearest two happened to match".
+func ExampleFilter() {
+	dir, err := os.MkdirTemp("", "govecdb-example")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	db, err := govecdb.Open(filepath.Join(dir, "db"), govecdb.WithDimension(4))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.AddBatch([]govecdb.Vector{
+		{ID: "intro", Values: []float32{1, 0, 0, 0}, Metadata: govecdb.Metadata{
+			"source": "handbook.pdf", "page": int64(1)}},
+		{ID: "setup", Values: []float32{0.99, 0.01, 0, 0}, Metadata: govecdb.Metadata{
+			"source": "handbook.pdf", "page": int64(12)}},
+		{ID: "appendix", Values: []float32{0.98, 0.02, 0, 0}, Metadata: govecdb.Metadata{
+			"source": "handbook.pdf", "page": int64(84)}},
+		{ID: "memo", Values: []float32{0.97, 0.03, 0, 0}, Metadata: govecdb.Metadata{
+			"source": "memo.txt", "page": int64(20)}},
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	matches, err := db.Search(govecdb.SearchRequest{
+		Query: []float32{1, 0, 0, 0},
+		K:     2,
+		Filter: govecdb.And(
+			govecdb.Eq("source", "handbook.pdf"),
+			// 12 is an int, not the int64 the metadata holds. Comparison
+			// operands are normalized, so this does the obvious thing.
+			govecdb.Gte("page", 12),
+		),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, m := range matches {
+		fmt.Printf("%s p%d\n", m.ID, m.Metadata["page"])
+	}
+
+	// Output:
+	// setup p12
+	// appendix p84
+}
+
+// Every comparison is false on a key the vector does not have — Ne included. Not
+// is how to reach those vectors, and the difference is worth seeing side by side.
+func ExampleNot() {
+	dir, err := os.MkdirTemp("", "govecdb-example")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	db, err := govecdb.Open(filepath.Join(dir, "db"), govecdb.WithDimension(4))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.AddBatch([]govecdb.Vector{
+		{ID: "published", Values: []float32{1, 0, 0, 0}, Metadata: govecdb.Metadata{"status": "live"}},
+		{ID: "drafted", Values: []float32{0.99, 0.01, 0, 0}, Metadata: govecdb.Metadata{"status": "draft"}},
+		{ID: "untracked", Values: []float32{0.98, 0.02, 0, 0}},
+	}); err != nil {
+		log.Fatal(err)
+	}
+	query := []float32{1, 0, 0, 0}
+
+	// "has a status, and it is not draft" — the vector with no status at all
+	// does not match.
+	ne, err := db.Search(govecdb.SearchRequest{
+		Query: query, K: 3, Filter: govecdb.Ne("status", "draft")})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// "no status, or a status that is not draft" — which reaches both.
+	not, err := db.Search(govecdb.SearchRequest{
+		Query: query, K: 3, Filter: govecdb.Not(govecdb.Eq("status", "draft"))})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("Ne: ", ids(ne))
+	fmt.Println("Not:", ids(not))
+
+	// Output:
+	// Ne:  [published]
+	// Not: [published untracked]
+}
+
+func ids(ms []govecdb.Match) []string {
+	out := make([]string, len(ms))
+	for i, m := range ms {
+		out[i] = m.ID
+	}
+	return out
+}
+
 func nan() float64 {
 	zero := 0.0
 	return zero / zero

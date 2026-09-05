@@ -298,7 +298,16 @@ func (db *DB) Search(req SearchRequest) ([]Match, error) {
 		return nil, err
 	}
 
-	matches, err := idx.Search(req.Query, req.K, ef)
+	// The index is handed a predicate over ids, and the metadata it stands for
+	// stays on this side of the boundary. st.Match evaluates without copying,
+	// because this runs once per candidate node rather than once per result.
+	var allow func(id string) bool
+	if req.Filter != nil {
+		f := req.Filter
+		allow = func(id string) bool { return st.Match(id, f.Match) }
+	}
+
+	matches, err := idx.Search(req.Query, req.K, ef, allow)
 	if err != nil {
 		return nil, err
 	}

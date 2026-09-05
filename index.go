@@ -32,7 +32,14 @@ type Index interface {
 
 	// Search returns the k nearest vectors to query, nearest first, with ef
 	// controlling how wide the traversal keeps its candidate set.
-	Search(query []float32, k, ef int) ([]Match, error)
+	//
+	// allow, when non-nil, restricts which ids may be returned. It must be
+	// applied while traversing rather than to the finished slice: an
+	// implementation that filters its output returns fewer than k results for a
+	// selective predicate instead of searching wider for k matching ones. It is
+	// a predicate over ids, not metadata, so an index owes nothing to a data
+	// model it does not hold.
+	Search(query []float32, k, ef int, allow func(id string) bool) ([]Match, error)
 
 	// SuggestedEf proposes a search width for k results at a target recall,
 	// given how much data the index currently holds.
@@ -90,8 +97,8 @@ func (h *hnswIndex) Stats() (live, deleted, slots int) {
 	return s.Live, s.Deleted, s.Slots
 }
 
-func (h *hnswIndex) Search(query []float32, k, ef int) ([]Match, error) {
-	res, err := h.g.Search(query, k, ef)
+func (h *hnswIndex) Search(query []float32, k, ef int, allow func(id string) bool) ([]Match, error) {
+	res, err := h.g.SearchFilter(query, k, ef, allow)
 	if err != nil {
 		return nil, err
 	}

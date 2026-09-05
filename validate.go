@@ -127,6 +127,15 @@ func (o *options) validateSearch(req SearchRequest, suggest func(k int, target f
 		return 0, fmt.Errorf("%w: TargetRecall is %v, want 0 (default) or 0 < r < 1",
 			ErrInvalidRequest, req.TargetRecall)
 	}
+	// Once, here, rather than per candidate node inside the traversal. A filter
+	// built by nesting constructors collects its errors instead of returning
+	// them, so this is the first point that both knows about the whole tree and
+	// has somewhere to report it.
+	if req.Filter != nil {
+		if err := req.Filter.Validate(); err != nil {
+			return 0, fmt.Errorf("%w: %w", ErrInvalidFilter, err)
+		}
+	}
 
 	ef = req.Ef
 	if ef == 0 {

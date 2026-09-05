@@ -49,6 +49,16 @@ type SearchRequest struct {
 	// TargetRecall is the recall a zero Ef aims for, treated as a floor.
 	// Defaults to the database's SearchTargetRecall option when zero.
 	TargetRecall float64
+
+	// Filter restricts results to vectors whose metadata matches. Nil means no
+	// restriction.
+	//
+	// It is applied inside the traversal rather than to the results, so a
+	// filtered search still returns K vectors where one filtering the output
+	// would return only those of the nearest K that happened to match. The
+	// trade is that a highly selective filter makes the search work harder —
+	// see Filter.
+	Filter Filter
 }
 
 // Match is one search result.

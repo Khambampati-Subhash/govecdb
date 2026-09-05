@@ -43,6 +43,15 @@ var (
 	// an empty or non-UTF-8 key, or a size over one of the caps.
 	ErrInvalidMetadata = errors.New("govecdb: invalid metadata")
 
+	// ErrInvalidFilter means a search filter could not be run: a comparison
+	// operand that is not one of the metadata value types, or a nil filter passed
+	// to And, Or or Not.
+	//
+	// It surfaces at Search rather than where the filter was built, because the
+	// constructors return a Filter and not (Filter, error) — a query assembled by
+	// nesting calls reads well only if the error is collected and reported once.
+	ErrInvalidFilter = errors.New("govecdb: invalid filter")
+
 	// ErrNotFound is returned when an id is not in the database.
 	ErrNotFound = errors.New("govecdb: id not found")
 
