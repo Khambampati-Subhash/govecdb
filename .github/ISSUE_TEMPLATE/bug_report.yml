@@ -1,0 +1,81 @@
+name: Bug report
+description: Something behaves differently from what the documentation promises.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this is a **data-loss or corruption** bug, say so in the title — those
+        jump the queue.
+
+        If it is a **security** issue, please do not file it here. See
+        [SECURITY.md](https://github.com/khambampati-subhash/govecdb/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: And what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproducer
+      description: |
+        A Go program or test we can run. This matters more here than in most
+        projects: the interesting bugs in a vector database are about ordering,
+        recall and crash timing, and those are hard to guess at from prose.
+      render: go
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: GoVecDB version
+      placeholder: v1.0.0, or a commit SHA
+    validations:
+      required: true
+
+  - type: input
+    id: goversion
+    attributes:
+      label: Go version and OS
+      description: Output of `go version`.
+      placeholder: go version go1.25.0 darwin/arm64
+    validations:
+      required: true
+
+  - type: dropdown
+    id: sync
+    attributes:
+      label: Sync policy
+      description: Relevant for anything involving a restart or missing data.
+      options:
+        - SyncAlways (the default)
+        - SyncInterval
+        - SyncNever
+        - Not relevant / not sure
+    validations:
+      required: false
+
+  - type: textarea
+    id: config
+    attributes:
+      label: How the database was opened
+      description: The `govecdb.Open` call, including its options.
+      render: go
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I can reproduce this on the latest released version.
+          required: false
+        - label: I ran my own tests with `-race` and it is not a data race in my code.
+          required: false

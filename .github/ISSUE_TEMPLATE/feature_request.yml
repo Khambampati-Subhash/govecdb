@@ -1,0 +1,53 @@
+name: Feature request
+description: Something GoVecDB should be able to do and cannot.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check [the v2 scope](https://github.com/khambampati-subhash/govecdb/blob/main/docs/MIGRATION.md#v2-scope)
+        first — collections, a REST/gRPC server, clustering, quantization, online
+        compaction and an observability seam are already planned, in dependency
+        order. A comment on why you need one of those sooner is more useful than
+        a new issue.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: |
+        The problem, not the solution. The most useful requests here have
+        described a workload — corpus size, dimension, read/write mix, latency
+        budget — because the right answer often depends on it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to do?
+      description: An API sketch is welcome but not required.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried instead?
+      description: Including whether something in the current API nearly works.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints this project holds
+      description: |
+        Not a test — just so we are starting from the same place. These are
+        design goals rather than preferences, and a request that needs one of
+        them relaxed is worth discussing explicitly.
+      options:
+        - label: I understand the module has **zero third-party dependencies** and aims to keep it that way.
+          required: false
+        - label: I understand v1 is an **embeddable library** — no server, no cluster.
+          required: false

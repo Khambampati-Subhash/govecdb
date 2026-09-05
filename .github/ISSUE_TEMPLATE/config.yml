@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/khambampati-subhash/govecdb/security/advisories/new
+    about: Report privately. Please do not open a public issue for a vulnerability.
+  - name: Question or usage help
+    url: https://github.com/khambampati-subhash/govecdb/discussions
+    about: How do I do X? Is this the right tool for my workload?
+  - name: Documentation
+    url: https://pkg.go.dev/github.com/khambampati-subhash/govecdb
+    about: API reference on pkg.go.dev.
