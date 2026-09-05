@@ -1,6 +1,6 @@
 # GoVecDB v1 — Clean Rebuild
 
-> Branch: `v1-restructure` · Same module path · Embeddable library only.
+> Branch: `main` · Same module path · Embeddable library only.
 > Gate: `go build ./... && go vet ./... && go test ./... -race` green after every step.
 
 ## What changed about the plan
@@ -21,7 +21,12 @@ old code as a *reference in git history* rather than as a source to copy.
 
 ```
 govecdb/
-├── internal/hnsw/     # the entire codebase — index engine, 1,075 lines
+├── *.go               # the public API: Open/Add/Get/Search/Snapshot/Compact
+├── internal/hnsw/     # index engine, with serialization
+├── internal/wal/      # write-ahead log: writer, replay, truncation
+├── internal/snapshot/ # atomic checksummed state keyed by log sequence
+├── internal/store/    # metadata storage
+├── internal/filter/   # metadata query engine
 ├── docs/
 ├── go.mod             # stdlib only; no require block, no go.sum
 ├── README.md  CLAUDE.md  CONTRIBUTING.md  LICENSE
@@ -60,15 +65,15 @@ govecdb/
 │   ├── hnsw/            # index engine — concurrent reads       ✅ done
 │   ├── wal/             # write-ahead log — writer + replay     ✅ done
 │   ├── snapshot/        # store + graph codec (in hnsw/)       ✅ done
-│   ├── store/           # in-memory vector store
-│   ├── filter/          # metadata query engine
+│   ├── store/           # metadata storage                      ✅ done
+│   ├── filter/          # metadata query engine                 ✅ done
 │   └── obs/             # Logger + Metrics interfaces, no-op defaults
 └── docs/
 ```
 
 ## Where this stands
 
-**9 of 11 steps done — there is a working, importable database.**
+**All 11 steps done — there is a working, importable, filterable database.**
 
 | | Step | State |
 |---|---|---|
@@ -76,11 +81,11 @@ govecdb/
 | 6 | `internal/wal` — writer, rotation, sync policies, replay | ✅ |
 | 7 | `internal/snapshot` + graph codec | ✅ |
 | 8 | `internal/store` — metadata storage | ✅ |
-| 9 | `internal/filter` — metadata queries | ⬜ |
+| 9 | `internal/filter` — metadata queries | ✅ |
 | 10 | **Public API** — `govecdb.Open/Add/Get/Search/Snapshot/Compact` | ✅ |
-| 11 | Examples + README | ⬜ (godoc examples exist) |
+| 11 | Examples + README | ✅ |
 
-Two of the three things that were blocked on step 10 have landed with it:
+All three things that were blocked on step 10 landed with it:
 
 - **Restore orchestration** — `Open` loads the newest snapshot that passes its
   checksum, falls back to an older one if it does not, and replays the log
@@ -90,8 +95,11 @@ Two of the three things that were blocked on step 10 have landed with it:
 - **WAL truncation** — `wal.Truncate`, run after every snapshot against the
   oldest retained snapshot's sequence. The log no longer grows forever. ✅
 
-**The durability story is complete.** What remains is features (metadata
-filtering), not guarantees.
+**The durability story is complete, and so is the feature scope for v1.** What
+remains is not a gap in what the database does — it is the deferred work listed
+below: online compaction, finer write locking, an observability seam, and a crash
+harness that kills a process mid-write rather than reproducing the shapes by
+hand.
 
 `TypeCheckpoint` stays reserved and unwritten, and that is now a decision rather
 than a gap: truncation reads the snapshot directory, which is the authority on
@@ -123,12 +131,14 @@ with it. The constant remains so the numbering is not rearranged later.
    Metadata *only*: values live once, in the index. A store that owned whole
    records would mean two copies of every vector in memory, and vectors are the
    largest thing the process holds.
-9. **`internal/filter`** — metadata query engine, with tests from day one.
+9. ~~**`internal/filter`**~~ — metadata query engine: comparisons, set membership,
+   existence and boolean composition, applied *inside* the traversal rather than
+   to the results. **Done.**
 10. ~~**Public API**~~ — `vector.go` / `db.go` / `options.go` / `codec.go` /
-    `recovery.go` / `validate.go`. **Done.** Owns restore-on-open and snapshot
-    scheduling; WAL truncation is still outstanding.
-11. **Examples + README** for the real API. Godoc examples exist and run as
-    tests; the root README still describes the module as un-importable.
+    `recovery.go` / `validate.go` / `filter.go`. **Done.** Owns restore-on-open,
+    snapshot scheduling and WAL truncation.
+11. ~~**Examples + README**~~ for the real API. **Done.** Godoc examples exist and
+    run as tests, and the root README documents the importable database.
 
 ### Deferred on purpose, not overlooked
 
@@ -313,6 +323,56 @@ alone — if an operator set its mode, quietly tightening it would revoke access
 somebody granted on purpose — but `wal/` and `snapshots/` are created here rather
 than left to those packages' `0755` default, and a directory that cannot be
 traversed is what protects the ordinary-mode files inside it.
+
+## Phase — Filter (done)
+
+The last feature gap, and it turned out to be two decisions rather than a pile of
+predicates.
+
+**Where it is applied.** Inside the traversal, not over the results. Filtering the
+returned slice is one line and wrong for exactly the reason the tombstone design
+was already written down: a selective filter would leave far fewer than `k` hits
+rather than making the search look wider for `k` matching ones. So the filter
+gates entry to the *result set* while the frontier still admits everything —
+a rejected vector is very often the bridge to one that matches. Measured, a
+one-in-fifty filter returns 10 results this way against 2 by post-filtering
+(`TestSearchFilterFindsKWherePostFilteringWouldNot`).
+
+The honest cost is the same curve tombstones produce, and for the same mechanism:
+`results` fills slowly, the pruning bound stays loose, the search widens. 85 µs
+unfiltered to 965 µs at one in fifty, with **the 2 allocs/op search baseline
+intact** — the cost is travel, not garbage. Past roughly one in a hundred a scan
+is the better tool, and that is written down rather than hidden.
+
+**What crosses the boundary.** The index takes a `func(id string) bool`, not a
+filter and not metadata. `internal/hnsw` stores vectors, and giving it a second
+data model would make every future index implementation responsible for one too.
+The layer that owns metadata closes over it, and the index pays one parameter.
+`internal/store` grew `Match` for that path — it evaluates a predicate against
+the stored map *without copying it*, because it is called per candidate node and
+`Get`'s copy would have become the dominant cost of a search.
+
+Decided while building it:
+
+- **Absent keys are false, uniformly** — `Ne` included, which is the one that
+  surprises. The alternative is SQL's three-valued logic, which is out of place
+  where `Match` returns a `bool`; `Not(Eq(...))` asks the other question
+  explicitly.
+- **Numbers compare across `int64` and `float64` exactly.** `float64(i) < f`
+  rounds past 2^53, and a nanosecond timestamp is ~1.7e18 — so the naive spelling
+  breaks on ordinary data, by silently comparing numbers that are not the ones
+  stored.
+- **Operands are normalized, stored values are not.** `Add` refuses an `int`
+  because the width of `int` is a platform property and the value gets written
+  down. An operand never does, so `Eq("page", 12)` is accepted rather than
+  becoming a filter that matches nothing forever.
+- **Constructors return `Filter`, not `(Filter, error)`.** A query built by
+  nesting calls only reads well if errors are collected and reported once, so a
+  bad operand rides in the node that found it and surfaces at `Search` as
+  `ErrInvalidFilter`.
+- **`Filter` is declared in the root package, not aliased from `internal/`**, so
+  a caller can implement one. That costs a slice-retyping loop at the boundary
+  and buys an open extension point.
 
 ## SOLID / patterns
 

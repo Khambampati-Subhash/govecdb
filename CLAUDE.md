@@ -6,8 +6,8 @@ Guidance for Claude Code (and humans) working in this repository.
 
 **GoVecDB** — a high-performance, embeddable **vector database in pure Go** (no
 CGO). It stores embeddings and answers "what is most similar to this?" using an
-**HNSW** approximate-nearest-neighbor index, with a write-ahead log for
-durability (writer built; reader/recovery next).
+**HNSW** approximate-nearest-neighbor index, with a write-ahead log and
+checksummed snapshots for durability, and a metadata query engine for filtering.
 
 Module path: `github.com/khambampati-subhash/govecdb` · Go 1.24+ (built with 1.25).
 **Zero third-party dependencies** — `go.mod` has no `require` block and there is no
@@ -28,24 +28,28 @@ Scope for v1: **embeddable library only** (no cluster / REST server / gRPC — t
 stay in `main` history and return in v2).
 
 ### The codebase is the root package plus `internal/`
-The root package (`db.go`, `vector.go`, `options.go`, `validate.go`, `index.go`,
-`codec.go`, `recovery.go`, `errors.go`) is the public API. Under it:
-`internal/hnsw`, `internal/wal`, `internal/snapshot`, `internal/store`. Each
-internal package has its own `README.md`, and `internal/hnsw/` is the reference
-for style: small single-responsibility files, comments that explain *why*,
-measured rather than assumed.
+The root package (`db.go`, `vector.go`, `filter.go`, `options.go`, `validate.go`,
+`index.go`, `codec.go`, `recovery.go`, `errors.go`) is the public API. Under it:
+`internal/hnsw`, `internal/wal`, `internal/snapshot`, `internal/store`,
+`internal/filter`. Each internal package has its own `README.md`, and
+`internal/hnsw/` is the reference for style: small single-responsibility files,
+comments that explain *why*, measured rather than assumed.
+
+**All 11 rebuild steps are done.** What remains is deferred work, not gaps:
+online compaction, finer write locking, an observability seam, and a crash
+harness — see `docs/MIGRATION.md`.
 
 - `internal/hnsw/` — the index. Complete: concurrent reads, tombstone delete,
-  upsert, compaction, and a measurement harness behind `-results`.
+  upsert, compaction, serialization, filtered search, and a measurement harness
+  behind `-results`.
 - `internal/wal/` — durability. Complete: record format, append-only writer with
-  segment rotation and sync policies, and `Replay` — a CRC-validating scan that
-  truncates torn tails and carries the sequence forward. Checkpointing and
-  segment truncation are still open, and no longer blocked.
-- `internal/snapshot/` — point-in-time state. The durable **store** is done:
-  atomic writes, checksummed framing keyed by WAL sequence, discovery, fallback
-  and retention, with an **opaque payload**. **The graph codec (`hnsw.Graph` ↔
-  bytes) is the next phase**, and it is a format decision rather than plumbing.
-  Design constraints are in `docs/MIGRATION.md`.
+  segment rotation and sync policies, `Replay` — a CRC-validating scan that
+  truncates torn tails and carries the sequence forward — and `Truncate`.
+- `internal/snapshot/` — point-in-time state. Complete: atomic writes, checksummed
+  framing keyed by WAL sequence, discovery, fallback and retention, with an
+  **opaque payload**. The graph codec lives in `internal/hnsw/codec.go`.
+- `internal/store/` — metadata storage, and `Match` for the filtered search path.
+- `internal/filter/` — the metadata query engine.
 
 ### The legacy code is gone
 Every previous package (`index/`, `store/`, `persist/`, `api/`, `collection/`,
@@ -72,6 +76,7 @@ go test ./internal/hnsw/ -v      # the index
 go test ./internal/wal/ -v       # the write-ahead log
 go test ./internal/snapshot/ -v  # point-in-time state
 go test ./internal/store/ -v     # metadata
+go test ./internal/filter/ -v    # the metadata query engine
 go test ./... -race              # race detector (run before merging)
 ```
 
@@ -186,7 +191,7 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   checksum of its own** — `internal/snapshot` verifies the payload first, and
   `WriteTo` is 5 allocs regardless of graph size; keep it that way.
 
-## WAL quick reference (`internal/wal`) — writer + replay done
+## WAL quick reference (`internal/wal`) — complete
 
 - Format: `magic "GVWL" | version | reserved` (8B file header), then
   `crc32c | type | seq | len | payload` (17B record header). Little-endian.
@@ -260,7 +265,7 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   snapshot directory, which is the authority on what is recoverable; a log record
   duplicating that could disagree with it. Do not "finish" it by emitting one.
 
-## Snapshot quick reference (`internal/snapshot`) — store done, codec next
+## Snapshot quick reference (`internal/snapshot`) — complete
 
 - Format: `magic "GVSS" | version | reserved | seq` (16B header), payload, then
   `crc32c | length` (12B trailer). Little-endian. `TestLayoutIsFrozen` pins the
@@ -296,12 +301,62 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   WAL's `Replay` is the precedent: it sat on the interface as a promise until
   writing it showed it did not belong.
 
+## Filter quick reference (`internal/filter`) — complete
+
+- **The filter is applied inside the traversal, never to the results.**
+  `hnsw.SearchFilter` takes a `func(id string) bool` and `admits()` gates entry to
+  `results` only — the frontier still admits rejected nodes, because a
+  non-matching vector is very often the bridge to a matching one. Post-filtering
+  returns fewer than `k`; measured, **10 results against 2** at one-in-fifty
+  (`TestSearchFilterFindsKWherePostFilteringWouldNot`). Do not "simplify" this
+  into filtering the output slice — it is the same mistake as filtering
+  tombstones at the end, and `admits()` deliberately holds both checks so an edit
+  cannot fix one and forget the other.
+- **The predicate is over ids, not metadata.** `internal/hnsw` must stay ignorant
+  of metadata: giving it a second data model would make every future `Index`
+  implementation responsible for one. The root package closes over the store.
+- **`store.Map.Match` does not copy**, which is why it exists next to `Get`. It
+  runs once per candidate node, and `Get`'s per-call map copy would become the
+  dominant cost of a search. `TestMatchDoesNotAllocate` pins it at 0 allocs, and
+  the search's **2 allocs/op baseline holds under filtering** — the cost of a
+  filter is travel (85 µs → 965 µs from unfiltered to one-in-fifty), not garbage.
+- **Insert passes `nil`.** A build must never see a query's filter, or the graph's
+  shape would depend on whichever query ran first.
+- **A predicate on an absent key is false — `Ne` included.** One uniform rule;
+  `Not(Eq(...))` is how to also match vectors lacking the key. Do not "fix" `Ne`
+  into meaning "differs or absent": that reintroduces SQL's three-valued logic in
+  a function that returns a `bool`.
+- **`int64` and `float64` compare exactly, via `compareIntFloat`** — never
+  `float64(i) < f`, which rounds past 2^53. A nanosecond timestamp is ~1.7e18, so
+  that is ordinary data, and it fails by silently matching the wrong records. The
+  range check is written against **2^63, not `MaxInt64`**: `float64(MaxInt64)`
+  rounds *up* to 2^63, so comparing against it misjudges the boundary.
+- **Operands are normalized (`int`→`int64`, `float32`→`float64`); stored values
+  are not.** `Add` refuses an `int` because its width is a platform property and
+  it gets written down; an operand never does, so `Eq("page", 12)` is accepted
+  rather than silently matching nothing forever. `uint64` above `MaxInt64` is
+  refused, not wrapped.
+- **Constructors return `Filter`, not `(Filter, error)`** — the error rides in the
+  node that found it and `Validate` reports it once, surfaced at `Search` as
+  `ErrInvalidFilter`. `Match` assumes a validated filter and may panic otherwise;
+  that is deliberate, since it runs per node.
+- `And()` matches **everything**, `Or()` and `In(key)` match **nothing** — the
+  identity elements, and what makes a filter built in a loop behave at zero
+  iterations.
+- **No `String()`, no wire format, no clause reordering.** All three are one
+  method away and none has a consumer; the same rule that kept `Snapshotter`
+  undefined.
+
 ## Public API quick reference (root package)
 
 - **No internal type may appear in an exported signature.** `internal/` cannot be
   named from outside the module, so an alias would give callers a type they can
-  use but not write down. `Metric`, `SyncPolicy`, `Match`, `Stats`, `Metadata`
-  are the root package's own, with adapters in `index.go`.
+  use but not write down. `Metric`, `SyncPolicy`, `Match`, `Stats`, `Metadata`,
+  `Filter` are the root package's own, with adapters in `index.go`.
+- **`Filter` is declared here, not aliased from `internal/filter`**, so callers can
+  implement one. The two interfaces have identical method sets so elements convert
+  implicitly; only the *slices* need the retyping loop in `internalFilters`. That
+  loop is the price of the extension point — do not "simplify" it into an alias.
 - **`Index` is an interface in this package's types** so a flat or quantized
   index is a different implementation, not a different database. Serialization is
   deliberately *off* it (`indexSerializer`, checked at snapshot time): an index
@@ -313,6 +368,8 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   add a ctx no method can honour.
 - **`SearchRequest.Ef == 0` means "choose it"** via `SuggestedEf`. Do not
   substitute a constant: recall at a fixed width falls as the corpus grows.
+- **`SearchRequest.Filter` is validated once in `validateSearch`**, never per
+  node. See the filter quick reference above for the semantics it commits to.
 - **Validation is the security boundary** (`validate.go`). Two checks matter most
   because their absence is silent: **values must be finite** (one NaN compares
   false against everything and poisons the ordering the index rests on), and
@@ -344,6 +401,8 @@ Any index change must hold these; they are enforced by tests and `-benchmem`:
 | Recall@10, dim 32 | 0.999 | `TestRecallVsBruteForce` |
 | Recall@10, dim 768 | 0.972 | `TestRecallHighDimension` |
 | Search allocations | 2 allocs/op | `BenchmarkSearch -benchmem` |
+| Filtered search allocations | 2 allocs/op | `BenchmarkSearchFilter -benchmem` |
+| Metadata predicate allocations | 0 allocs/op | `TestMatchDoesNotAllocate` |
 | Recall spread across seeds | ≤ 0.05 | `TestRecallIsStableAcrossSeeds` |
 
 The sweep tests in `recall_test.go` defend **shape**, not absolute values: recall

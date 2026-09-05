@@ -7,27 +7,27 @@ approximate-nearest-neighbor index.
 [![Go Version](https://img.shields.io/badge/go-1.24+-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> ## ⚠️ Status: v1 rebuild in progress
+> ## Status: the v1 rebuild is complete
 >
-> This branch (`v1-restructure`) is a **ground-up rewrite**. The previous
-> implementation — ~45,700 lines covering clustering, gRPC, REST, segments and
-> several competing index variants — has been removed from the working tree. It
-> remains in git history on `main` and is recoverable at any time.
+> GoVecDB was rewritten from the ground up. The previous implementation — ~45,700
+> lines covering clustering, gRPC, REST, segments and several competing index
+> variants — was removed from the working tree. It remains in git history and is
+> recoverable at any time.
 >
 > **What exists today:** an importable database. `govecdb.Open` gives you add,
-> get, delete, search, snapshot and compact over one directory, durable through a
-> write-ahead log and recoverable from snapshots. Underneath: `internal/hnsw` (the
-> index, with serialization), `internal/wal` (append-only log with replay that
-> truncates a torn tail), `internal/snapshot` (atomic checksummed state keyed by
-> log sequence), and `internal/store` (metadata).
+> get, delete, search, **filter**, snapshot and compact over one directory,
+> durable through a write-ahead log and recoverable from snapshots. Underneath:
+> `internal/hnsw` (the index, with serialization), `internal/wal` (append-only log
+> with replay that truncates a torn tail), `internal/snapshot` (atomic checksummed
+> state keyed by log sequence), `internal/store` (metadata) and `internal/filter`
+> (the query engine over it).
 >
-> **What does not exist yet:** metadata *filtering* — metadata is stored,
-> returned with results and survives restarts, but there is no query language over
-> it. The durability story itself is complete: writes are logged before they are
-> applied, startup restores from a snapshot and replays the rest, and log segments
-> a snapshot has made redundant are deleted. See [the roadmap](docs/MIGRATION.md), and
-> [durability and latency](docs/DURABILITY.md) for what is guaranteed today,
-> what it costs, and what is not guaranteed yet.
+> **What is deliberately out of scope for v1:** clustering, REST/gRPC servers and
+> quantization — they return in v2. Still owed: online (non-blocking) compaction,
+> a logger/metrics seam, and a crash harness that kills a process mid-write rather
+> than reproducing the damage shapes by hand. See
+> [the roadmap](docs/MIGRATION.md), and [durability and latency](docs/DURABILITY.md)
+> for what is guaranteed today, what it costs, and what is not guaranteed yet.
 
 ## Quick start
 
@@ -43,6 +43,24 @@ db.Add(govecdb.Vector{
 
 matches, err := db.Search(govecdb.SearchRequest{Query: query, K: 10})
 ```
+
+Searches can be restricted by metadata:
+
+```go
+matches, err := db.Search(govecdb.SearchRequest{
+    Query:  query,
+    K:      10,
+    Filter: govecdb.And(
+        govecdb.Eq("source", "handbook.pdf"),
+        govecdb.Gte("page", 10),
+        govecdb.Not(govecdb.Exists("retracted")),
+    ),
+})
+```
+
+The filter runs *during* the graph traversal, not over the results — so you get
+10 matching vectors rather than however many of the nearest 10 happened to match.
+[See what that costs.](#filtering-costs-search-width-not-allocations)
 
 Leaving `Ef` zero lets the search width be chosen from the corpus size, which is
 what keeps recall steady as the database grows — recall at a *fixed* width falls
@@ -116,36 +134,64 @@ For the design decisions behind the implementation — why vectors are normalize
 insert, why neighbor selection is alpha-pruned, how the search path reaches two
 allocations — see [`internal/hnsw/README.md`](internal/hnsw/README.md).
 
-## Current API
-
-`internal/hnsw` is internal, so this is not importable yet; it is what the public
-API will be built on top of.
+## The API
 
 ```go
-g, _ := hnsw.New(hnsw.DefaultConfig(128, hnsw.Cosine))
-_ = g.Insert("doc1", vec1)
-_ = g.Insert("doc1", vec2) // upsert: same id, new vector replaces the old
+import "github.com/khambampati-subhash/govecdb"
 
-// ef must grow with the corpus; SuggestedEf fits the measured curve.
-ef := g.SuggestedEf(10 /*k*/, 0.95 /*target recall*/)
-results, _ := g.Search(query, 10 /*k*/, ef)
-for _, r := range results {
-    fmt.Println(r.ID, r.Distance) // ascending; smaller = closer
+db, _ := govecdb.Open("data", govecdb.WithDimension(128))
+defer db.Close()
+
+_ = db.Add(govecdb.Vector{ID: "doc1", Values: v1, Metadata: govecdb.Metadata{
+    "source": "handbook.pdf",
+    "page":   int64(12),
+}})
+_ = db.Add(govecdb.Vector{ID: "doc1", Values: v2}) // upsert: same id, new vector
+
+// Ef defaults to a width chosen from the corpus size — see SuggestedEf below.
+matches, _ := db.Search(govecdb.SearchRequest{Query: query, K: 10})
+for _, m := range matches {
+    fmt.Println(m.ID, m.Distance, m.Metadata) // ascending; smaller = closer
 }
 
-g.Delete("doc1") // tombstone; the slot keeps routing, never answers
+_ = db.Delete("doc1") // tombstone; the slot keeps routing, never answers
 
-if g.Stats().DeadRatio() > 0.5 {
-    g.Compact() // rebuild over the live vectors; stop-the-world
+_ = db.Snapshot() // bounds restart time, and truncates the log behind it
+
+if db.Stats().DeadRatio() > 0.5 {
+    _, _ = db.Compact() // rebuild over the live vectors; stop-the-world
 }
 ```
+
+### Filters
+
+| Constructor | Matches |
+|---|---|
+| `Eq` / `Ne` | present and equal / present and different |
+| `Lt` / `Lte` / `Gt` / `Gte` | ordered comparisons — strings lexicographic, numbers numeric |
+| `In(key, v...)` | present and equal to any listed value |
+| `Exists(key)` | the key is present, whatever its value |
+| `And` / `Or` / `Not` | boolean composition |
+
+Metadata values are `string`, `bool`, `int64` or `float64`. Two rules are worth
+knowing up front:
+
+- **A predicate on an absent key is false — including `Ne`.** `Ne("status",
+  "draft")` means *has a status, and it is not draft*. Use `Not(Eq(...))` to also
+  match vectors with no `status` at all.
+- **`int64` and `float64` compare numerically and exactly**, at any magnitude.
+  `float64(i) < f` would round past 2^53, and a nanosecond timestamp is ~1.7e18 —
+  well inside the range where that silently returns the wrong records.
+
+`Filter` is an interface, so a predicate with no constructor here is a legitimate
+thing to implement yourself.
 
 | Knob | Where | Adaptable? |
 |------|-------|-----------|
 | `M` — neighbors per node (layers > 0; layer 0 uses `2*M`) | `Config`, set once | **No** — structural; changing it means rebuilding |
 | `EfConstruction` — search width during inserts | `Config` | Kept fixed (100–200) |
 | `Alpha` — pruning relaxation | `Config` | Fixed per graph; 1.0–1.4 useful, default 1.2 |
-| `ef` — search width at query time | `Search(query, k, ef)` | **Yes** — per query; auto-clamped to `>= k`. Grows with `N` — use `SuggestedEf`, [see the charts](#measured-behaviour) |
+| `ef` — search width at query time | `SearchRequest.Ef` | **Yes** — per query; auto-clamped to `>= k`. Grows with `N`, so leave it zero and it is chosen for you, [see the charts](#measured-behaviour) |
 
 ## Measured performance
 
@@ -275,6 +321,34 @@ explore wider than `ef` asked for. That bought recall nobody requested at a
 latency nobody wanted — 184 µs against 88 µs. A marginally larger `ef` on the
 compacted graph recovers the recall and is still twice as fast.
 
+### Filtering costs search width, not allocations
+
+A metadata filter is applied while the graph is being walked, not to the results.
+A rejected vector still rides the search frontier — it is often the bridge to one
+that matches — but never enters the result set. That is what makes a filtered
+search return `K` results instead of however many of the nearest `K` happened to
+match: measured on a one-in-fifty filter, **10 results against 2** for the same
+query post-filtered.
+
+What it costs is travel. 10,000 × 128, `k=10`, `ef=64`:
+
+| Admitted | none (unfiltered) | 1 in 2 | 1 in 10 | 1 in 50 |
+|---|---|---|---|---|
+| Latency | 85 µs | 165 µs | 385 µs | 965 µs |
+| Allocs | **2** | **2** | **2** | **2** |
+
+This is the same curve tombstones produce and the same mechanism: with fewer
+admissible nodes the result set fills slowly, which loosens the pruning bound and
+makes the search explore wider until it has `k`.
+
+**The allocation count does not move**, which is the part worth defending — the
+metadata lookup borrows the stored map rather than copying it, so the 2 allocs/op
+search baseline survives filtering intact.
+
+Past roughly one in a hundred the graph stops being the right tool: a scan over
+the metadata, distance-checking only what matches, beats a traversal that is
+visiting most of the graph anyway.
+
 ### Metric and data shape
 
 | Metric | recall @ ef=64 | @ ef=256 | | Corpus | recall | latency |
@@ -304,9 +378,14 @@ data being at fault. Clustered data, which is what real embeddings look like, is
    `Compact`, with restore-on-open and snapshot scheduling
 9. ~~**WAL truncation**~~ — done; segments a snapshot has made redundant are
    deleted after each snapshot, against the *oldest retained* one
-10. **Metadata filtering** — the last feature gap
+10. ~~**Metadata filtering**~~ — done; a query engine applied inside the traversal,
+    so a filtered search still returns `K`
 
 Out of scope for v1 (returns in v2): clustering, REST/gRPC servers, quantization.
+
+Still owed, and tracked in [the roadmap](docs/MIGRATION.md): online compaction
+(`Compact` currently stops the world), finer-grained write locking, a
+logger/metrics seam, and a crash harness that `SIGKILL`s a process mid-write.
 
 ## Development
 

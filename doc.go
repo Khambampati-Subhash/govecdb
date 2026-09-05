@@ -14,6 +14,26 @@
 // No CGO, no third-party dependencies, and no server: it runs inside your
 // process and stores everything in one directory.
 //
+// # Filtering
+//
+// A search can be restricted to vectors whose metadata matches:
+//
+//	matches, err := db.Search(govecdb.SearchRequest{
+//		Query:  query,
+//		K:      10,
+//		Filter: govecdb.And(
+//			govecdb.Eq("source", "handbook.pdf"),
+//			govecdb.Gte("page", 10),
+//		),
+//	})
+//
+// The filter is applied while the index is being traversed rather than to the
+// results, so a filtered search returns K vectors instead of however many of the
+// nearest K happened to match. What that costs is search width: the fewer
+// vectors a filter admits, the further the traversal goes to find K of them —
+// measured at about 2x for one vector in two and 11x for one in fifty. See
+// Filter.
+//
 // # The ordering rule
 //
 // Every write is appended to a write-ahead log first and only then applied to
@@ -66,9 +86,6 @@
 //
 // # Not implemented yet
 //
-// Metadata filtering: metadata is stored, returned with results, and survives
-// restarts, but there is no query language over it yet.
-//
 // Observability: there is no logger or metrics seam, so a torn log tail found
 // during recovery is repaired correctly and reported to nobody, and a skipped
 // truncation says nothing about why.
@@ -79,6 +96,7 @@
 // The package is split one responsibility per file:
 //
 //	vector.go    Vector, SearchRequest, Match, Stats — what callers pass and get.
+//	filter.go    Filter and its constructors: the metadata query surface.
 //	options.go   Open's functional options and their defaults.
 //	validate.go  The input boundary: what is checked, and the limits.
 //	index.go     The Index interface and the HNSW adapter behind it.

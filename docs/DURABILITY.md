@@ -168,6 +168,32 @@ multiplies the whole traversal rather than just the final comparison:
 |---|---|---|---|---|
 | Latency | 104 µs | 128 µs | 169 µs | 270 µs |
 
+**By filter selectivity** (`BenchmarkSearchFilter`, 10,000 × 128, `k=10`,
+`ef=64`) — a metadata filter is applied *during* the traversal, so a search that
+can only accept one vector in fifty has to travel further to find ten of them:
+
+| Admitted | none (unfiltered) | 1 in 2 | 1 in 10 | 1 in 50 |
+|---|---|---|---|---|
+| Latency | 85 µs | 165 µs | 385 µs | 965 µs |
+| Allocs | 2 | 2 | 2 | 2 |
+
+This is the same curve tombstones produce and for the same reason: a node the
+filter rejects still rides the search frontier, but never enters the result set,
+so `results` fills slowly, the pruning bound stays loose, and the traversal
+widens until it has `k`. That is what makes a filtered search return `k` results
+rather than "however many of the nearest `k` happened to match" — measured at 10
+against 2 for a one-in-fifty filter in `TestSearchFilterFindsKWherePostFiltering-
+WouldNot`.
+
+**The allocation count does not move.** The filter costs traversal width, not
+garbage: the predicate is a lookup against the metadata store that borrows the
+map instead of copying it (`store.Map.Match`, asserted at 0 allocs), and the
+search's own 2 allocs/op baseline is untouched.
+
+Past roughly one in a hundred, the graph stops being the right tool — a scan over
+the metadata, distance-checking only what matches, beats a traversal that is
+visiting most of the graph anyway.
+
 ---
 
 ## 5. Snapshots
@@ -300,8 +326,6 @@ deleted.
 Stated plainly, because a durability document that only lists strengths is
 marketing.
 
-- **No metadata filtering.** Metadata is stored, returned with results and
-  survives restarts, but there is no query language over it.
 - **`TypeCheckpoint` is reserved and unwritten.** Truncation reads the snapshot
   directory directly, which is the authority on what is recoverable; a log record
   duplicating that could disagree with it. The constant stays so the numbering is
