@@ -1,14 +1,26 @@
-# GoVecDB
+<p align="center">
+  <img src="docs/assets/mark.svg" alt="" width="132" height="132">
+</p>
 
-An embeddable **vector database in pure Go** — no CGO, no dependencies. Stores
-embeddings and answers *"what is most similar to this?"* using an HNSW
-approximate-nearest-neighbor index.
+<h1 align="center">GoVecDB</h1>
 
-[![CI](https://github.com/khambampati-subhash/govecdb/actions/workflows/ci.yml/badge.svg)](https://github.com/khambampati-subhash/govecdb/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/khambampati-subhash/govecdb.svg)](https://pkg.go.dev/github.com/khambampati-subhash/govecdb)
-[![Go Report Card](https://goreportcard.com/badge/github.com/khambampati-subhash/govecdb)](https://goreportcard.com/report/github.com/khambampati-subhash/govecdb)
-[![Go Version](https://img.shields.io/badge/go-1.24+-blue.svg)](https://golang.org)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+<p align="center">
+  An embeddable <b>vector database in pure Go</b> — no CGO, no dependencies.<br>
+  Stores embeddings and answers <i>“what is most similar to this?”</i><br>
+  using an HNSW approximate-nearest-neighbor index.
+</p>
+
+<p align="center">
+  <a href="https://github.com/khambampati-subhash/govecdb/actions/workflows/ci.yml"><img src="https://github.com/khambampati-subhash/govecdb/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pkg.go.dev/github.com/khambampati-subhash/govecdb"><img src="https://pkg.go.dev/badge/github.com/khambampati-subhash/govecdb.svg" alt="Go Reference"></a>
+  <a href="https://goreportcard.com/report/github.com/khambampati-subhash/govecdb"><img src="https://goreportcard.com/badge/github.com/khambampati-subhash/govecdb" alt="Go Report Card"></a>
+  <a href="https://golang.org"><img src="https://img.shields.io/badge/go-1.24+-blue.svg" alt="Go Version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
+</p>
+
+> The mark is *Glaucus atlanticus*, the blue dragon sea slug. Its cerata fan out
+> from the body the way edges radiate from a node in a navigable graph — which is
+> what an HNSW index is.
 
 ```go
 db, _ := govecdb.Open("data", govecdb.WithDimension(768))

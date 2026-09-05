@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="64 72 384 384" width="512" height="512" role="img" aria-label="GoVecDB">
+  <title>GoVecDB</title>
+  <desc>A blue dragon sea slug (Glaucus atlanticus), whose cerata fan out from the body like edges radiating from a node in a navigable graph.</desc>
+
+  <defs>
+    <!--
+      Base to tip, and it stops at cyan rather than running out to white. The
+      earlier version burned out to near-white, which glowed against a dark
+      square and disappeared entirely on a light page - the exact failure a
+      transparent mark has to survive.
+    -->
+    <linearGradient id="cera" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#1E3A8A"/>
+      <stop offset="52%" stop-color="#0EA5E9"/>
+      <stop offset="100%" stop-color="#67E8F9"/>
+    </linearGradient>
+
+    <linearGradient id="bodyfill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#60A5FA"/>
+      <stop offset="45%" stop-color="#1D4ED8"/>
+      <stop offset="100%" stop-color="#0A1746"/>
+    </linearGradient>
+
+    <!-- One cerata: long, rounded at the base, drawn to a fine point. -->
+    <path id="c" d="M0 0 C 28 -15, 76 -13, 126 0 C 76 13, 28 15, 0 0 Z" fill="url(#cera)"/>
+
+    <!--
+      Five to a cluster - one node and the neighbours it keeps. The spread is
+      kept under 90 degrees so each cluster reads as its own paddle; opening it
+      wider merges the three into a single spiky ring.
+    -->
+    <g id="fan">
+      <g transform="rotate(-44) scale(0.72)"><use href="#c"/></g>
+      <g transform="rotate(-22) scale(0.90)"><use href="#c"/></g>
+      <g><use href="#c"/></g>
+      <g transform="rotate(22) scale(0.90)"><use href="#c"/></g>
+      <g transform="rotate(44) scale(0.72)"><use href="#c"/></g>
+    </g>
+
+    <!--
+      Three clusters down the right flank; mirrored below for the left. The
+      first starts well below the head - swept any higher it closes over the
+      face, and the face is what makes this a character rather than a plant.
+    -->
+    <g id="flank">
+      <g transform="translate(286,212) rotate(-17) scale(1.00)"><use href="#fan"/></g>
+      <g transform="translate(280,288) rotate(5) scale(1.06)"><use href="#fan"/></g>
+      <g transform="translate(266,356) rotate(28) scale(0.80)"><use href="#fan"/></g>
+    </g>
+  </defs>
+
+  <!--
+    No container and no glow. A mark has to sit on a README, a light page and a
+    dark one without bringing its own background, and a blur that reads as
+    bioluminescence on navy reads as grey haze on white.
+
+    The whole animal drifts. Slow on purpose: this thing floats upside down on
+    the surface tension of the open ocean, and a logo that jitters reads as a
+    loading spinner.
+  -->
+  <g>
+    <animateTransform attributeName="transform" type="translate"
+                      values="0,-7; 0,7; 0,-7" dur="5.2s"
+                      calcMode="spline" keySplines="0.45 0 0.55 1; 0.45 0 0.55 1"
+                      repeatCount="indefinite"/>
+
+    <g>
+      <animateTransform attributeName="transform" type="rotate"
+                        values="-2.2 256 280; 2.2 256 280; -2.2 256 280" dur="7.5s"
+                        calcMode="spline" keySplines="0.45 0 0.55 1; 0.45 0 0.55 1"
+                        repeatCount="indefinite"/>
+
+      <!-- Cerata sit behind the body so they read as emerging from it. -->
+      <use href="#flank"/>
+      <use href="#flank" transform="translate(512,0) scale(-1,1)"/>
+
+      <!-- Body: a broad head, holding its width, then drawn out to a long tail. -->
+      <path d="M256 112
+               C 296 112, 305 140, 301 170
+               C 298 214, 290 266, 280 320
+               C 272 368, 264 414, 256 452
+               C 248 414, 240 368, 232 320
+               C 222 266, 214 214, 211 170
+               C 207 140, 216 112, 256 112 Z"
+            fill="url(#bodyfill)"/>
+
+      <!--
+        The silver dorsal stripe this animal is known for - a stripe, not a
+        belly. Wider than this and the body reads as a white feather with blue
+        trim, which is the opposite of the animal.
+      -->
+      <path d="M256 132
+               C 272 132, 277 152, 275 176
+               C 273 214, 268 264, 263 314
+               C 260 356, 258 394, 256 418
+               C 254 394, 252 356, 249 314
+               C 244 264, 239 214, 237 176
+               C 235 152, 240 132, 256 132 Z"
+            fill="#E4F6FF" opacity="0.94"/>
+
+      <!-- Rhinophores. -->
+      <g fill="#1D4ED8">
+        <ellipse cx="232" cy="106" rx="9" ry="17" transform="rotate(-20 232 106)"/>
+        <ellipse cx="280" cy="106" rx="9" ry="17" transform="rotate(20 280 106)"/>
+      </g>
+
+      <!-- Cartoon eyes. The real animal's are near-invisible; a mark needs a face. -->
+      <g>
+        <circle cx="240" cy="158" r="13" fill="#FFFFFF"/>
+        <circle cx="272" cy="158" r="13" fill="#FFFFFF"/>
+        <circle cx="243" cy="161" r="6.5" fill="#0A1746"/>
+        <circle cx="275" cy="161" r="6.5" fill="#0A1746"/>
+      </g>
+    </g>
+  </g>
+</svg>
