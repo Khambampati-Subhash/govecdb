@@ -330,10 +330,12 @@ marketing.
   directory directly, which is the authority on what is recoverable; a log record
   duplicating that could disagree with it. The constant stays so the numbering is
   not rearranged later.
-- **No crash harness.** The recovery tests damage logs by truncating and
-  rewriting them, which reproduces the *shapes* power loss leaves behind but not
-  the *timing* that produces them. A test that `SIGKILL`s a child mid-write and
-  asserts the surviving prefix is exactly consistent is still owed.
+- **Torn *writes* within a record are detected, never repaired.** The crash
+  harness (below) shows that under `SyncAlways` a killed process reliably leaves
+  the log at a clean record boundary, because the bytes reach the file before
+  fsync is called. A tear needs the kill to land inside the `write` itself — a
+  narrow window, covered deterministically in `replay_test.go` by damaging a log
+  directly rather than by hoping to hit it.
 - **Single writer, assumed rather than enforced.** `O_EXCL` on segment creation
   catches two processes starting together, but not one joining later. There is no
   lock file. A snapshot directory and a log directory each belong to one database
