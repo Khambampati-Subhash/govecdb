@@ -1,0 +1,8 @@
+# The build needs the Go source and nothing else. Everything below either cannot
+# affect the binary or should not be able to.
+.git
+.github
+docs
+*.md
+Dockerfile
+.dockerignore
