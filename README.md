@@ -32,9 +32,11 @@ matches, _ := db.Search(govecdb.SearchRequest{Query: query, K: 10})
 
 ## Status
 
-**v1.0.0 — released and usable.** `govecdb.Open` gives you add, get, delete,
-search, filter, snapshot and compact over one directory, durable through a
-write-ahead log and recoverable from snapshots.
+**v1.1.0 — released and usable, as a library or as a server.** `govecdb.Open`
+gives you add, get, delete, search, filter, snapshot and compact over one
+directory, durable through a write-ahead log and recoverable from snapshots.
+`cmd/govecdbd` serves a directory of collections over HTTP, and adds no
+dependencies doing it.
 
 GoVecDB was rewritten from the ground up; the previous ~45,700-line
 implementation remains in git history. See [the record](docs/MIGRATION.md) for
@@ -62,14 +64,15 @@ Worth knowing before you adopt it, rather than after:
 | **Linux and macOS only** | The log and snapshot store fsync the containing *directory*, which is not portable to Windows. Untested there. |
 | **`Compact()` stops the world** | It holds the write lock for a full rebuild. You choose the moment; the database never triggers it. |
 | **Writers serialize** | Reads scale across cores, writes do not. |
-| **One database is one index** | Collections are [v2](docs/MIGRATION.md#v2-scope). |
-| **No logger or metrics seam** | A torn log tail found during recovery is repaired correctly and reported to nobody. |
+| **One database is one index** | Many indexes in one process means [running it as a service](docs/SERVICE.md); the library itself is still one directory, one index. |
+| **No logger or metrics seam** | Inside the library. A torn log tail found during recovery is repaired correctly and reported to nobody — the daemon logs and exports metrics, the library does not yet. |
 | **Selective filters approach a scan** | Past roughly one vector in a hundred, scanning the metadata is the better tool. |
+| **The service is a single process** | No clustering, no replication. [v2 item 8](docs/MIGRATION.md#v2-scope). |
 
-Out of scope for v1 and planned for [v2](docs/MIGRATION.md#v2-scope): clustering,
-REST/gRPC servers, collections, quantization, online compaction, and that
-observability seam. See [durability and latency](docs/DURABILITY.md) for what is
-guaranteed today and what it costs.
+Still out of scope and planned for [v2](docs/MIGRATION.md#v2-scope): clustering,
+gRPC, quantization, online compaction, and that observability seam. See
+[durability and latency](docs/DURABILITY.md) for what is guaranteed today and
+what it costs.
 
 ## Install
 
@@ -79,9 +82,19 @@ Requires **Go 1.24+**.
 go get github.com/khambampati-subhash/govecdb
 ```
 
-That is the whole installation. There is no server to run, no CGO toolchain, and
-no third-party packages come with it — GoVecDB is a library that stores its data
-in a directory you choose.
+That is the whole installation. No CGO toolchain, and no third-party packages
+come with it — GoVecDB is a library that stores its data in a directory you
+choose.
+
+If you would rather run it as a server, there is one in the box:
+
+```bash
+go install github.com/khambampati-subhash/govecdb/cmd/govecdbd@latest
+govecdbd -dir ./data
+```
+
+Still no dependencies: it is `net/http` and `encoding/json`. See
+[**running it as a service**](docs/SERVICE.md).
 
 ## Quick start
 
@@ -172,6 +185,43 @@ Nothing snapshots automatically. Call `db.Snapshot()`, or set
 `WithSnapshotInterval` — without one, a restart replays the whole log and rebuilds
 the index at ~700 µs per vector; with one, it loads a graph at gigabytes per
 second.
+
+## Or run it as a service
+
+Embedding it is the fast path — a search is microseconds of in-memory work and a
+network hop is not. When the clients are not one Go program, `cmd/govecdbd`
+serves a directory of **collections** over HTTP:
+
+```bash
+govecdbd -dir ./data                      # or: docker run -v data:/data govecdb
+```
+
+```bash
+curl -sX POST localhost:8080/v1/collections \
+  -d '{"name": "docs", "dimension": 768, "metric": "cosine"}'
+
+curl -sX POST localhost:8080/v1/collections/docs/vectors \
+  -d '{"vectors": [{"id": "doc-1", "values": [...], "metadata": {"page": 3}}]}'
+
+curl -sX POST localhost:8080/v1/collections/docs/search \
+  -d '{"query": [...], "k": 10,
+       "filter": {"op": "gte", "key": "page", "value": 2}}'
+```
+
+Each collection is an independent database — its own dimension, metric and
+durability policy — created at runtime, loaded on demand, and evictable when
+idle. The API is `net/http` and `encoding/json`, so the **zero-dependency
+guarantee is unchanged**: `go.mod` still has no `require` block.
+
+Health probes, Prometheus metrics, a bearer token, TLS, and a graceful shutdown
+that drains before it cuts. Full guide: [**running it as a
+service**](docs/SERVICE.md).
+
+> gRPC and clustering are *not* here, and when they come they will be a separate
+> module — neither gRPC nor Raft is standard library, and this one keeps its
+> guarantee. That decision was made before the server was written rather than
+> discovered afterwards; the reasoning is
+> [written down](docs/SERVICE.md#the-module-decision).
 
 ## What GoVecDB is for
 
@@ -334,8 +384,16 @@ govecdb/
 │   ├── snapshot/         atomic checksummed state keyed by log sequence
 │   ├── store/            metadata storage
 │   └── filter/           the metadata query engine
-└── docs/                 durability, roadmap, benchmarks, diagrams
+├── service/              collections: many databases in one directory
+├── httpapi/              the REST layer, net/http only
+├── cmd/govecdbd/         the daemon
+└── docs/                 durability, roadmap, service guide, benchmarks
 ```
+
+The three above `internal/` are the service, and they are strictly a layer *on
+top*: `service` sits above `DB`, `httpapi` above `service`, and the daemon is
+flags around the two. Nothing in the root package knows they exist, which is why
+adding them changed no behaviour for anyone embedding the library.
 
 **The `.go` files at the repository root are not loose files — they are the
 package you import.** Go resolves `github.com/khambampati-subhash/govecdb` to the
@@ -361,7 +419,8 @@ One responsibility per file:
 Each `internal/` package has its own README explaining the decisions behind it —
 [`hnsw`](internal/hnsw/README.md), [`wal`](internal/wal/README.md),
 [`snapshot`](internal/snapshot/README.md), [`store`](internal/store/README.md),
-[`filter`](internal/filter/README.md).
+[`filter`](internal/filter/README.md) — and so do the two service packages,
+[`service`](service/README.md) and [`httpapi`](httpapi/README.md).
 
 ## Measured performance
 
@@ -551,11 +610,18 @@ data being at fault. Clustered data, which is what real embeddings look like, is
 10. ~~**Metadata filtering**~~ — done; a query engine applied inside the traversal,
     so a filtered search still returns `K`
 
-**v1 is complete.** [v2 is scoped](docs/MIGRATION.md#v2-scope) in dependency
-order — an observability seam, online compaction, fine-grained write locking,
-collections, filter selectivity estimation, a quantized index, then REST/gRPC and
-clustering. The last two almost certainly land in a separate module: gRPC and
-Raft are not stdlib, and this one keeps its zero-dependency guarantee.
+11. ~~**Collections**~~ — done in `service/`; many independent databases in one
+    directory, loaded on demand and evicted when idle
+12. ~~**REST server**~~ — done in `httpapi/` and `cmd/govecdbd`; `net/http` only,
+    so the zero-dependency guarantee survives it
+
+**v1 is complete, and v2 has started at the server end.** The rest is
+[scoped](docs/MIGRATION.md#v2-scope) in dependency order — an observability seam,
+online compaction, fine-grained write locking, filter selectivity estimation, a
+quantized index, then gRPC and clustering. Those last two land in a *separate
+module*: neither gRPC nor Raft is stdlib, and this one keeps its guarantee. See
+[the module decision](docs/SERVICE.md#the-module-decision), which was made before
+the server was written rather than after.
 
 ## Running the tests and benchmarks
 
@@ -578,6 +644,9 @@ go test ./internal/wal/ -v       # the write-ahead log
 go test ./internal/snapshot/ -v  # point-in-time state
 go test ./internal/store/ -v     # metadata
 go test ./internal/filter/ -v    # the metadata query engine
+go test ./service/ -v            # collections
+go test ./httpapi/ -v            # the REST layer
+go test ./cmd/... -v             # the daemon, over a real socket
 ```
 
 Benchmarks, including the filter-selectivity and durability numbers quoted above:

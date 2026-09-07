@@ -126,16 +126,23 @@ operate.
 The order is a dependency order, not a priority list. Each item says what blocks
 it, because several of these look independent and are not.
 
-| | Item | Blocked on |
-|---|---|---|
-| 1 | `internal/obs` — Logger + Metrics seam | nothing |
-| 2 | Online (non-blocking) compaction | 1, for the same reason everything wants 1 |
-| 3 | Fine-grained write locking | 2 |
-| 4 | Collections / namespaces | nothing, but wants 1 |
-| 5 | Filter selectivity estimation | 4 is unrelated; needs store statistics |
-| 6 | Quantized index | nothing — the `Index` interface was built for it |
-| 7 | REST / gRPC server | 4 |
-| 8 | Clustering and replication | 7 |
+| | Item | Blocked on | |
+|---|---|---|---|
+| 1 | `internal/obs` — Logger + Metrics seam | nothing | |
+| 2 | Online (non-blocking) compaction | 1, for the same reason everything wants 1 | |
+| 3 | Fine-grained write locking | 2 | |
+| 4 | Collections / namespaces | nothing, but wants 1 | **done in v1.1.0** |
+| 5 | Filter selectivity estimation | 4 is unrelated; needs store statistics | |
+| 6 | Quantized index | nothing — the `Index` interface was built for it | |
+| 7 | REST server | 4 | **done in v1.1.0** |
+| 7b | gRPC server | 7, and a second module | |
+| 8 | Clustering and replication | 7 | |
+
+Items 4 and 7 shipped in v1.1.0, out of the order above — they were the two that
+needed nothing from the observability seam and they are the two that turn this
+from a library into something that can be operated. What they did *not* do is
+make 1 less necessary: the daemon logs and exports metrics at the socket, which
+is a layer too far out to see a torn log tail or a skipped truncation.
 
 ### 1. The observability seam
 
@@ -177,7 +184,7 @@ It follows online compaction rather than leading it, because the WAL's ordering
 constraint — write to the log, then apply — decides what a finer lock is allowed
 to do, and the double-buffered swap decides what it must not break.
 
-### 4. Collections / namespaces
+### 4. Collections / namespaces — done in v1.1.0
 
 One database is one index. Many workloads want many independent indexes in one
 process, with load-on-demand and idle eviction so an idle collection costs no
@@ -187,6 +194,23 @@ This sits *above* `DB` rather than changing it, which is why it was cut cleanly
 from v1 and why it is not a rewrite. The parts that need thought are lifecycle,
 not indexing: one directory per collection, the one-writer-per-directory rule
 already enforced by `openDirs`, and eviction that cannot race a search.
+
+**Shipped as `service/`**, and the prediction held — it is entirely lifecycle,
+and `DB` was not touched. Three things the sketch above did not anticipate:
+
+- **The structural options have to be written down.** Dimension, metric and `M`
+  cannot be reopened under different values, so they cannot come from a flag
+  somebody edits between restarts. Each collection carries a `collection.json`,
+  written atomically, recording the *effective* values rather than the zeros that
+  meant "default" — otherwise a change to this module's defaults would silently
+  rebuild an existing index under a different `M`.
+- **`openDirs` is a guard, not a design.** Two goroutines reaching for the same
+  unloaded collection would both call `Open` and one would get `ErrAlreadyOpen` on
+  an ordinary request. The manager registers a placeholder and releases its lock
+  for the duration of the open, so the second waits on the first.
+- **Names are a security boundary**, because a collection name becomes a
+  directory name where a vector id never does. `ValidateName` is ASCII
+  alphanumerics, `-` and `_` — no dot at all, so `..` is refused by construction.
 
 ### 5. Filter selectivity estimation
 
@@ -212,7 +236,7 @@ float32 vectors, which is the dominant cost at scale. The measurement harness
 already reports recall against brute-force ground truth, so the trade is
 measurable on day one rather than argued about.
 
-### 7. REST / gRPC server
+### 7. REST server — done in v1.1.0. gRPC is not.
 
 Returns from git history rather than from scratch: `api/`, `proto/` and `client/`
 all exist on `main` before the clean-slate commit. They should be rewritten to
@@ -228,6 +252,33 @@ HTTP and probably gRPC, and the module has no third-party dependencies today.
 `net/http` is stdlib; gRPC is not. The likely answer is that the server lives in
 a *separate module* so the library stays stdlib-only, and that decision should be
 made before code is written rather than discovered afterwards.
+
+**It was, and the answer is narrower than the sketch assumed:**
+
+> The library and the HTTP API stay in **one module**, because `net/http` and
+> `encoding/json` are stdlib and there is no dependency to isolate. gRPC and Raft
+> are not stdlib, so when they arrive they arrive as a **separate module** that
+> imports this one.
+
+Splitting the module for the *HTTP* server would have bought nothing and cost a
+second tag, a second CI pipeline and a `replace` directive during development.
+The split is real, it is just drawn around gRPC rather than around "server". The
+existing packages do not move when that day comes, which is what deciding this
+first was for.
+
+Shipped as `httpapi/` (an `http.Handler`) and `cmd/govecdbd` (flags and a
+shutdown sequence). What the sketch above understates is how much of the work is
+*refusal* rather than routing: bodies capped without trusting `Content-Length`,
+unknown fields rejected because a silently ignored `dimensions` builds a
+collection at the wrong width, filter trees depth-limited because a filter is
+recursion driven by a request body. Decoding is the security boundary, one layer
+further out than `validate.go` says it — and the same sentence applies.
+
+One deliberate non-addition: `internal/filter` still has no wire format. The JSON
+one lives in `httpapi`, because a serialization format is a compatibility promise
+and the package making it should be the one a client can see.
+
+Full record in [SERVICE.md](SERVICE.md).
 
 ### 8. Clustering and replication
 
@@ -563,6 +614,11 @@ original sketch, and the narrowing is the interesting part.
   third-party dependencies and that is a design goal, not an accident. gRPC and
   Raft are not stdlib. Decide the multi-module split *before* writing item 7,
   because retrofitting one after a server exists means moving every import path.
+
+  *Settled in v1.1.0, before the server was written: one module for the library
+  and the HTTP API, a separate one for gRPC and Raft. `go.mod` still has no
+  `require` block, and CI fails the build if one appears. The risk is not
+  retired — it is now concentrated on whoever writes the first line of gRPC.*
 - **The record format is now load-bearing for two things.** Replication (item 8)
   wants to be built on `Replay` and the existing records. If it turns out to need
   a format change, that change is far cheaper before v2 ships than after — the

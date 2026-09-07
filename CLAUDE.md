@@ -13,19 +13,25 @@ Module path: `github.com/khambampati-subhash/govecdb` · Go 1.24+ (built with 1.
 **Zero third-party dependencies** — `go.mod` has no `require` block and there is no
 `go.sum`. Do not add a dependency without asking; stdlib-only is a design goal.
 
-## Where the project is: v1 complete, v2 scoped
+## Where the project is: v1 complete, v2 started at the server end
 
 Work lands on **`main`**. v1 was a **rebuild from scratch, one subsystem at a
 time**, using the old implementation as a reference in git history rather than as
 a source to copy — and it is **done**: an embeddable library with durability,
 recovery and metadata filtering.
 
+**v1.1.0 added the service**: collections (`service/`), a REST API (`httpapi/`)
+and a daemon (`cmd/govecdbd`) — v2 items 4 and 7, taken out of order because
+neither needed the observability seam and together they are what makes this
+operable. They sit strictly above `DB`; embedding the library is unchanged.
+
 Read `docs/MIGRATION.md` before making structural changes. It now holds both the
 v1 record (why each subsystem is shaped the way it is) and **the v2 scope**, in
 dependency order: observability seam → online compaction → fine-grained write
-locking → collections → selectivity estimation → quantized index → REST/gRPC →
-clustering. Do not start one of those without reading what blocks it; several
-look independent and are not.
+locking → ~~collections~~ → selectivity estimation → quantized index →
+~~REST~~/gRPC → clustering. Do not start one of those without reading what blocks
+it; several look independent and are not. `docs/SERVICE.md` is the service
+manual and holds the module decision.
 
 `docs/DURABILITY.md` is the companion: what survives which failure, what each
 guarantee costs, and every latency number in one place. **Update it when you
@@ -33,14 +39,15 @@ change a durability guarantee or move a benchmark** — it is the document a use
 would be misled by if it went stale. `docs/PLAN.md` and `docs/PLAN_PROGRESS.md`
 are the original plan and its execution log.
 
-**Two v2 constraints worth knowing before writing any of it:** the module has
-**zero third-party dependencies** and gRPC and Raft are not stdlib, so a server
-or a cluster almost certainly means a *separate module* — decide that before
-writing code, not after. And replication should be built on the WAL's existing
-`Replay` and record format; if it needs a format change, making it before v2
-ships is far cheaper than after.
+**Two v2 constraints worth knowing before writing any of it.** The first is now
+**decided rather than pending**: the library and the HTTP API are one module
+because `net/http` is stdlib, and **gRPC and Raft go in a separate module** that
+imports this one. Do not add a `require` block to `go.mod`; CI fails the build if
+one appears. The second is unchanged: replication should be built on the WAL's
+existing `Replay` and record format, and if it needs a format change, making it
+before v2 ships is far cheaper than after.
 
-### The codebase is the root package plus `internal/`
+### The codebase is the root package, `internal/`, and the service on top
 The root package (`db.go`, `vector.go`, `filter.go`, `options.go`, `validate.go`,
 `index.go`, `codec.go`, `recovery.go`, `errors.go`) is the public API. Under it:
 `internal/hnsw`, `internal/wal`, `internal/snapshot`, `internal/store`,
@@ -63,6 +70,19 @@ harness — see `docs/MIGRATION.md`.
   **opaque payload**. The graph codec lives in `internal/hnsw/codec.go`.
 - `internal/store/` — metadata storage, and `Match` for the filtered search path.
 - `internal/filter/` — the metadata query engine.
+
+**v2 items 4 and 7 shipped in v1.1.0**, as three packages strictly *above* `DB`
+— nothing in the root package or `internal/` knows they exist, and adding them
+changed no behaviour for anyone embedding the library:
+
+- `service/` — collections: many independent databases in one directory, with
+  on-disk specs, load-on-demand and idle eviction.
+- `httpapi/` — a REST/JSON `http.Handler` over a `service.Manager`. `net/http`
+  and `encoding/json` only.
+- `cmd/govecdbd/` — the daemon: flags, TLS, signals, graceful shutdown.
+
+See the service quick reference below, `docs/SERVICE.md`, and the two package
+READMEs.
 
 ### The legacy code is gone
 Every previous package (`index/`, `store/`, `persist/`, `api/`, `collection/`,
@@ -90,7 +110,17 @@ go test ./internal/wal/ -v       # the write-ahead log
 go test ./internal/snapshot/ -v  # point-in-time state
 go test ./internal/store/ -v     # metadata
 go test ./internal/filter/ -v    # the metadata query engine
+go test ./service/ -v            # collections
+go test ./httpapi/ -v            # the REST layer
+go test ./cmd/... -v             # the daemon, over a real socket
 go test ./... -race              # race detector (run before merging)
+```
+
+Running the service locally:
+
+```bash
+go run ./cmd/govecdbd -dir /tmp/govecdb        # 127.0.0.1:8080 by default
+GOVECDB_AUTH_TOKEN=x go run ./cmd/govecdbd -dir /tmp/govecdb -addr 0.0.0.0:8080
 ```
 
 Measurement (the sweeps double as the benchmark harness — same code, so a README
@@ -404,6 +434,74 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   left alone (`MkdirAll` only applies its mode on creation, and silently
   tightening an operator's choice would revoke access granted on purpose).
 - Reopening with a different **dimension, metric or M** is refused — structural.
+
+## Service quick reference (`service`, `httpapi`, `cmd/govecdbd`)
+
+- **The module decision is made and written down.** The library and the HTTP API
+  are **one module** — `net/http` and `encoding/json` are stdlib, so there is no
+  dependency to isolate. **gRPC and Raft go in a separate module** that imports
+  this one. Do not add a `require` block to `go.mod` for a server feature; CI
+  fails the build if one appears. Reasoning in `docs/SERVICE.md`.
+- **These three packages sit above `DB` and never inside it.** If a change needs
+  the root package to know about collections or HTTP, it is the wrong change.
+- **`service.ValidateName` is a security boundary**, not style. A collection name
+  becomes a *directory* name, which vector ids never do (`validate.go` says so).
+  ASCII alphanumerics, `-` and `_`, alphanumeric first, ≤ 64 bytes. **No dot at
+  all**, so `.` and `..` are refused by construction rather than by a special case
+  someone later deletes. **ASCII only**, because macOS normalizes to NFD and Linux
+  does not — a name holding `é` stops comparing equal to itself when the volume
+  moves. The narrowness is also why collection names need no escaping in a URL
+  path or a Prometheus label; `httpapi/metrics.go` depends on that.
+- **A collection's spec is written down, with defaults resolved.** Dimension,
+  metric and `M` are structural, so `collection.json` records the *effective*
+  values, never the zero that meant "default" — otherwise changing a library
+  default silently rebuilds an existing index under a different `M`. Same rule the
+  HNSW header follows. It is written temp → fsync → rename → fsync the directory.
+- **The manager releases its lock while opening a collection**, registering a
+  placeholder that concurrent callers wait on. Not just an optimisation:
+  `govecdb` refuses a second writer on one directory, so two goroutines opening
+  the same collection surface `ErrAlreadyOpen` on an ordinary request.
+  `TestConcurrentUseOpensOnce` guards it.
+- **`Manager.Use(name, fn)` is a callback, not `Acquire`/`Release`.** A borrow
+  leaked by an early return is a collection that is never evicted again. Only a
+  collection with no borrowers can be evicted or dropped, which is what stops a
+  search being closed underneath. `Drop` **waits** rather than failing.
+- **`ErrTooManyOpen` does not queue.** Waiting for a slot turns a capacity problem
+  into a timeout somewhere else; the handler answers 503 with `Retry-After`.
+- **Decoding is the security boundary, one layer out.** Bodies capped with
+  `MaxBytesReader` (never by trusting `Content-Length`), **unknown fields
+  rejected** (a silent `dimensions` builds a collection at the wrong width),
+  filter trees depth-limited (recursion driven by a request body), `Content-Type`
+  must be JSON. **5xx bodies say "internal error"**; the detail goes to the log.
+  Do not add a second validator for `K`, `Ef`, dimension or metadata size — those
+  bounds live in `validate.go` and are tested there.
+- **A JSON number without a decimal point or exponent is an `int64`; anything
+  else is a `float64`.** Storing everything as float rounds a nanosecond timestamp
+  (1.7e18 is past 2^53); storing everything as int turns 0.5 into 0. It is free at
+  query time because `int64` and `float64` compare exactly.
+- **The filter wire format lives in `httpapi`, not `internal/filter`.** A
+  serialization format is a compatibility promise and the package making it should
+  be the one a client can see. `internal/filter` still has no wire format.
+- **One error shape, always.** `net/http` answers an unrouted path and a wrong
+  method in plain text; a middleware rewrites those two into the JSON shape and
+  keeps the `Allow` header. Note `classify` checks `ErrInvalidFilter` **before**
+  `ErrInvalidMetadata`: one function decodes both a metadata value and a filter
+  operand, so a bad operand wraps the second inside the first.
+- **Auth is one shared bearer token**, constant-time compared, exempting only
+  `/healthz` and `/readyz` — a probe that can fail for an authentication reason
+  reports the wrong thing. **`/metrics` is not exempt**: it names every collection
+  and its size. No users, no roles; that would imply an authorization story this
+  does not have.
+- **No latency histogram.** Bucket boundaries chosen without a dependency are
+  chosen badly. Count plus total duration is an honest mean; percentiles wait for
+  the observability seam (v2 item 1).
+- **The daemon binds `127.0.0.1` by default** and reads its token from
+  `GOVECDB_AUTH_TOKEN`, never a flag — a flag lands in `ps` output and shell
+  history. Non-loopback without a token **warns, does not refuse**: binding
+  `0.0.0.0` in a container is ordinary.
+- **Shutdown order matters**: fail `/readyz` → drain → `srv.Shutdown` → close the
+  manager. Never close the manager first; a handler holding a borrowed collection
+  must finish against a live database.
 
 ## Locked baselines — do not regress
 
