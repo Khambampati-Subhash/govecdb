@@ -87,6 +87,22 @@ const (
 	SyncNever
 )
 
+// String names the policy, so a layer that has to write one down — a config
+// file, a log line, an API response — does not invent its own spelling. Metric
+// carries one for the same reason.
+func (p SyncPolicy) String() string {
+	switch p {
+	case SyncAlways:
+		return "always"
+	case SyncInterval:
+		return "interval"
+	case SyncNever:
+		return "never"
+	default:
+		return "unknown"
+	}
+}
+
 func (p SyncPolicy) valid() bool {
 	return p == SyncAlways || p == SyncInterval || p == SyncNever
 }
