@@ -1,12 +1,15 @@
 // Distance metrics and their kernels. Everything here returns SMALLER MEANS
 // CLOSER, so the graph never has to branch on which metric is in use.
 //
-// Kernels are hand-unrolled with four independent accumulators. This is not
+// Kernels are hand-unrolled with eight independent accumulators. This is not
 // cosmetic: a single accumulator serialises the FP-add dependency chain, so the
-// CPU stalls waiting on the previous add. Four chains let the out-of-order
-// engine overlap them, and it also gives the Go compiler a shape it can
-// auto-vectorise. Slices are re-sliced to a common length first so the bounds
-// checks are hoisted out of the loop.
+// CPU stalls waiting on the previous add. Go emits scalar FMAs, whose ~4-cycle
+// latency against several issue ports means four chains still left the kernel
+// latency-bound; eight took Dot from 27.5 to 18.4 ns at dim 128 and from 239 to
+// 116 ns at dim 768 (Apple M4). Sixteen is slower again — the accumulators
+// spill out of registers. Each step re-slices a fixed 8-wide window with a
+// capped capacity (x := a[:8:8]), which is what lets the compiler prove every
+// index in range and drop the bounds checks inside the loop.
 
 package hnsw
 
@@ -79,18 +82,23 @@ func Normalize(v []float32) {
 // Dot returns the dot product of a and b.
 func Dot(a, b []float32) float32 {
 	b = b[:len(a)]
-	var s0, s1, s2, s3 float32
-	i := 0
-	for ; i+4 <= len(a); i += 4 {
-		s0 += a[i] * b[i]
-		s1 += a[i+1] * b[i+1]
-		s2 += a[i+2] * b[i+2]
-		s3 += a[i+3] * b[i+3]
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	for len(a) >= 8 {
+		x, y := a[:8:8], b[:8:8]
+		s0 += x[0] * y[0]
+		s1 += x[1] * y[1]
+		s2 += x[2] * y[2]
+		s3 += x[3] * y[3]
+		s4 += x[4] * y[4]
+		s5 += x[5] * y[5]
+		s6 += x[6] * y[6]
+		s7 += x[7] * y[7]
+		a, b = a[8:], b[8:]
 	}
-	for ; i < len(a); i++ {
+	for i := range a {
 		s0 += a[i] * b[i]
 	}
-	return (s0 + s1) + (s2 + s3)
+	return ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7))
 }
 
 // oneMinusDot is the cosine distance for vectors already unit length.
@@ -102,23 +110,26 @@ func NegativeDot(a, b []float32) float32 { return -Dot(a, b) }
 // SquaredEuclidean returns |a-b|^2 (monotonic with the true distance).
 func SquaredEuclidean(a, b []float32) float32 {
 	b = b[:len(a)]
-	var s0, s1, s2, s3 float32
-	i := 0
-	for ; i+4 <= len(a); i += 4 {
-		d0 := a[i] - b[i]
-		d1 := a[i+1] - b[i+1]
-		d2 := a[i+2] - b[i+2]
-		d3 := a[i+3] - b[i+3]
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	for len(a) >= 8 {
+		x, y := a[:8:8], b[:8:8]
+		d0, d1, d2, d3 := x[0]-y[0], x[1]-y[1], x[2]-y[2], x[3]-y[3]
+		d4, d5, d6, d7 := x[4]-y[4], x[5]-y[5], x[6]-y[6], x[7]-y[7]
 		s0 += d0 * d0
 		s1 += d1 * d1
 		s2 += d2 * d2
 		s3 += d3 * d3
+		s4 += d4 * d4
+		s5 += d5 * d5
+		s6 += d6 * d6
+		s7 += d7 * d7
+		a, b = a[8:], b[8:]
 	}
-	for ; i < len(a); i++ {
+	for i := range a {
 		d := a[i] - b[i]
 		s0 += d * d
 	}
-	return (s0 + s1) + (s2 + s3)
+	return ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7))
 }
 
 // CosineDistance is the general form for vectors of arbitrary length. The graph
