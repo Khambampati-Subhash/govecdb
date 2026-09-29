@@ -106,7 +106,8 @@ func (g *Graph) insertPrepared(id string, vec []float32) {
 		// nil: a build never filters. The graph's shape has to be the same
 		// whatever queries later run against it.
 		w := g.searchLayer(st, vec, cur, g.cfg.EfConstruction, lc, nil)
-		neighbors := g.selectNeighbors(st, w, g.maxConn(lc))
+		neighbors := g.selectNeighbors(st, w, g.maxConn(lc), st.selected)
+		st.selected = neighbors
 
 		// searchLayer yields live nodes only, so inserting into a region whose
 		// every member is tombstoned returns nothing to attach to — and a node

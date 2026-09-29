@@ -17,7 +17,10 @@ type searchState struct {
 	visited  visitedList
 	cands    []candidate // min-heap: the frontier still worth expanding
 	results  []candidate // max-heap: the best ef found so far, worst at [0]
+	found    []candidate // searchLayer's sorted output; valid until its next call
 	rejected []candidate // selectNeighbors' backfill list
+	pruneBuf []candidate // pruneConnections' distance-annotated neighbors
+	selected []int       // insert's chosen neighbors for the current layer
 	queryBuf []float32   // normalized copy of the caller's query
 }
 

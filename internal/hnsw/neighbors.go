@@ -1,8 +1,8 @@
 package hnsw
 
 import (
+	"cmp"
 	"slices"
-	"sort"
 )
 
 // selectNeighbors picks up to m edges for base out of cands (ascending by
@@ -14,16 +14,19 @@ import (
 // c is reachable via s, so that edge buys nothing. Alpha > 1 tightens the test,
 // preserving more long-range links and making the graph easier to navigate.
 // cands carry their distance to base already, so base itself is not needed.
-func (g *Graph) selectNeighbors(st *searchState, cands []candidate, m int) []int {
+//
+// The selection is appended to dst[:0] and returned, so the caller decides where
+// it lives: pruneConnections hands in the node's own neighbor array and the
+// result overwrites it in place. dst must not alias cands.
+func (g *Graph) selectNeighbors(st *searchState, cands []candidate, m int, dst []int) []int {
+	selected := dst[:0]
 	if len(cands) <= m {
-		out := make([]int, len(cands))
-		for i, c := range cands {
-			out[i] = c.idx
+		for _, c := range cands {
+			selected = append(selected, c.idx)
 		}
-		return out
+		return selected
 	}
 
-	selected := make([]int, 0, m)
 	rejected := st.rejected[:0]
 
 	for _, c := range cands {
@@ -65,11 +68,17 @@ func (g *Graph) pruneConnections(st *searchState, idx, lc int) {
 
 	// Compute each distance exactly once. Doing this inside a sort comparator
 	// instead would recompute them O(n log n) times.
+	//
+	// The candidates live in pooled scratch, and the selection is written back
+	// over nbrs itself — safe because cands holds a copy of every index. This
+	// runs for up to M neighbors on every insert, so allocating either one here
+	// was most of an insert's garbage: 206 allocs and 50 KB per op, measured.
 	self := g.nodes[idx].vector
-	cands := make([]candidate, len(nbrs))
-	for i, nb := range nbrs {
-		cands[i] = candidate{nb, g.dist(g.nodes[nb].vector, self)}
+	cands := st.pruneBuf[:0]
+	for _, nb := range nbrs {
+		cands = append(cands, candidate{nb, g.dist(g.nodes[nb].vector, self)})
 	}
+	st.pruneBuf = cands
 
 	// Live neighbors outrank tombstones, and only then does distance decide.
 	//
@@ -84,24 +93,40 @@ func (g *Graph) pruneConnections(st *searchState, idx, lc int) {
 	// backfills to the cap regardless, so a node with few live candidates still
 	// keeps its tombstone edges and the bridges they provide. Tombstones only
 	// lose slots where live alternatives actually exist.
-	sort.Slice(cands, func(i, j int) bool {
-		di, dj := g.nodes[cands[i].idx].deleted, g.nodes[cands[j].idx].deleted
-		if di != dj {
-			return !di
+	//
+	// slices.SortFunc rather than sort.Slice: the latter builds a reflection
+	// swapper, which allocates on every call.
+	slices.SortFunc(cands, func(a, b candidate) int {
+		da, db := g.nodes[a.idx].deleted, g.nodes[b.idx].deleted
+		if da != db {
+			if da {
+				return 1
+			}
+			return -1
 		}
-		return cands[i].dist < cands[j].dist
+		return cmp.Compare(a.dist, b.dist)
 	})
 
-	g.nodes[idx].neighbors[lc] = g.selectNeighbors(st, cands, maxConn)
+	g.nodes[idx].neighbors[lc] = g.selectNeighbors(st, cands, maxConn, nbrs)
 }
 
 // connect adds `to` to `from`'s neighbor list on layer lc, skipping duplicates.
+//
+// A list is given room for maxConn+1 the first time it is full: insert appends
+// one edge and immediately prunes back to maxConn in place, so that one spare
+// slot is all a list ever needs and it never reallocates again. Plain append
+// would double a full 32-edge list to 64 on the first overflow, which is both
+// the allocation and twice the memory the list will ever use.
 func (g *Graph) connect(from, to, lc int) {
 	n := g.nodes[from]
-	if slices.Contains(n.neighbors[lc], to) {
+	nbrs := n.neighbors[lc]
+	if slices.Contains(nbrs, to) {
 		return
 	}
-	n.neighbors[lc] = append(n.neighbors[lc], to)
+	if len(nbrs) == cap(nbrs) {
+		nbrs = slices.Grow(nbrs, max(1, g.maxConn(lc)+1-len(nbrs)))
+	}
+	n.neighbors[lc] = append(nbrs, to)
 }
 
 // neighborsAt returns node idx's neighbor slice on layer lc (nil if the node

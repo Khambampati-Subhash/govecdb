@@ -1,5 +1,7 @@
 package hnsw
 
+import "slices"
+
 // Result is a single search hit.
 type Result struct {
 	ID       string
@@ -131,7 +133,8 @@ func (g *Graph) greedyClosest(start int, target []float32, lc int) int {
 
 // searchLayer runs the core best-first search on a single layer, returning up
 // to ef closest ADMISSIBLE nodes to query, sorted ascending by distance. Callers
-// hold at least g.mu.RLock and own st.
+// hold at least g.mu.RLock and own st. The returned slice belongs to st and is
+// overwritten by the next searchLayer on it: copy out anything kept longer.
 //
 // Two things split the structures this runs on, and that split is the whole of
 // both the delete design and the filter design:
@@ -148,8 +151,7 @@ func (g *Graph) greedyClosest(start int, target []float32, lc int) int {
 func (g *Graph) searchLayer(st *searchState, query []float32, entryPoint, ef, lc int, allow func(id string) bool) []candidate {
 	st.visited.reset(len(g.nodes))
 
-	// Reuse the heap backing arrays; only the result slice is freshly allocated
-	// because the caller keeps it.
+	// Reuse the heap backing arrays.
 	cands := st.cands[:0]
 	results := st.results[:0]
 
@@ -197,10 +199,14 @@ func (g *Graph) searchLayer(st *searchState, query []float32, entryPoint, ef, lc
 		}
 	}
 
-	out := make([]candidate, len(results))
+	// The output lives in the state too. Both callers are done with it before
+	// the next traversal on this state — Search copies it into Results, Insert
+	// uses it for one layer — so a fresh slice per call was pure garbage.
+	out := slices.Grow(st.found[:0], len(results))[:len(results)]
 	for i := len(out) - 1; i >= 0; i-- {
 		out[i], results = maxPop(results) // farthest first -> fill from end
 	}
+	st.found = out
 
 	// Hand the (possibly regrown) backing arrays back to the state so the next
 	// traversal inherits the capacity.
