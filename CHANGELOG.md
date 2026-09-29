@@ -10,6 +10,39 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Nothing yet. See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned
 and in what order.
 
+## [1.1.1] - 2026-09-29
+
+A bug fix and a performance release. No exported API changed, no on-disk format
+changed, and every recall baseline holds at its locked value.
+
+### Fixed
+
+- **`AddBatch` fsynced once per vector under `SyncAlways`.** Every REST upsert
+  goes through it, so a 1,000-vector POST paid 1,000 fsyncs — about four seconds
+  on a laptop SSD — while looking like a bulk write. The batch is now logged
+  through a new internal `wal.Writer.AppendBatch` and synced once, after the last
+  record: 100 vectors cost 47 ms end to end, against 0.56–0.70 s before. Nothing
+  is acknowledged before it is durable, exactly as before. A batch whose *write*
+  fails now applies none of itself to the index (it used to apply a prefix); the
+  database is read-only either way, and any prefix that reached the disk is
+  replayed on the next start.
+
+### Changed
+
+- **Distance kernels use eight accumulators, not four.** Go emits scalar FMAs,
+  and four dependency chains left the kernel waiting on FMA latency. Dot product
+  is 27.5 → 18.4 ns at dimension 128 and 239 → 116 ns at 768 (Apple M4). Search
+  is 23% faster at 10k × 128 and 44–46% faster at dimensions 768 and 1536.
+- **Insert allocates almost nothing.** Pruning reuses pooled scratch and
+  rewrites a neighbor list in place, `slices.SortFunc` replaces the reflection
+  swapper of `sort.Slice`, and a list is sized once to `maxConn+1` instead of
+  doubling on overflow. Insert: 666 → 479 µs, **208 → 6 allocs**, 50 KB → 1 KB.
+- **Search is 1 alloc/op, down from 2**, filtered or not — the layer search now
+  returns a slice owned by its pooled state. The locked baseline moves with it.
+
+Measured on an Apple M4 Max; amd64 compiles to the same bounds-check-free loop
+but has not been measured.
+
 ## [1.1.0] - 2026-09-07
 
 GoVecDB can now be run as a service. Nothing about the library changed to make
@@ -163,6 +196,7 @@ Stated here rather than discovered later:
 - **A highly selective filter approaches a full scan.** Past roughly one vector
   in a hundred, a scan over the metadata is the better tool.
 
-[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/khambampati-subhash/govecdb/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/khambampati-subhash/govecdb/releases/tag/v1.0.0
