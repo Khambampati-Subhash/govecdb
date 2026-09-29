@@ -361,8 +361,8 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - **`store.Map.Match` does not copy**, which is why it exists next to `Get`. It
   runs once per candidate node, and `Get`'s per-call map copy would become the
   dominant cost of a search. `TestMatchDoesNotAllocate` pins it at 0 allocs, and
-  the search's **2 allocs/op baseline holds under filtering** — the cost of a
-  filter is travel (85 µs → 965 µs from unfiltered to one-in-fifty), not garbage.
+  the search's **1 alloc/op baseline holds under filtering** — the cost of a
+  filter is travel (60 µs → 769 µs from unfiltered to one-in-fifty), not garbage.
 - **Insert passes `nil`.** A build must never see a query's filter, or the graph's
   shape would depend on whichever query ran first.
 - **A predicate on an absent key is false — `Ne` included.** One uniform rule;
@@ -511,8 +511,8 @@ Any index change must hold these; they are enforced by tests and `-benchmem`:
 |---|---|---|
 | Recall@10, dim 32 | 0.999 | `TestRecallVsBruteForce` |
 | Recall@10, dim 768 | 0.972 | `TestRecallHighDimension` |
-| Search allocations | 2 allocs/op | `BenchmarkSearch -benchmem` |
-| Filtered search allocations | 2 allocs/op | `BenchmarkSearchFilter -benchmem` |
+| Search allocations | 1 alloc/op | `BenchmarkSearch -benchmem` |
+| Filtered search allocations | 1 alloc/op | `BenchmarkSearchFilter -benchmem` |
 | Metadata predicate allocations | 0 allocs/op | `TestMatchDoesNotAllocate` |
 | Recall spread across seeds | ≤ 0.05 | `TestRecallIsStableAcrossSeeds` |
 

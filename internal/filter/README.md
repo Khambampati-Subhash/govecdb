@@ -163,12 +163,12 @@ has to travel to fill `k`. 10,000 × 128, `k=10`, `ef=64`:
 
 | Admitted | none (unfiltered) | 1 in 2 | 1 in 10 | 1 in 50 |
 |---|---|---|---|---|
-| Latency | 85 µs | 165 µs | 385 µs | 965 µs |
-| Allocs | 2 | 2 | 2 | 2 |
+| Latency | 60 µs | 115 µs | 271 µs | 769 µs |
+| Allocs | 1 | 1 | 1 | 1 |
 
 The allocation count does not move, which is the property worth defending:
 `store.Map.Match` borrows the metadata map instead of copying it, so the search's
-2 allocs/op baseline survives filtering. `Get` copies — it hands the map out —
+1 alloc/op baseline survives filtering. `Get` copies — it hands the map out —
 and using it per candidate would have made the copy the dominant cost of a
 search.
 

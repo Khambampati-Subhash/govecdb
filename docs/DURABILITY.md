@@ -47,6 +47,14 @@ Durability is a knob, and this is what each setting actually promises.
 constant — and why the zero value is `SyncAlways`: a caller who configures
 nothing gets the safe answer, not the fast one.
 
+**A batch pays the fsync once.** `AddBatch` — and so every REST upsert — logs
+the whole batch through `wal.Writer.AppendBatch` and syncs after the last record,
+so `SyncAlways` costs one fsync per *call*, not per vector: 100 records in
+4.5 ms at the WAL, 100 vectors in 47 ms end to end (0.56–0.70 s when it synced
+each one). The guarantee is unchanged — nothing is acknowledged before it is
+durable — and so is failure: a batch whose write fails leaves the database
+read-only, with any prefix that reached the disk replayed on the next start.
+
 ### The part that is easy to get wrong
 
 Records land in a **64 KiB user-space buffer** first. Under `SyncInterval` and
@@ -90,6 +98,7 @@ out of the first only when it fills.
 | Layer | Durable when |
 |---|---|
 | `wal.Writer.Append` returns, `SyncAlways` | Immediately — data *and* the segment's directory entry are on the platter |
+| `wal.Writer.AppendBatch` returns, `SyncAlways` | Immediately, every record in the batch — one fsync after the last |
 | `wal.Writer.Sync()` returns | Immediately, any policy |
 | `wal.Writer.Close()` returns | Immediately, any policy |
 | `snapshot.Create` returns | Immediately — file fsynced, renamed, directory fsynced |
@@ -106,6 +115,7 @@ End to end, one vector (dim 128, `M=16`, `EfConstruction=200`, ~2 KB WAL record)
 | WAL append, `SyncAlways` | 4.04 ms | 0 allocs; the fsync dominates everything |
 | WAL append, `SyncInterval` | 897 ns | 0 allocs |
 | WAL append, `SyncNever` | 692 ns | 0 allocs |
+| WAL batch of 100, `SyncAlways` | 4.5 ms | 0 allocs; one fsync for the batch, ~45 µs/record |
 | WAL append, small (12 B) | 19.0 ns | Per-record framing cost with the payload removed |
 | HNSW insert | **703 µs** | 50.9 KB, 208 allocs |
 | HNSW upsert (replace an id) | 798 µs | A tombstone plus a full insert |
@@ -174,8 +184,8 @@ can only accept one vector in fifty has to travel further to find ten of them:
 
 | Admitted | none (unfiltered) | 1 in 2 | 1 in 10 | 1 in 50 |
 |---|---|---|---|---|
-| Latency | 85 µs | 165 µs | 385 µs | 965 µs |
-| Allocs | 2 | 2 | 2 | 2 |
+| Latency | 60 µs | 115 µs | 271 µs | 769 µs |
+| Allocs | 1 | 1 | 1 | 1 |
 
 This is the same curve tombstones produce and for the same reason: a node the
 filter rejects still rides the search frontier, but never enters the result set,
@@ -188,7 +198,7 @@ WouldNot`.
 **The allocation count does not move.** The filter costs traversal width, not
 garbage: the predicate is a lookup against the metadata store that borrows the
 map instead of copying it (`store.Map.Match`, asserted at 0 allocs), and the
-search's own 2 allocs/op baseline is untouched.
+search's own 1 alloc/op baseline is untouched.
 
 Past roughly one in a hundred, the graph stops being the right tool — a scan over
 the metadata, distance-checking only what matches, beats a traversal that is
@@ -373,6 +383,8 @@ them all. The ones that carry this document:
 | Zeroed space never decodes as a record | `TestReplayStopsAtZeroFilledSpace` |
 | A rewound sequence is refused | `TestReplayDetectsRewoundSequences` |
 | `SyncAlways` is durable when `Append` returns | `TestSyncAlwaysIsDurableOnReturn` |
+| ...and every record of a batch when `AppendBatch` returns | `TestAppendBatchIsDurableOnReturn` |
+| A record refused mid-batch fails the writer | `TestAppendBatchOversizedFailsTheWriter` |
 | A failed snapshot leaves nothing behind | `TestCreateIsAtomic` |
 | Corrupt snapshots never reach the caller | `TestLoadRejects` |
 | A corrupt snapshot falls back to an older one | `TestLoadFallsBackToAnOlderSnapshot` |

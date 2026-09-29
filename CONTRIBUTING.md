@@ -65,8 +65,8 @@ Index changes must not regress these — they are enforced by tests:
 |---|---|---|
 | Recall@10, dim 32 | 0.999 | `TestRecallVsBruteForce` |
 | Recall@10, dim 768 | 0.972 | `TestRecallHighDimension` |
-| Search allocations | 2 allocs/op | `BenchmarkSearch -benchmem` |
-| Filtered search allocations | 2 allocs/op | `BenchmarkSearchFilter -benchmem` |
+| Search allocations | 1 alloc/op | `BenchmarkSearch -benchmem` |
+| Filtered search allocations | 1 alloc/op | `BenchmarkSearchFilter -benchmem` |
 | Metadata predicate allocations | 0 allocs/op | `TestMatchDoesNotAllocate` |
 | Recall spread across seeds | ≤ 0.05 | `TestRecallIsStableAcrossSeeds` |
 

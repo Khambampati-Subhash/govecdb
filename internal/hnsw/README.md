@@ -243,12 +243,12 @@ the curve a compaction threshold should be set against:
 
 | Tombstones | Search | vs. clean |
 |---|---|---|
-| 0% | 108 µs | — |
-| 25% | 127 µs | 1.2× |
-| 50% | 165 µs | 1.6× |
-| 75% | 262 µs | 2.5× |
+| 0% | 72.6 µs | — |
+| 25% | 90.3 µs | 1.2× |
+| 50% | 121 µs | 1.7× |
+| 75% | 191 µs | 2.6× |
 
-Allocations stay at 2/op throughout — tombstones cost time, not memory churn.
+Allocations stay at 1/op throughout — tombstones cost time, not memory churn.
 Recall does not degrade: with half the graph deleted, recall@10 against brute
 force over the survivors is 1.000.
 
@@ -256,9 +256,9 @@ force over the survivors is 1.000.
 
 | Operation | Cost | |
 |---|---|---|
-| `Insert`, new id | 713 µs, 208 allocs | — |
-| `Insert`, replacing an id | 776 µs, 210 allocs | insert + tombstone, +9% |
-| `Insert`, vector unchanged | **332 ns**, 2 allocs | the WAL-replay path |
+| `Insert`, new id | 479 µs, 6 allocs | — |
+| `Insert`, replacing an id | 520 µs, 5 allocs | insert + tombstone, +9% |
+| `Insert`, vector unchanged | **279 ns**, 2 allocs | the WAL-replay path |
 
 Recall@10 after replacing half the graph is 0.999 — updates are held to the same
 bar as inserts.

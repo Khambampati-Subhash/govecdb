@@ -603,7 +603,7 @@ original sketch, and the narrowing is the interesting part.
 
 - **Recall regression** — the baselines are locked (0.999 @ dim 32, 0.972 @ dim
   768) and asserted against brute force. Any index change must keep them.
-- **Allocation regression** — search is 2 allocs/op, including under a filter;
+- **Allocation regression** — search is 1 alloc/op, including under a filter;
   `-benchmem` guards both. The scratch pool must keep it there, and
   `store.Match` must keep not copying.
 - Every step is a separate commit and reverts cleanly.

@@ -428,10 +428,12 @@ Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
 
 | Metric | Value |
 |---|---|
-| Search | 105,141 ns/op |
-| Search allocations | **2 allocs/op**, 1,264 B/op |
-| Cosine distance (normalized) | 30.1 ns, 0 allocs |
-| Euclidean distance | 25.9 ns, 0 allocs |
+| Search | 73,840 ns/op |
+| Search allocations | **1 alloc/op**, 240 B/op |
+| Cosine distance (normalized) | 18.9 ns, 0 allocs |
+| Euclidean distance | 21.7 ns, 0 allocs |
+| Insert | 479 µs, 6 allocs |
+| `AddBatch`, 100 vectors, `SyncAlways` | 47 ms — one fsync, not 100 |
 | Recall@10 (dim 32) | **0.999** |
 | Recall@10 (dim 768) | **0.972** |
 
@@ -563,15 +565,15 @@ What it costs is travel. 10,000 × 128, `k=10`, `ef=64`:
 
 | Admitted | none (unfiltered) | 1 in 2 | 1 in 10 | 1 in 50 |
 |---|---|---|---|---|
-| Latency | 85 µs | 165 µs | 385 µs | 965 µs |
-| Allocs | **2** | **2** | **2** | **2** |
+| Latency | 60 µs | 115 µs | 271 µs | 769 µs |
+| Allocs | **1** | **1** | **1** | **1** |
 
 This is the same curve tombstones produce and the same mechanism: with fewer
 admissible nodes the result set fills slowly, which loosens the pruning bound and
 makes the search explore wider until it has `k`.
 
 **The allocation count does not move**, which is the part worth defending — the
-metadata lookup borrows the stored map rather than copying it, so the 2 allocs/op
+metadata lookup borrows the stored map rather than copying it, so the 1 alloc/op
 search baseline survives filtering intact.
 
 Past roughly one in a hundred the graph stops being the right tool: a scan over
