@@ -109,13 +109,80 @@ func (w *Writer) Append(typ RecordType, payload []byte) (uint64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.closed {
-		return 0, ErrClosed
+	if err := w.usable(); err != nil {
+		return 0, err
 	}
-	if w.failed != nil {
-		return 0, w.failed
+	seq, err := w.writeLocked(typ, payload)
+	if err != nil {
+		return 0, err
+	}
+	if w.opts.SyncPolicy == SyncAlways {
+		if err := w.syncLocked(); err != nil {
+			return 0, w.fail(err)
+		}
+	}
+	return seq, nil
+}
+
+// AppendBatch writes n records of one type and returns the sequence of the
+// first. payload(i) produces record i; the slice it returns may alias a buffer
+// it reuses, because each record is copied into the log before the next call.
+//
+// It exists for one reason: under SyncAlways, n calls to Append are n fsyncs,
+// and an fsync is the whole cost of a write — 4 ms against 0.7 µs for the
+// append itself. A batch pays one, at the end, and is acknowledged only after
+// it, so "returned nil means durable" holds for every record in it.
+//
+// The records are streamed through the same buffer Append uses rather than
+// encoded up front: a 10,000-vector batch at dimension 768 is 30 MB, and
+// holding it twice to save nothing would be the wrong trade.
+//
+// A record refused partway through fails the writer, unlike a refused Append.
+// Its predecessors are already in the buffer, and a later Sync would make
+// durable a prefix the caller was told had failed.
+//
+// payload runs under the writer's lock and must not call back into it.
+func (w *Writer) AppendBatch(typ RecordType, n int, payload func(i int) []byte) (uint64, error) {
+	if !typ.valid() {
+		return 0, fmt.Errorf("%w: %d", ErrInvalidType, typ)
 	}
 
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.usable(); err != nil {
+		return 0, err
+	}
+	first := w.nextSeq
+	for i := range n {
+		p := payload(i)
+		if len(p) > w.opts.MaxRecordBytes {
+			return 0, w.fail(fmt.Errorf("%w: record %d of batch, %d bytes, limit %d", ErrRecordTooLarge, i, len(p), w.opts.MaxRecordBytes))
+		}
+		if _, err := w.writeLocked(typ, p); err != nil {
+			return 0, err
+		}
+	}
+	if w.opts.SyncPolicy == SyncAlways {
+		if err := w.syncLocked(); err != nil {
+			return 0, w.fail(err)
+		}
+	}
+	return first, nil
+}
+
+// usable reports why the writer cannot take a record, if it cannot.
+func (w *Writer) usable() error {
+	if w.closed {
+		return ErrClosed
+	}
+	return w.failed
+}
+
+// writeLocked frames one record into the buffer, rotating first if it would
+// overflow the segment. It does not sync; that is the caller's policy. Any error
+// has already failed the writer.
+func (w *Writer) writeLocked(typ RecordType, payload []byte) (uint64, error) {
 	size := int64(recordHeaderSize + len(payload))
 	if err := w.maybeRotate(size); err != nil {
 		return 0, w.fail(err)
@@ -133,12 +200,6 @@ func (w *Writer) Append(typ RecordType, payload []byte) (uint64, error) {
 
 	w.segBytes += size
 	w.nextSeq++
-
-	if w.opts.SyncPolicy == SyncAlways {
-		if err := w.syncLocked(); err != nil {
-			return 0, w.fail(err)
-		}
-	}
 	return seq, nil
 }
 

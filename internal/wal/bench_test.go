@@ -48,6 +48,40 @@ func BenchmarkAppend(b *testing.B) {
 	}
 }
 
+// BenchmarkAppendBatch is BenchmarkAppend for 100 records per call: under
+// SyncAlways the difference between them is the fsync that batching amortizes.
+// ns/op is per batch, so divide by 100 to compare with BenchmarkAppend.
+func BenchmarkAppendBatch(b *testing.B) {
+	payload := bytes.Repeat([]byte("v"), 2048+32)
+	const batch = 100
+
+	for _, tc := range []struct {
+		name   string
+		policy SyncPolicy
+	}{
+		{"always", SyncAlways},
+		{"never", SyncNever},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			w, err := Open(b.TempDir(), Options{SyncPolicy: tc.policy, MaxSegmentBytes: 1 << 30})
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer w.Close()
+
+			b.SetBytes(batch * int64(len(payload)+recordHeaderSize))
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for range b.N {
+				if _, err := w.AppendBatch(TypePut, batch, func(int) []byte { return payload }); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkAppendSmall isolates the per-record overhead — header, checksum,
 // bookkeeping — from the cost of moving the payload.
 func BenchmarkAppendSmall(b *testing.B) {

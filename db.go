@@ -188,8 +188,13 @@ func (db *DB) Add(v Vector) error {
 // AddBatch stores many vectors. It validates all of them before writing any, so
 // a batch with one bad record leaves the database untouched rather than half
 // applied — the only all-or-nothing guarantee here, and it is about *validation*
-// rather than durability: a batch that fails partway through writing has
-// durably applied its prefix.
+// rather than durability: a batch whose write fails may have made a prefix
+// durable, which the next start replays. The database is read-only by then.
+//
+// The whole batch is logged before any of it reaches the index, and under
+// SyncAlways that is one fsync rather than one per vector. It used to be one per
+// vector: 100 vectors took 0.56–0.70 s against 47 ms now, nearly all of which is
+// the index (BenchmarkWritePath). Every REST upsert comes through here.
 func (db *DB) AddBatch(vs []Vector) error {
 	if len(vs) == 0 {
 		return nil
@@ -209,8 +214,16 @@ func (db *DB) AddBatch(vs []Vector) error {
 	if err := db.writable(); err != nil {
 		return err
 	}
+	_, err := db.log.AppendBatch(wal.TypePut, len(vs), func(i int) []byte {
+		db.buf = encodePut(db.buf[:0], vs[i])
+		return db.buf
+	})
+	if err != nil {
+		return db.fail(err)
+	}
+	// In order, so a batch naming one id twice ends as replay would end it.
 	for i := range vs {
-		if err := db.putLocked(vs[i]); err != nil {
+		if err := db.applyPut(vs[i]); err != nil {
 			return fmt.Errorf("vector %d: %w", i, err)
 		}
 	}
@@ -223,6 +236,11 @@ func (db *DB) putLocked(v Vector) error {
 	if _, err := db.log.Append(wal.TypePut, db.buf); err != nil {
 		return db.fail(err)
 	}
+	return db.applyPut(v)
+}
+
+// applyPut applies a PUT that is already in the log.
+func (db *DB) applyPut(v Vector) error {
 	if err := db.index.Insert(v.ID, v.Values); err != nil {
 		// The record is already durable, so replay will apply it on the next
 		// start. Failing the call rather than pretending otherwise is right, but

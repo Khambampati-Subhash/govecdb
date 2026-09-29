@@ -211,8 +211,10 @@ failing while one overlaps.
 
 Every vector is validated before any is written, so a batch with one bad record
 leaves the collection untouched. That is a guarantee about *validation*, not
-durability: a batch that fails partway through writing has durably applied its
-prefix.
+durability: a batch whose write fails may have made a prefix durable, which the
+next start replays; the collection is read-only by then. A successful batch is
+logged with **one** fsync under `sync_policy: always`, not one per vector — 100
+vectors cost 47 ms, where they cost 0.56–0.70 s before.
 
 Metadata values must be a string, a bool, or a number — no nested objects, no
 arrays, no `null`. A number written without a decimal point becomes an integer

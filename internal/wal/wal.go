@@ -17,6 +17,10 @@ type WAL interface {
 	// Append writes one record and returns the sequence number assigned to it.
 	Append(typ RecordType, payload []byte) (uint64, error)
 
+	// AppendBatch writes n records produced by payload(i) and returns the
+	// sequence of the first. Under SyncAlways it syncs once, after the last.
+	AppendBatch(typ RecordType, n int, payload func(i int) []byte) (uint64, error)
+
 	// Sync forces buffered records to stable storage.
 	Sync() error
 
@@ -46,6 +50,15 @@ var _ WAL = (*Nop)(nil)
 func (n *Nop) Append(typ RecordType, payload []byte) (uint64, error) {
 	n.seq++
 	return n.seq, nil
+}
+
+func (n *Nop) AppendBatch(typ RecordType, count int, payload func(i int) []byte) (uint64, error) {
+	first := n.seq + 1
+	for i := range count {
+		payload(i)
+	}
+	n.seq += uint64(count)
+	return first, nil
 }
 
 func (n *Nop) Sync() error  { return nil }
