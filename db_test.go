@@ -294,6 +294,13 @@ func TestAddRejects(t *testing.T) {
 			v:    Vector{ID: "a", Values: good, Metadata: Metadata{"": "x"}},
 			want: ErrInvalidMetadata,
 		},
+		{
+			// Invisible to every range filter, and a value the REST layer cannot
+			// spell — so the two deployments would disagree about what is stored.
+			name: "NaN metadata",
+			v:    Vector{ID: "a", Values: good, Metadata: Metadata{"score": math.NaN()}},
+			want: ErrInvalidMetadata,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := db.Add(tc.v); !errors.Is(err, tc.want) {

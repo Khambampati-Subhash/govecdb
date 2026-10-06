@@ -94,7 +94,18 @@ func Validate(md Metadata) error {
 			if !utf8.ValidString(val) {
 				return fmt.Errorf("%w: value for %q is not valid UTF-8", ErrMetadataValueType, k)
 			}
-		case bool, int64, float64:
+		case float64:
+			// Refused for the same reason the index refuses a non-finite vector
+			// component: NaN compares false against everything, so a stored NaN
+			// is invisible to every range filter and unequal even to itself. It
+			// is also a value JSON cannot spell, so the REST layer could never
+			// read it back — one deployment would hold data the other cannot
+			// represent. The decoder still accepts one, because a record written
+			// before this check must not make a database unrecoverable.
+			if math.IsNaN(val) || math.IsInf(val, 0) {
+				return fmt.Errorf("%w: value for %q is %v, want a finite number", ErrMetadataValueType, k, val)
+			}
+		case bool, int64:
 			// Fine.
 		default:
 			return fmt.Errorf("%w: %q is %T, want string, bool, int64 or float64", ErrMetadataValueType, k, v)

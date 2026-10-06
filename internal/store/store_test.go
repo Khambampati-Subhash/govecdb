@@ -143,6 +143,9 @@ func TestValidate(t *testing.T) {
 		// somewhere else.
 		{"int is not int64", Metadata{"n": 1}, ErrMetadataValueType},
 		{"float32", Metadata{"f": float32(1)}, ErrMetadataValueType},
+		{"NaN", Metadata{"f": math.NaN()}, ErrMetadataValueType},
+		{"+Inf", Metadata{"f": math.Inf(1)}, ErrMetadataValueType},
+		{"-Inf", Metadata{"f": math.Inf(-1)}, ErrMetadataValueType},
 		{"nil value", Metadata{"n": nil}, ErrMetadataValueType},
 		{"slice", Metadata{"s": []string{"a"}}, ErrMetadataValueType},
 		{"nested map", Metadata{"m": map[string]any{}}, ErrMetadataValueType},
@@ -222,6 +225,23 @@ func TestMetadataRoundTrip(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestDecodeStillAcceptsNonFiniteFloats pins the other half of refusing them in
+// Validate: a NaN written before that check existed is already in somebody's log,
+// and refusing it on the way *out* would turn a filtering quirk into a database
+// that cannot start.
+func TestDecodeStillAcceptsNonFiniteFloats(t *testing.T) {
+	got, _, err := Decode(Encode(nil, Metadata{"nan": math.NaN(), "inf": math.Inf(1)}))
+	if err != nil {
+		t.Fatalf("Decode refused a non-finite float already on disk: %v", err)
+	}
+	if f, _ := got["nan"].(float64); !math.IsNaN(f) {
+		t.Fatalf("nan decoded as %v", got["nan"])
+	}
+	if f, _ := got["inf"].(float64); !math.IsInf(f, 1) {
+		t.Fatalf("inf decoded as %v", got["inf"])
 	}
 }
 

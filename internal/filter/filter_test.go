@@ -114,8 +114,8 @@ func TestNotReachesAbsentKeys(t *testing.T) {
 	}
 }
 
-// Metadata may hold a NaN — Validate only checks the vector values for
-// finiteness — so the filter has to answer for one rather than assume it away.
+// Validate refuses a NaN now, but one written before it did is still on disk
+// and decodes, so the filter has to answer for one rather than assume it away.
 func TestNaNMetadataComparesFalseExceptNe(t *testing.T) {
 	md := store.Metadata{"score": math.NaN()}
 

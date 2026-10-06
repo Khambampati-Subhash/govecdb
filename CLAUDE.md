@@ -415,7 +415,9 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   node. See the filter quick reference above for the semantics it commits to.
 - **Validation is the security boundary** (`validate.go`). Two checks matter most
   because their absence is silent: **values must be finite** (one NaN compares
-  false against everything and poisons the ordering the index rests on), and
+  false against everything and poisons the ordering the index rests on) — vector
+  components *and* float metadata, which JSON cannot spell either; the store's
+  decoder still accepts an old NaN so a log written earlier still replays — and
   **metadata is a closed set of string/bool/int64/float64** — no `gob`, no
   reflection, because decoding is where disk bytes become live objects. Limits
   (`WithLimits`) are configurable but not removable.

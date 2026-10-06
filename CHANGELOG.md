@@ -7,8 +7,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-Nothing yet. See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned
-and in what order.
+Driven by a field report from the first application to run GoVecDB end to end at
+scale — millions of 512-dimension vectors across sixteen collections. Each item
+below names what it fixes.
+
+### Changed
+
+- **Non-finite float metadata is refused.** `Add` and `AddBatch` now return
+  `ErrInvalidMetadata` for a NaN or ±Inf metadata value, as they already did for
+  a vector component. A stored NaN was invisible to every range filter, and it is
+  a value JSON cannot spell, so an embedded deployment could hold data the REST
+  API could never return. Values already on disk still decode: a log written
+  before this check replays unchanged.
 
 ## [1.1.1] - 2026-09-29
 
