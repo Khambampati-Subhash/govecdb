@@ -50,7 +50,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 |------|-------|-----------|
 | `M` — neighbors per node (layers > 0; layer 0 uses `2*M`) | `Config`, set once | **No** — structural; changing it means rebuilding. |
 | `EfConstruction` — search width during inserts | `Config` | Kept fixed (100–200). |
-| `Alpha` — pruning relaxation (see below) | `Config` | Fixed per graph; 1.0–1.4 useful, default 1.2. |
+| `Alpha` — pruning relaxation (see below) | `Config` | Fixed per graph; default 1.0 — above it hurts clustered data. |
 | `ef` — search width at query time | `Search(query, k, ef)` | **Yes** — per query; auto-clamped to `>= k`. |
 
 `M` must be **0** — meaning "use the default 16" — or **at least 2**. `New`
@@ -83,8 +83,17 @@ node itself — you could reach `c` by hopping through `s`, so that edge buys
 nothing.
 
 `Alpha` scales that test: `alpha * d(c,s) <= d(c,q)` rejects. `Alpha = 1.0` is
-the classic HNSW heuristic; `> 1.0` prunes harder and keeps more long-range
-shortcut edges, making the graph more navigable.
+the classic HNSW heuristic and the default. `> 1.0` makes the test *harder* to
+pass, so more near candidates survive and — arriving nearest-first — take the
+slots long-range edges would have had.
+
+The default used to be 1.2, on the DiskANN reading that a larger alpha keeps
+longer edges. That holds for a degree-bounded prune without backfill, not for
+this one, and clustered data is where it showed: 62,500 vectors at dim 512 in
+1,024 tight clusters, M=16, never passed recall 0.954 at alpha 1.2 even at
+`ef=8192`. At 1.0 the same graph reaches 0.95 at `ef=10` and 0.999 at `ef=256`,
+and builds twice as fast. On uniform data the two need the same `ef` at every
+size and dimension measured, so the change costs nothing there.
 
 ### 3. Zero-allocation search path
 Two changes took search from **795 allocations to 2**:
@@ -230,7 +239,7 @@ Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
 | Cosine distance | 73.9 ns | 30.1 ns | **2.5× faster** |
 | Euclidean distance | 74.5 ns | 26.6 ns | **2.8× faster** |
 | Recall@10 (dim 32) | 0.994 | 0.999 | more accurate |
-| Recall@10 (dim 768) | — | 0.972 | — |
+| Recall@10 (dim 768) | — | 0.988 | — |
 
 Concurrency cost nothing on the serial path: search stayed at 2 allocs/op and the
 recall figures are unchanged to three decimals.
@@ -287,7 +296,7 @@ Recall numbers are only worth as much as what produced them, so the suite is
 built in three layers that check different things.
 
 **Fixed-configuration tests pin absolute numbers.** `TestRecallVsBruteForce`
-(0.999 at dim 32), `TestRecallHighDimension` (0.972 at dim 768) and
+(0.999 at dim 32), `TestRecallHighDimension` (0.988 at dim 768) and
 `TestRecallIsStableAcrossSeeds` vary nothing, so a regression moves them
 immediately. The last one exists because every other recall test pins a single
 seed, which measures that seed as much as the index — it runs five and fails if

@@ -79,7 +79,7 @@ func newHNSWIndex(o options) (*hnswIndex, error) {
 		Metric:         o.metric.internal(),
 		M:              o.m,
 		EfConstruction: o.efConstruction,
-		Alpha:          1.2,
+		Alpha:          1.0,
 		Seed:           o.seed,
 	})
 	if err != nil {

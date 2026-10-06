@@ -57,6 +57,17 @@ below names what it fixes.
 - **`ErrAlreadyOpen` and `ErrReadOnly` have broader messages** ("directory is
   already open", "database is read-only"), because each now has a second cause.
   A durability failure still reads "read-only after a durability failure: …".
+- **HNSW `Alpha` defaults to 1.0, down from 1.2.** On clustered data — which
+  real embeddings are — 1.2 left clusters nearly disconnected: at 62,500 vectors
+  of dimension 512 in 1,024 tight clusters, recall@10 never passed 0.954 at any
+  search width. At 1.0 the same corpus reaches 0.95 at `ef=10` and 0.999 at
+  `ef=256`, and builds twice as fast. A larger alpha makes the pruning test
+  harder to pass, so near neighbors crowd out the long-range edges; the
+  DiskANN intuition behind 1.2 assumes a prune without backfill. On uniform data
+  the two need the same width at every size and dimension measured. Recall@10
+  at dimension 768 rises from 0.972 to 0.988. Existing graphs keep the alpha
+  they were built with (it is in the snapshot); new and replay-rebuilt ones get
+  1.0.
 - **Non-finite float metadata is refused.** `Add` and `AddBatch` now return
   `ErrInvalidMetadata` for a NaN or ±Inf metadata value, as they already did for
   a vector component. A stored NaN was invisible to every range filter, and it is

@@ -345,7 +345,7 @@ thing to implement yourself.
 |------|-------|-----------|
 | `M` — neighbors per node (layers > 0; layer 0 uses `2*M`) | `Config`, set once | **No** — structural; changing it means rebuilding |
 | `EfConstruction` — search width during inserts | `Config` | Kept fixed (100–200) |
-| `Alpha` — pruning relaxation | `Config` | Fixed per graph; 1.0–1.4 useful, default 1.2 |
+| `Alpha` — pruning relaxation | `Config` | Fixed per graph; default 1.0 — larger values cost recall on clustered data |
 | `ef` — search width at query time | `SearchRequest.Ef` | **Yes** — per query; auto-clamped to `>= k`. Grows with `N`, so leave it zero and it is chosen for you, [see the charts](#measured-behaviour) |
 
 ### Configuration
@@ -449,7 +449,7 @@ Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
 | Insert | 479 µs, 6 allocs |
 | `AddBatch`, 100 vectors, `SyncAlways` | 47 ms — one fsync, not 100 |
 | Recall@10 (dim 32) | **0.999** |
-| Recall@10 (dim 768) | **0.972** |
+| Recall@10 (dim 768) | **0.988** |
 
 Recall is measured against brute-force ground truth in `graph_test.go`, not estimated.
 

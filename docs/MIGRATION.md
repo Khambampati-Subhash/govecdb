@@ -604,7 +604,7 @@ original sketch, and the narrowing is the interesting part.
 
 **Carried from v1, still guarded:**
 
-- **Recall regression** — the baselines are locked (0.999 @ dim 32, 0.972 @ dim
+- **Recall regression** — the baselines are locked (0.999 @ dim 32, 0.988 @ dim
   768) and asserted against brute force. Any index change must keep them.
 - **Allocation regression** — search is 1 alloc/op, including under a filter;
   `-benchmem` guards both. The scratch pool must keep it there, and

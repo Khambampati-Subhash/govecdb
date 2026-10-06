@@ -174,6 +174,15 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   `M >= 2` too — a stored config is the *effective* one, so a loaded graph would
   otherwise bypass `New` entirely.
 - `EfConstruction` is the build-time search width (kept fixed, ~100–200).
+- **`Alpha` defaults to 1.0, not 1.2 — do not "restore" the DiskANN value.**
+  In `selectNeighbors` a larger alpha makes the reject test *harder* to pass,
+  so more near candidates survive and, arriving nearest-first, take the slots
+  the long-range edges needed. Measured at 62.5K × 512 in 1,024 tight clusters:
+  alpha 1.2 never passed recall 0.954 at any ef; 1.0 reached 0.95 at ef=10. On
+  uniform data the two need identical ef at every size and dimension measured.
+  Backfill was suspected too and measured innocent (turning it off made it
+  worse). `TestSweepClusteredAlpha` guards the shape; the collapse itself only
+  shows at the 40K grid behind `-results`.
 - `ef` is the **query-time** knob in `Search(query, k, ef)`; must be `>= k`, bigger
   = higher recall + slower. **Recall at a fixed `ef` falls as `N` or dimension
   grows** — 0.997 at 500 vectors down to 0.652 at 20,000, all at `ef=64`. That is
@@ -538,7 +547,7 @@ Any index change must hold these; they are enforced by tests and `-benchmem`:
 | Baseline | Value | Guarded by |
 |---|---|---|
 | Recall@10, dim 32 | 0.999 | `TestRecallVsBruteForce` |
-| Recall@10, dim 768 | 0.972 | `TestRecallHighDimension` |
+| Recall@10, dim 768 | 0.988 | `TestRecallHighDimension` |
 | Search allocations | 1 alloc/op | `BenchmarkSearch -benchmem` |
 | Filtered search allocations | 1 alloc/op | `BenchmarkSearchFilter -benchmem` |
 | Metadata predicate allocations | 0 allocs/op | `TestMatchDoesNotAllocate` |

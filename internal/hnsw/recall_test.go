@@ -919,3 +919,76 @@ func TestRecallIsStableAcrossSeeds(t *testing.T) {
 		t.Fatal("mean recall is NaN")
 	}
 }
+
+// separatedClusters draws n vectors near `clusters` centres spread through the
+// whole space (components in [-1,1)), with tight per-dimension noise — the
+// shape of embeddings of a corpus with many distinct topics, and the shape on
+// which a data-blind formula over-searches by two orders of magnitude.
+//
+// It returns the corpus and a function drawing fresh queries from the same
+// distribution, so recall is measured on vectors the calibration never saw.
+func separatedClusters(rng *rand.Rand, n, dim, clusters int) (corpus, func(int) [][]float32) {
+	centres := make([][]float32, clusters)
+	for i := range centres {
+		centres[i] = make([]float32, dim)
+		for j := range centres[i] {
+			centres[i][j] = rng.Float32()*2 - 1
+		}
+	}
+	near := func() []float32 {
+		ce := centres[rng.Intn(clusters)]
+		v := make([]float32, dim)
+		for j := range v {
+			v[j] = ce[j] + float32(rng.NormFloat64())*0.05
+		}
+		return v
+	}
+	c := corpus{vecs: make(map[string][]float32, n), dim: dim}
+	for i := range n {
+		id := fmt.Sprintf("v%d", i)
+		c.vecs[id] = near()
+		c.order = append(c.order, id)
+	}
+	return c, func(count int) [][]float32 {
+		qs := make([][]float32, count)
+		for i := range qs {
+			qs[i] = near()
+		}
+		return qs
+	}
+}
+
+// TestSweepClusteredAlpha defends the alpha default where it was decided: on
+// clustered data. Alpha above 1 lets more near candidates through the
+// diversity test, and since they arrive nearest-first they take the slots the
+// long-range edges between clusters needed. At 62,500 × 512 with 1,024 clusters
+// that held recall under 0.954 at any width. The effect grows with n — at 40,000
+// × 256 alpha 1.2 needs ef 48 for 0.95 where 1.0 needs 10, and at 15,000 only
+// a 0.99 target separates them — so the default grid asserts the shape, 1.0 at
+// least as good as 1.2 at a narrow width, and -results runs the 40,000 case.
+func TestSweepClusteredAlpha(t *testing.T) {
+	skipUnderRace(t)
+	n, dim, clusters := 8000, 64, 512
+	if measuring() {
+		n, dim, clusters = 40000, 256, 1024
+	}
+	const k, ef = 10, 16
+
+	recall := map[float32]float64{}
+	for _, alpha := range []float32{1.0, 1.2} {
+		rng := rand.New(rand.NewSource(95))
+		c, queries := separatedClusters(rng, n, dim, clusters)
+		cfg := DefaultConfig(dim, Cosine)
+		cfg.Alpha = alpha
+		g, build := buildIndex(t, cfg, c)
+		r, perQuery := evaluate(t, g, c, Cosine, queries(100), k, ef)
+		recall[alpha] = r
+		record(t, sample{
+			Sweep: "clustered-alpha", Label: fmt.Sprintf("alpha=%.1f", alpha),
+			Dim: dim, N: n, M: cfg.M, Ef: ef, K: k, Recall: r, Search: perQuery, Build: build,
+		})
+	}
+	if recall[1.0] < recall[1.2]-0.005 {
+		t.Fatalf("alpha 1.0 recall %.3f below alpha 1.2's %.3f on clustered data", recall[1.0], recall[1.2])
+	}
+}

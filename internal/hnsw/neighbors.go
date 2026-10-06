@@ -11,8 +11,10 @@ import (
 // Taking simply the m closest produces clustered edges that all point the same
 // way, which strands the search in local minima. Instead we skip a candidate c
 // when it already sits closer to a chosen neighbor s than it does to base —
-// c is reachable via s, so that edge buys nothing. Alpha > 1 tightens the test,
-// preserving more long-range links and making the graph easier to navigate.
+// c is reachable via s, so that edge buys nothing. Alpha > 1 makes the test
+// harder to pass, so it rejects *fewer* near candidates, and since they arrive
+// nearest-first they take the slots long-range edges would have had — see
+// Config.Alpha for the measurement that moved the default to 1.0.
 // cands carry their distance to base already, so base itself is not needed.
 //
 // The selection is appended to dst[:0] and returned, so the caller decides where
@@ -49,6 +51,11 @@ func (g *Graph) selectNeighbors(st *searchState, cands []candidate, m int, dst [
 
 	// Backfill with the closest rejects rather than returning a thin list: a
 	// node with too few edges is a dead end during search.
+	//
+	// Suspected once of undoing the heuristic on clustered data, since the
+	// closest rejects there are cluster-mates. Measured, it is the opposite:
+	// with backfill off, recall on the clustered corpus that motivated the
+	// suspicion fell from 0.954 to 0.94. Alpha was the cause; this stays.
 	for i := 0; len(selected) < m && i < len(rejected); i++ {
 		selected = append(selected, rejected[i].idx)
 	}
