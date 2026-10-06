@@ -250,7 +250,7 @@ func (m *Manager) Create(name string, spec Spec) (err error) {
 // fn must not retain the database. Once it returns, the collection may be closed
 // at any moment.
 func (m *Manager) Use(name string, fn func(*govecdb.DB) error) error {
-	c, err := m.acquire(nil, name)
+	c, err := m.acquire(context.Background(), false, name)
 	if err != nil {
 		return err
 	}
@@ -271,7 +271,7 @@ func (m *Manager) Use(name string, fn func(*govecdb.DB) error) error {
 // ErrTooManyOpen wrapping ctx's error, so both questions — "why did it fail"
 // and "was it capacity" — answer with errors.Is.
 func (m *Manager) UseWait(ctx context.Context, name string, fn func(*govecdb.DB) error) error {
-	c, err := m.acquire(ctx, name)
+	c, err := m.acquire(ctx, true, name)
 	if err != nil {
 		return err
 	}
@@ -279,11 +279,11 @@ func (m *Manager) UseWait(ctx context.Context, name string, fn func(*govecdb.DB)
 	return fn(c.db)
 }
 
-// acquire loads the collection if necessary and takes a reference to it. A nil
-// ctx refuses at once when there is no room; a non-nil one waits for room until
-// it is done.
-func (m *Manager) acquire(ctx context.Context, name string) (*collection, error) {
-	if ctx != nil {
+// acquire loads the collection if necessary and takes a reference to it. With
+// wait false it refuses at once when there is no room; with wait true it waits
+// for room until ctx is done.
+func (m *Manager) acquire(ctx context.Context, wait bool, name string) (*collection, error) {
+	if wait {
 		// sync.Cond has no timed wait, so ctx ending is turned into a broadcast:
 		// every waiter wakes, and the one whose ctx this was sees it is done.
 		stop := context.AfterFunc(ctx, func() {
@@ -331,7 +331,7 @@ retry:
 		return nil, err
 	}
 	if err := m.makeRoomLocked(); err != nil {
-		if ctx == nil || !errors.Is(err, ErrTooManyOpen) {
+		if !wait || !errors.Is(err, ErrTooManyOpen) {
 			return nil, err
 		}
 		if ctx.Err() != nil {
