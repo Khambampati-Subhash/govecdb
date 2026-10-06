@@ -144,6 +144,34 @@ from a library into something that can be operated. What they did *not* do is
 make 1 less necessary: the daemon logs and exports metrics at the socket, which
 is a layer too far out to see a torn log tail or a skipped truncation.
 
+### What the first workload at scale changed
+
+A downstream application running millions of 512-dimension vectors across
+sixteen collections reported back, and most of what it found is fixed after
+v1.1.1 rather than waiting for v2: the automatic `ef` (linear in k, blind to M
+and to the data — now `k^0.2`, an M term, and per-collection calibration),
+clustered recall (`Alpha` 1.2 → 1.0), enumeration (`GetBatch`/`Scan`/`Range`),
+cross-process `flock`, a read-only open, `UseWait`, metadata interning, a
+daemon snapshot default, and the REST gaps. See the CHANGELOG.
+
+What it did *not* fix is the write path, and it put numbers on it that move two
+items up in practice even though the dependency order stands:
+
+- **Insert is 2–4 ms a vector at dimension 512** under one writer lock, so a
+  collection builds on one core: 1M vectors over sixteen collections in 7–10
+  minutes, a 250K collection rebuilt in ~23. Item 3 is the structural answer.
+- **A bulk build is not blocked the way item 3 is.** Building a graph that no
+  reader can see yet — `AddBatch` into an empty index, which is every rebuild
+  and every reshard — has neither the WAL-ordering question (the batch is logged
+  whole before any of it is applied) nor concurrent searches to protect. It needs
+  per-node locks inside a build-only path, and a last-wins rule for an id named
+  twice in one batch. That makes it a reasonable **3a**, ahead of 3 and 2.
+- **Compact on 500K × 512 is ~51 minutes stop-the-world**, so the application
+  never calls it; it rebuilds a replacement collection and swaps. Item 2 would
+  retire that.
+- **Full vectors are the larger half of memory at dimension 512** (`4 × dim` =
+  2 KB of ~3.4 KB a vector, before interning cut the metadata share). Item 6.
+
 ### 1. The observability seam
 
 The first thing, because it is the thing every other item needs and the one gap
