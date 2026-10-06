@@ -20,6 +20,12 @@ var (
 	// ErrNotFound means no collection of that name exists in the root directory.
 	ErrNotFound = errors.New("service: collection not found")
 
+	// ErrRootInUse means another Manager — in this process or another one — has
+	// the root directory. Two managers over one root would each believe they own
+	// every collection in it, and one's Drop deletes a directory the other has
+	// open.
+	ErrRootInUse = errors.New("service: root directory is in use by another manager")
+
 	// ErrClosed is returned by every operation on a closed Manager.
 	ErrClosed = errors.New("service: manager is closed")
 

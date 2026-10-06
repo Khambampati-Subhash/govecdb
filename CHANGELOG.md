@@ -21,9 +21,24 @@ below names what it fixes.
   everything, sorted once and read a page at a time with no lock held across
   the walk, so writers are never stalled behind it. The `Index` interface gains
   `IDs`, and `hnsw.Graph` gains `IDs`.
+- **Cross-process directory locking.** `Open` takes an `flock` on the database
+  directory, so a second process is refused with `ErrAlreadyOpen` rather than
+  interleaving log segments with the first — two processes over one directory
+  used to corrupt it with nothing refusing either. The old objection was to a
+  lock *file*, which a crash leaves behind; the kernel drops an `flock` when its
+  holder dies, however it dies, and nothing is written to disk. Unix only;
+  Windows stays in-process, as before. `service.NewManager` locks its root the
+  same way and returns the new `ErrRootInUse`, since a second manager's `Drop`
+  is a `RemoveAll` under the first.
+- **`WithReadOnly()`.** Opens an existing database without writing anything —
+  no log segment, no snapshot — under a *shared* lock, so any number of readers
+  may coexist and none may coexist with a writer. Writes return `ErrReadOnly`.
 
 ### Changed
 
+- **`ErrAlreadyOpen` and `ErrReadOnly` have broader messages** ("directory is
+  already open", "database is read-only"), because each now has a second cause.
+  A durability failure still reads "read-only after a durability failure: …".
 - **Non-finite float metadata is refused.** `Add` and `AddBatch` now return
   `ErrInvalidMetadata` for a NaN or ±Inf metadata value, as they already did for
   a vector component. A stored NaN was invisible to every range filter, and it is

@@ -1,6 +1,7 @@
 package govecdb
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/khambampati-subhash/govecdb/internal/dirlock"
 	"github.com/khambampati-subhash/govecdb/internal/snapshot"
 	"github.com/khambampati-subhash/govecdb/internal/store"
 	"github.com/khambampati-subhash/govecdb/internal/wal"
@@ -56,6 +58,10 @@ type DB struct {
 
 	closed bool
 
+	// lock is the cross-process half of one writer per directory; openDirs is
+	// the in-process half. Held from Open to Close.
+	lock *dirlock.Handle
+
 	// failed is sticky and is the whole of failing closed. Once an append could
 	// not be made durable, the log has a hole in it and appending past that hole
 	// produces records replay will silently discard. Reads keep working because
@@ -89,9 +95,11 @@ const (
 // is what the log and the snapshot store both assume. Two DBs on one path would
 // interleave segment numbering and delete each other's temporary files.
 //
-// It covers this process only. Policing other processes needs an on-disk lock,
-// and a lock file left behind by a crash blocks a restart that should have
-// succeeded — so that is a deliberate gap rather than an oversight.
+// It covers this process only; other processes are kept out by an flock on the
+// directory (internal/dirlock), which the kernel releases when a process dies
+// and so cannot outlive a crash the way a lock file would. Both are needed:
+// flock is per open file description, so it would also refuse a second Open in
+// this process, but with an error that blames another process.
 var openDirs sync.Map
 
 // Open opens or creates a database in dir.
@@ -107,6 +115,10 @@ var openDirs sync.Map
 // index was built with a different dimension, metric, or M is refused: those are
 // structural, and reopening under different ones would search a graph whose
 // edges were chosen under different rules.
+//
+// A directory held by another process is refused with ErrAlreadyOpen. A
+// read-only open (WithReadOnly) takes a shared lock instead, so several readers
+// may coexist, but never alongside a writer.
 func Open(dir string, opts ...Option) (db *DB, err error) {
 	o := defaultOptions()
 	for _, opt := range opts {
@@ -140,13 +152,38 @@ func Open(dir string, opts ...Option) (db *DB, err error) {
 		}
 	}()
 
-	if err := makeDirs(dir); err != nil {
+	if o.readOnly {
+		// Creating a database is a write. A read-only open of a path that is not
+		// there is a typo, and answering it with an empty database would hide it.
+		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+			return nil, fmt.Errorf("%w: read-only open of %q, which is not an existing directory", ErrInvalidConfig, dir)
+		}
+	} else if err := makeDirs(dir); err != nil {
 		return nil, err
 	}
 
-	d := &DB{opts: o, dir: dir}
+	lock, err := dirlock.Lock(dir, o.readOnly)
+	if errors.Is(err, dirlock.ErrLocked) {
+		return nil, fmt.Errorf("%w: %s is in use by another process", ErrAlreadyOpen, abs)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("govecdb: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			lock.Release()
+		}
+	}()
+
+	d := &DB{opts: o, dir: dir, lock: lock}
 	if err := d.restore(); err != nil {
 		return nil, err
+	}
+	if o.readOnly {
+		// No writer at all, rather than a writer nobody calls: wal.Open starts a
+		// fresh segment, which is a file created by an open that promised not to
+		// write.
+		return d, nil
 	}
 
 	d.log, err = wal.Open(filepath.Join(dir, walSubdir), wal.Options{
@@ -354,6 +391,10 @@ func (db *DB) Snapshot() error {
 		db.mu.Unlock()
 		return ErrClosed
 	}
+	if db.opts.readOnly {
+		db.mu.Unlock()
+		return errOpenedReadOnly
+	}
 	seq := db.log.LastSeq()
 	idx, st := db.index, db.store
 	db.mu.Unlock()
@@ -469,7 +510,7 @@ func (db *DB) Stats() Stats {
 		Deleted:      deleted,
 		Slots:        slots,
 		WithMetadata: db.store.Len(),
-		LastSeq:      db.log.LastSeq(),
+		LastSeq:      db.lastSeqLocked(),
 		SnapshotSeq:  db.snapSeq,
 	}
 }
@@ -487,6 +528,9 @@ func (db *DB) Sync() error {
 	}
 	if db.failed != nil {
 		return db.failed
+	}
+	if db.log == nil {
+		return nil // read-only: nothing was written, so nothing is waiting
 	}
 	if err := db.log.Sync(); err != nil {
 		return db.fail(err)
@@ -525,7 +569,15 @@ func (db *DB) Close() error {
 	if abs, err := filepath.Abs(db.dir); err == nil {
 		openDirs.Delete(abs)
 	}
-	err := db.log.Close()
+	var err error
+	if db.log != nil {
+		err = db.log.Close()
+	}
+	// Released after the log is closed, so a process that opens the directory
+	// the moment the lock is free cannot find a segment still being written.
+	if lerr := db.lock.Release(); err == nil && lerr != nil {
+		err = lerr
+	}
 	// A sticky failure is the more useful thing to report: Close's own error is
 	// usually a downstream symptom of it.
 	if db.failed != nil {
@@ -572,17 +624,29 @@ func (db *DB) writable() error {
 	if db.closed {
 		return ErrClosed
 	}
+	if db.opts.readOnly {
+		return errOpenedReadOnly
+	}
 	if db.failed != nil {
 		return db.failed
 	}
 	return nil
 }
 
+// lastSeqLocked is the sequence of the newest record in the log. A read-only
+// database has no writer to ask, so it reports where replay stopped.
+func (db *DB) lastSeqLocked() uint64 {
+	if db.log == nil {
+		return max(db.nextSeq, 1) - 1
+	}
+	return db.log.LastSeq()
+}
+
 // fail records the first durability failure and returns it wrapped in
 // ErrReadOnly, so a caller can match the category and still print the cause.
 func (db *DB) fail(err error) error {
 	if db.failed == nil {
-		db.failed = fmt.Errorf("%w: %w", ErrReadOnly, err)
+		db.failed = fmt.Errorf("%w after a durability failure: %w", ErrReadOnly, err)
 	}
 	return db.failed
 }

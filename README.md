@@ -316,7 +316,6 @@ page, _ := db.Scan("", 1000)                     // id order; pass the last id t
 _ = db.Range(func(v govecdb.Vector) bool {       // everything, sorted once, read in pages
     return true
 })
-
 ```
 
 ### Filters
@@ -367,6 +366,12 @@ Everything is a functional option on `Open`. Only `WithDimension` is required.
 | `WithSnapshotsKept(int)` | `2` | Also decides how much log is kept — see below. |
 | `WithSearchTargetRecall(float64)` | `0.95` | What a zero `Ef` aims for. Treated as a floor. |
 | `WithLimits(id, k, ef, batch, mdKeys)` | `512, 10k, 100k, 10k, 256` | Per-call bounds. Configurable, not removable. |
+| `WithReadOnly()` | off | Open an existing directory without writing to it. Shares the directory with other readers, never with a writer. |
+
+**One process per directory.** `Open` takes an `flock` on the directory —
+exclusive, or shared under `WithReadOnly` — so a second process gets
+`ErrAlreadyOpen` instead of a corrupted log. The kernel releases it when the
+holder dies, so a crash leaves nothing stale to clean up.
 
 Three of these interact in a way worth stating plainly:
 

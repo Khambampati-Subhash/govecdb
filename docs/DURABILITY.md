@@ -346,10 +346,13 @@ marketing.
   fsync is called. A tear needs the kill to land inside the `write` itself — a
   narrow window, covered deterministically in `replay_test.go` by damaging a log
   directly rather than by hoping to hit it.
-- **Single writer, assumed rather than enforced.** `O_EXCL` on segment creation
-  catches two processes starting together, but not one joining later. There is no
-  lock file. A snapshot directory and a log directory each belong to one database
-  instance.
+- **Single writer, enforced by `flock` on Unix.** `Open` takes an exclusive
+  `flock` on the database directory (shared under `WithReadOnly`), so a second
+  process is refused with `ErrAlreadyOpen` instead of interleaving segments with
+  the first. The kernel drops an `flock` when its holder dies, however it dies, so
+  a crash leaves nothing stale behind — the objection that kept a lock *file* out.
+  It is advisory, and only as good as the filesystem's `flock`: local disk, not
+  NFS. Windows has no lock (and no CI); there it is in-process only.
 - **No redundancy, only detection.** Checksums say *that* something is corrupt,
   never what it was. A damaged WAL record costs everything after it in that
   segment; a damaged snapshot costs a fallback to an older one.

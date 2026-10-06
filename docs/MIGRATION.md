@@ -294,9 +294,11 @@ than after.
 
 ### Out of scope for v2 as well
 
-- **Cross-process locking.** Still deliberate. A lock file left behind by a crash
-  blocks a restart that should have succeeded, and the in-process `openDirs`
-  check already catches the case worth catching.
+- ~~**Cross-process locking.**~~ Done after v1.1.1, as an `flock` on the
+  directory rather than a lock file. The objection was to a file a crash leaves
+  behind; the kernel releases an `flock` when its holder dies, so that objection
+  does not apply to it. A downstream user running a server and a CLI ingest over
+  one directory is what showed the gap was not hypothetical.
 - **Point-in-time recovery and audit.** Time-based log retention serves those,
   and truncation-to-snapshot serves recovery. They are different features and
   only the second is needed.
@@ -495,8 +497,9 @@ Decided while building it:
   wrong later.
 - **One writer per directory**, enforced within the process. The log and the
   snapshot store both assume it; two would interleave segment numbering and
-  delete each other's temporary files. Cross-process locking is a deliberate gap:
-  a lock file left by a crash blocks a restart that should have succeeded.
+  delete each other's temporary files. Enforced in-process by `openDirs` and,
+  since v1.2, across processes by an `flock` on the directory, which a crash
+  cannot leave stale the way a lock file could.
 - **Reopening with a different dimension, metric or M is refused.** Those are
   structural — a graph's edges were chosen under one set of rules, and searching
   it under another returns quietly wrong answers rather than failing.

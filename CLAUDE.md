@@ -429,9 +429,19 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   it is given when already large enough — so `hnsw.Read` reuses it instead of
   swallowing the metadata section. `TestSnapshotPayloadSectionsDoNotOverread` is
   the guard; getting it wrong corrupts a restore rather than failing to compile.
-- **One writer per directory**, enforced in-process via `openDirs`. Cross-process
-  locking is a deliberate gap — a lock file left by a crash blocks a restart that
-  should have succeeded.
+- **One writer per directory**, enforced in-process via `openDirs` and across
+  processes by an **`flock` on the directory itself** (`internal/dirlock`):
+  exclusive for a writer, shared for `WithReadOnly`. Not a lock file — the
+  objection to one (a crash leaves it behind) does not apply, because the kernel
+  drops an flock when its holder dies; `TestAnotherProcessIsRefused` SIGKILLs a
+  holder to prove it. Both checks are needed: flock is per open file description,
+  so it also refuses a same-process second open, but blames "another process".
+  `service.NewManager` locks its root the same way (`ErrRootInUse`), because a
+  second manager's `Drop` is a `RemoveAll` under the first.
+- **`WithReadOnly` writes nothing** — no `wal.Open` (which would start a
+  segment), no snapshot loop; writes return `ErrReadOnly` wrapping
+  `errOpenedReadOnly`. `TestReadOnlyServesReadsAndRefusesWrites` diffs the
+  directory tree before and after.
 - **Enumeration is `GetBatch`, `Scan(after, limit)` and `Range(fn)`**
   (`enumerate.go`), all weakly consistent: no lock is held across a walk, each
   page is read under one short lock. `Scan` is O(N log limit) per page because

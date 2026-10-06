@@ -493,7 +493,6 @@ meant.
 |---|---|
 | **Clustering and replication** | v2 item 8. The WAL is already an ordered, checksummed, sequence-numbered record of every state change — which is exactly what a follower needs — so replication should be built on `Replay` rather than beside it. Raft is not stdlib, so it is a separate module. |
 | **gRPC** | Same reason. See [the module decision](#the-module-decision). |
-| **Cross-process locking** | Unchanged from the library. One daemon per directory; a lock file left behind by a crash blocks a restart that should have succeeded. |
 | **Online compaction** | v2 item 2. `POST .../compact` stops the world, so you choose the moment. |
 | **Per-user auth, rate limiting, audit** | A proxy in front does these properly, and this process would do them badly. |
 | **Changing a collection's dimension, metric or M** | Structural. Create a new collection and re-index. |

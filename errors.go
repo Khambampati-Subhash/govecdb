@@ -1,6 +1,9 @@
 package govecdb
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Sentinel errors callers match with errors.Is. Every one of them wraps a
 // message naming the field and the value that caused it, so matching gives you
@@ -9,7 +12,9 @@ var (
 	// ErrClosed is returned by every operation on a closed database.
 	ErrClosed = errors.New("govecdb: database is closed")
 
-	// ErrReadOnly is returned by writes after the write-ahead log has failed.
+	// ErrReadOnly is returned by writes after the write-ahead log has failed, and
+	// by every write to a database opened WithReadOnly. The wrapped message says
+	// which.
 	//
 	// It is the deliberate half of failing closed. Once a write could not be
 	// made durable, continuing to accept writes would produce a log with a hole
@@ -18,15 +23,17 @@ var (
 	// what is lost is the ability to promise anything about the next write.
 	//
 	// It is not recoverable in place. Fix the disk, then reopen.
-	ErrReadOnly = errors.New("govecdb: database is read-only after a durability failure")
+	ErrReadOnly = errors.New("govecdb: database is read-only")
 
-	// ErrAlreadyOpen means this process already has the directory open.
+	// ErrAlreadyOpen means the directory is already open, in this process or —
+	// on Unix, through an flock — in another one.
 	//
 	// A log directory and a snapshot directory each belong to one writer: two
 	// would interleave segment numbering and delete each other's temporary
-	// files. This catches the case worth catching — the same process opening the
-	// same path twice — and does not attempt to police other processes.
-	ErrAlreadyOpen = errors.New("govecdb: directory is already open in this process")
+	// files, and two processes doing it corrupt the database with nothing
+	// refusing either. Read-only opens share the directory with each other but
+	// not with a writer.
+	ErrAlreadyOpen = errors.New("govecdb: directory is already open")
 
 	// ErrInvalidConfig means Open was given options it cannot build from.
 	ErrInvalidConfig = errors.New("govecdb: invalid configuration")
@@ -59,3 +66,7 @@ var (
 	// which layer refused it and why.
 	ErrCorrupt = errors.New("govecdb: corrupt data on disk")
 )
+
+// errOpenedReadOnly is what a write to a WithReadOnly database returns. It is
+// ErrReadOnly to errors.Is, so a caller handles both causes with one check.
+var errOpenedReadOnly = fmt.Errorf("%w: opened with WithReadOnly", ErrReadOnly)

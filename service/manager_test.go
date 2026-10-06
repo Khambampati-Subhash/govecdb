@@ -552,3 +552,25 @@ func TestConcurrentLifecycle(t *testing.T) {
 		t.Fatalf("Drop: %v", err)
 	}
 }
+
+// TestRootIsExclusive: a second manager over a root would be free to Drop —
+// RemoveAll — a collection the first has open. The root lock is released by
+// Close and, being an flock, by the death of the process holding it.
+func TestRootIsExclusive(t *testing.T) {
+	root := t.TempDir()
+	m, err := NewManager(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewManager(root, Options{}); !errors.Is(err, ErrRootInUse) {
+		t.Fatalf("second NewManager = %v, want ErrRootInUse", err)
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := NewManager(root, Options{})
+	if err != nil {
+		t.Fatalf("NewManager after Close = %v", err)
+	}
+	again.Close()
+}

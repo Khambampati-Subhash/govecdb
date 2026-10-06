@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/khambampati-subhash/govecdb"
+	"github.com/khambampati-subhash/govecdb/internal/dirlock"
 )
 
 // Options configures a Manager. The zero value is usable: no cap on how many
@@ -69,6 +70,12 @@ type Manager struct {
 
 	stop chan struct{}
 	done chan struct{}
+
+	// lock keeps a second Manager off this root for as long as this one is
+	// open. Each collection's database also locks its own directory, but that
+	// does not cover the root's own operations: a second manager could Drop a
+	// collection this one has loaded, and Drop is a RemoveAll.
+	lock *dirlock.Handle
 }
 
 // collection is one loaded database plus the bookkeeping that decides when it
@@ -109,12 +116,20 @@ func NewManager(root string, opts Options) (*Manager, error) {
 	if err := os.MkdirAll(root, dirPerm); err != nil {
 		return nil, fmt.Errorf("service: create %q: %w", root, err)
 	}
+	lock, err := dirlock.Lock(root, false)
+	if errors.Is(err, dirlock.ErrLocked) {
+		return nil, fmt.Errorf("%w: %s", ErrRootInUse, root)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("service: %w", err)
+	}
 
 	m := &Manager{
 		root: root,
 		opts: opts,
 		now:  opts.now,
 		cols: make(map[string]*collection),
+		lock: lock,
 	}
 	if m.now == nil {
 		m.now = time.Now
@@ -515,6 +530,11 @@ func (m *Manager) Close() error {
 			}
 		}
 		delete(m.cols, name)
+	}
+	// Last, once every collection is closed, so a manager that starts the
+	// moment the root is free finds no database still open inside it.
+	if err := m.lock.Release(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("service: release root: %w", err)
 	}
 	return firstErr
 }

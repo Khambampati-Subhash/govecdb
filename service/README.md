@@ -115,10 +115,6 @@ re-derive the rules and get them subtly wrong.
 
 ## What is deliberately not here
 
-- **Cross-process locking.** Unchanged from the root package: one `Manager` per
-  root directory, enforced by `govecdb`'s own in-process check when a collection
-  is opened. A lock file left behind by a crash blocks a restart that should have
-  succeeded.
 - **A snapshot on shutdown.** `Close` does not take one, for the same reason
   `DB.Close` does not: a shutdown that takes seconds per collection and fails on a
   full disk is the shutdown an operator cannot afford.

@@ -139,6 +139,8 @@ type options struct {
 
 	targetRecall float64
 
+	readOnly bool
+
 	maxIDBytes  int
 	maxK        int
 	maxEf       int
@@ -312,6 +314,26 @@ func WithSnapshotInterval(d time.Duration) Option {
 	}
 }
 
+// WithReadOnly opens an existing database for reading only: no log segment is
+// created, nothing in the directory is written, and every write — Add, AddBatch,
+// Delete, Snapshot — returns ErrReadOnly.
+//
+// It is for a second process that needs to search a collection another one
+// built: several read-only opens may share a directory, and none may share it
+// with a writer, because a writer's log truncation would delete segments out
+// from under a reader's replay. Start-up costs the same as a normal open — a
+// snapshot load and a replay of the log after it — so a static collection opens
+// fastest when it was snapshotted last thing before its writer closed.
+//
+// The directory must exist. Compact is still allowed: it rebuilds only the
+// in-memory graph and writes nothing.
+func WithReadOnly() Option {
+	return func(o *options) error {
+		o.readOnly = true
+		return nil
+	}
+}
+
 // WithSnapshotsKept sets how many snapshots to retain. Defaults to 2.
 //
 // More than one on purpose. One snapshot is one copy, and a copy that fails its
@@ -378,6 +400,9 @@ func WithLimits(maxIDBytes, maxK, maxEf, maxBatch, maxMetadataKeys int) Option {
 func (o *options) validate() error {
 	if o.dimension == 0 {
 		return fmt.Errorf("%w: dimension is required, set WithDimension", ErrInvalidConfig)
+	}
+	if o.readOnly && o.snapshotEvery > 0 {
+		return fmt.Errorf("%w: WithSnapshotInterval on a read-only database, which cannot write one", ErrInvalidConfig)
 	}
 	if o.maxEf < o.maxK {
 		return fmt.Errorf("%w: max ef %d is below max k %d, which would refuse a legal search",
