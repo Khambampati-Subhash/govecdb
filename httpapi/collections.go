@@ -3,6 +3,7 @@ package httpapi
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/khambampati-subhash/govecdb"
@@ -171,13 +172,54 @@ func (s *Server) handleListCollections(w http.ResponseWriter, r *http.Request) {
 	s.write(w, r, http.StatusOK, map[string]any{"collections": out})
 }
 
+// handleGetCollection describes a collection. It does not load one — describing
+// must not read an index into memory — unless asked to with ?load=true, which is
+// how a client gets stats for a cold collection without a throwaway search.
 func (s *Server) handleGetCollection(w http.ResponseWriter, r *http.Request) {
-	info, err := s.mgr.Get(r.PathValue("name"))
+	name := r.PathValue("name")
+	load, err := boolParam(r, "load")
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+
+	var stats govecdb.Stats
+	if load {
+		// Stats are read inside the borrow, so they describe the collection
+		// that was loaded rather than one an idle sweep may since have closed.
+		err := s.mgr.Use(name, func(db *govecdb.DB) error {
+			stats = db.Stats()
+			return nil
+		})
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
+	info, err := s.mgr.Get(name)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if load {
+		info.Loaded, info.Stats = true, stats
+	}
 	s.write(w, r, http.StatusOK, describe(info))
+}
+
+// boolParam reads an optional true/false query parameter. Anything else is
+// refused rather than read as false: ?load=yes meaning "don't load" is exactly
+// the quiet misreading strict decoding exists to prevent.
+func boolParam(r *http.Request, name string) (bool, error) {
+	v := r.URL.Query().Get(name)
+	if v == "" {
+		return false, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%w: %s=%q, want true or false", govecdb.ErrInvalidRequest, name, v)
+	}
+	return b, nil
 }
 
 // handleDropCollection deletes a collection and its data.
@@ -208,6 +250,28 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.write(w, r, http.StatusOK, map[string]any{"snapshot_sequence": stats.SnapshotSeq})
+}
+
+// handleSync makes every write this collection has acknowledged durable.
+//
+// It is the cheap barrier: under SyncInterval or SyncNever an acknowledged write
+// may still be in a user-space buffer, and before this the only durable line a
+// client could draw over HTTP was a snapshot — seconds, where this is one fsync.
+// Under SyncAlways it returns at once, because everything already is.
+func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
+	var stats govecdb.Stats
+	err := s.mgr.Use(r.PathValue("name"), func(db *govecdb.DB) error {
+		if err := db.Sync(); err != nil {
+			return err
+		}
+		stats = db.Stats()
+		return nil
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.write(w, r, http.StatusOK, map[string]any{"last_sequence": stats.LastSeq})
 }
 
 // handleCompact rebuilds the index over its live vectors.

@@ -22,6 +22,15 @@ type errorDetail struct {
 	// Message describes what was refused. For a 5xx it is deliberately vague —
 	// see classify.
 	Message string `json:"message"`
+
+	// Resource says which kind of thing a not_found is about: "collection" or
+	// "vector". A GET of a vector can miss on either, and without this a client
+	// had to ask for the collection after every miss to tell them apart.
+	//
+	// A field rather than two new codes, because a code is the stable surface
+	// and clients already branch on not_found; splitting it would break every
+	// one of them to add information that fits alongside.
+	Resource string `json:"resource,omitempty"`
 }
 
 // Codes. Stable API surface: adding one is additive, changing one is not.
@@ -50,6 +59,25 @@ var (
 	errUnsupportedMediaType = errors.New("httpapi: unsupported media type, want application/json")
 	errUnauthorized         = errors.New("httpapi: missing or invalid credentials")
 )
+
+// Values of errorDetail.Resource.
+const (
+	resourceCollection = "collection"
+	resourceVector     = "vector"
+)
+
+// resourceOf names what a not-found error failed to find, or "" for any other
+// error. service.ErrNotFound first: a missing collection is the outer miss, and
+// nothing inside one can be looked up.
+func resourceOf(err error) string {
+	switch {
+	case errors.Is(err, service.ErrNotFound):
+		return resourceCollection
+	case errors.Is(err, govecdb.ErrNotFound):
+		return resourceVector
+	}
+	return ""
+}
 
 // classify maps an error onto a status and a code.
 //

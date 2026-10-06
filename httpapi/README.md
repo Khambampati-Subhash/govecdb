@@ -48,10 +48,13 @@ GET    /v1/collections/{name}                spec and statistics
 DELETE /v1/collections/{name}                drop
 
 POST   /v1/collections/{name}/vectors        add or replace
+GET    /v1/collections/{name}/vectors        page through, in id order
+POST   /v1/collections/{name}/vectors/get    fetch many by id
 GET    /v1/collections/{name}/vectors/{id}   fetch one
 DELETE /v1/collections/{name}/vectors/{id}   delete one
 POST   /v1/collections/{name}/search         nearest neighbours
 
+POST   /v1/collections/{name}/sync           make acknowledged writes durable
 POST   /v1/collections/{name}/snapshot       snapshot now
 POST   /v1/collections/{name}/compact        reclaim tombstoned slots
 ```
@@ -133,13 +136,13 @@ semantics are the library's, unchanged — including the one most likely to be
 
 | Code | Status | Means |
 |---|---|---|
-| `invalid_request` | 400 | Malformed body, unknown field, bad duration, no vectors. |
+| `invalid_request` | 400 | Malformed body, unknown field, bad duration, bad page limit. |
 | `invalid_vector` | 400 | Wrong dimension, empty id, a non-finite value. |
 | `invalid_metadata` | 400 | A value that is not a string, bool or number. |
 | `invalid_filter` | 400 | An unknown op, a missing key, a tree too deep. |
 | `invalid_spec` | 400 | A collection configuration the database refuses. |
 | `invalid_name` | 400 | A collection name outside the allowed set. |
-| `not_found` | 404 | No such collection, vector, or route. |
+| `not_found` | 404 | No such collection, vector, or route. `resource` says which: `"collection"` or `"vector"`, absent for a route. |
 | `already_exists` | 409 | A collection of that name is already there. |
 | `payload_too_large` | 413 | Over `MaxBodyBytes`. |
 | `unsupported_media_type` | 415 | A `Content-Type` other than `application/json`. |

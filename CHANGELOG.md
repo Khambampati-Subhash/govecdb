@@ -30,12 +30,30 @@ below names what it fixes.
   Windows stays in-process, as before. `service.NewManager` locks its root the
   same way and returns the new `ErrRootInUse`, since a second manager's `Drop`
   is a `RemoveAll` under the first.
+- **Daemon: enumeration, a durable barrier, and stats on demand.**
+  `GET /v1/collections/{name}/vectors?after=&limit=` pages through a collection
+  in id order; `POST .../vectors/get` fetches many ids in one request and lists
+  the missing ones; `POST .../sync` calls `DB.Sync`, the cheap durable barrier
+  that before needed a snapshot or a wait for the group-commit interval; and
+  `GET /v1/collections/{name}?load=true` loads a cold collection to report its
+  stats instead of a throwaway search.
+- **`not_found` errors carry a `resource` field** — `"collection"` or
+  `"vector"` — so a missed fetch says which was missing. Additive: the code is
+  unchanged, so no client that branches on it breaks.
 - **`WithReadOnly()`.** Opens an existing database without writing anything —
   no log segment, no snapshot — under a *shared* lock, so any number of readers
   may coexist and none may coexist with a writer. Writes return `ErrReadOnly`.
 
 ### Changed
 
+- **Integral floats keep their type through the REST API.** A stored
+  `float64(1)` was written as `1`, which the API's own number rule then read back
+  as an `int64`, so a fetched record sent back unchanged changed type. Integral
+  floats are now written `1.0`. A non-finite value stored before this release is
+  written as `null` rather than failing the whole response.
+- **An empty batch to `POST .../vectors` is a no-op** (`{"added": 0}`), as it is
+  in the library, instead of a 400. The collection is still resolved, so a wrong
+  name is still a 404.
 - **`ErrAlreadyOpen` and `ErrReadOnly` have broader messages** ("directory is
   already open", "database is read-only"), because each now has a second cause.
   A durability failure still reads "read-only after a durability failure: …".

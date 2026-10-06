@@ -30,9 +30,9 @@ type searchRequest struct {
 }
 
 type matchJSON struct {
-	ID       string           `json:"id"`
-	Distance float32          `json:"distance"`
-	Metadata govecdb.Metadata `json:"metadata,omitempty"`
+	ID       string      `json:"id"`
+	Distance float32     `json:"distance"`
+	Metadata metadataOut `json:"metadata,omitempty"`
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +70,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]matchJSON, len(matches))
 	for i, m := range matches {
-		out[i] = matchJSON{ID: m.ID, Distance: m.Distance, Metadata: m.Metadata}
+		out[i] = matchJSON{ID: m.ID, Distance: m.Distance, Metadata: metadataOut(m.Metadata)}
 	}
 	s.write(w, r, http.StatusOK, map[string]any{"matches": out})
 }

@@ -1,13 +1,16 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"mime"
 	"net/http"
+	"slices"
 
 	"github.com/khambampati-subhash/govecdb"
 )
@@ -142,4 +145,64 @@ func metadata(in map[string]any) (govecdb.Metadata, error) {
 		out[k] = s
 	}
 	return out, nil
+}
+
+// metadataOut is metadata on its way back to a client, encoded so that scalar's
+// rule reads it back as the type it was stored as.
+//
+// # Why not just let encoding/json do it
+//
+// The rule on the way in is syntactic: a number with a decimal point or an
+// exponent is a float64, one without is an int64. encoding/json writes the
+// float64 1.0 as `1`, which that rule then reads back as an int64 — so a client
+// that round-trips a record changed the type of every integral float in it, and
+// had to keep its own list of which keys were floats to undo that. Appending
+// ".0" to an integral float closes the loop without inventing a typed wire
+// format: every JSON parser still reads `1.0` as the number one, and this one
+// reads it as the float it was.
+type metadataOut govecdb.Metadata
+
+func (m metadataOut) MarshalJSON() ([]byte, error) {
+	if m == nil {
+		return []byte("null"), nil
+	}
+	// Sorted, as encoding/json sorts map keys, so a response is reproducible.
+	keys := slices.Sorted(maps.Keys(m))
+	b := append(make([]byte, 0, 32*len(keys)), '{')
+	for i, k := range keys {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		kb, err := json.Marshal(k)
+		if err != nil {
+			return nil, err
+		}
+		b = append(append(b, kb...), ':')
+
+		f, isFloat := m[k].(float64)
+		switch {
+		case isFloat && (math.IsNaN(f) || math.IsInf(f, 0)):
+			// Refused on the way in now, but one stored before that check can
+			// still be on disk, and JSON has no spelling for it. null is the
+			// honest answer; failing the whole response over one value of one
+			// record would make the record unreadable through this API at all.
+			b = append(b, "null"...)
+		case isFloat:
+			fb, err := json.Marshal(f)
+			if err != nil {
+				return nil, err
+			}
+			b = append(b, fb...)
+			if !bytes.ContainsAny(fb, ".eE") {
+				b = append(b, ".0"...)
+			}
+		default:
+			vb, err := json.Marshal(m[k])
+			if err != nil {
+				return nil, err
+			}
+			b = append(b, vb...)
+		}
+	}
+	return append(b, '}'), nil
 }

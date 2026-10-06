@@ -101,11 +101,14 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("DELETE /v1/collections/{name}", s.handleDropCollection)
 
 	mux.HandleFunc("POST /v1/collections/{name}/vectors", s.handleAddVectors)
+	mux.HandleFunc("GET /v1/collections/{name}/vectors", s.handleListVectors)
+	mux.HandleFunc("POST /v1/collections/{name}/vectors/get", s.handleGetVectors)
 	mux.HandleFunc("GET /v1/collections/{name}/vectors/{id}", s.handleGetVector)
 	mux.HandleFunc("DELETE /v1/collections/{name}/vectors/{id}", s.handleDeleteVector)
 	mux.HandleFunc("POST /v1/collections/{name}/search", s.handleSearch)
 
 	mux.HandleFunc("POST /v1/collections/{name}/snapshot", s.handleSnapshot)
+	mux.HandleFunc("POST /v1/collections/{name}/sync", s.handleSync)
 	mux.HandleFunc("POST /v1/collections/{name}/compact", s.handleCompact)
 
 	// Outermost first: a panic in the auth check should still become a 500 rather
@@ -332,7 +335,9 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	if status == http.StatusServiceUnavailable && code == codeTooManyOpen {
 		w.Header().Set("Retry-After", "1")
 	}
-	s.write(w, r, status, errorResponse{Error: errorDetail{Code: code, Message: message}})
+	s.write(w, r, status, errorResponse{Error: errorDetail{
+		Code: code, Message: message, Resource: resourceOf(err),
+	}})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -496,6 +496,17 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   else is a `float64`.** Storing everything as float rounds a nanosecond timestamp
   (1.7e18 is past 2^53); storing everything as int turns 0.5 into 0. It is free at
   query time because `int64` and `float64` compare exactly.
+- **The number rule runs both ways.** `metadataOut` writes an integral float64
+  as `1.0`, never `1`, so a fetched record posted back keeps its types. Do not
+  replace it with plain `encoding/json` map marshalling — that is the bug it
+  fixed. A pre-existing NaN goes out as `null` rather than failing the response.
+- **`not_found` carries `resource` ("collection" | "vector")** rather than being
+  split into two codes: codes are the stable surface and clients already branch
+  on `not_found`. `resourceOf` checks `service.ErrNotFound` first.
+- **Enumeration over HTTP**: `GET .../vectors?after=&limit=` (≤ 1000 a page —
+  a response-size cap, the one bound this layer owns) over `DB.Scan`, and
+  `POST .../vectors/get` over `DB.GetBatch`. `POST .../sync` is `DB.Sync`. An
+  empty add batch is a no-op, matching the library.
 - **The filter wire format lives in `httpapi`, not `internal/filter`.** A
   serialization format is a compatibility promise and the package making it should
   be the one a client can see. `internal/filter` still has no wire format.

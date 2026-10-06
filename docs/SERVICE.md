@@ -148,7 +148,9 @@ Every response is JSON. Every failure has the same shape:
 {"error": {"code": "not_found", "message": "service: collection not found: \"docs\""}}
 ```
 
-Branch on `code`; read `message`. The full table of codes is in the [httpapi
+Branch on `code`; read `message`. A `not_found` also carries `"resource":
+"collection"` or `"resource": "vector"`, so a missed fetch says which of the two
+was missing. The full table of codes is in the [httpapi
 README](../httpapi/README.md#errors-are-one-shape).
 
 ### `POST /v1/collections` — create
@@ -191,7 +193,9 @@ because its size is unknown and `0` would be a different claim.
 
 ### `GET /v1/collections/{name}` — one collection
 
-Same object. `404` if there is none.
+Same object. `404` if there is none. Like listing, it loads nothing — unless you
+pass `?load=true`, which loads a cold collection and reports its `stats`. That is
+the way to ask for a size without sending a throwaway search.
 
 ### `DELETE /v1/collections/{name}` — drop
 
@@ -207,7 +211,9 @@ failing while one overlaps.
 ]}
 ```
 
-`200` with `{"added": 1}`. Adding an existing id **replaces** it.
+`200` with `{"added": 1}`. Adding an existing id **replaces** it. An empty
+`vectors` list is a no-op that answers `{"added": 0}`, as `AddBatch` is in the
+library.
 
 Every vector is validated before any is written, so a batch with one bad record
 leaves the collection untouched. That is a guarantee about *validation*, not
@@ -222,6 +228,11 @@ and one written with a point becomes a float; the two still compare exactly, so
 `{"gte": 10}` matches a stored `10.0`. The reasoning is in the [httpapi
 README](../httpapi/README.md#how-a-json-number-becomes-a-metadata-value).
 
+The rule holds on the way **out** too: a float that happens to be integral is
+written `1.0`, never `1`, so sending a fetched record back unchanged stores the
+same types it had. A NaN cannot be stored (it is refused as `invalid_metadata`);
+one written before that check comes back as `null`.
+
 ### `GET /v1/collections/{name}/vectors/{id}` — fetch one
 
 Ids are arbitrary UTF-8 and must be percent-encoded in the path:
@@ -232,6 +243,35 @@ The values come back in the form the index holds them, which for `cosine` is the
 magnitude carries no meaning, and storing a second copy of every embedding to
 hand back a number nothing uses would double the memory of the largest thing in
 the process.
+
+### `POST /v1/collections/{name}/vectors/get` — fetch many
+
+```json
+{"ids": ["doc-1", "doc-2", "gone"]}
+```
+
+```json
+{"vectors": [{"id": "doc-1", "...": "..."}, {"id": "doc-2", "...": "..."}], "missing": ["gone"]}
+```
+
+Order is kept and absent ids are listed rather than failing the call. A POST
+because a thousand ids do not fit in a URL. Read under one lock, so the batch is
+one consistent moment. At most the collection's batch limit (10,000) ids.
+
+### `GET /v1/collections/{name}/vectors?after=&limit=` — page through
+
+```json
+{"vectors": [{"id": "doc-1", "...": "..."}], "next": "doc-1"}
+```
+
+In byte order of id. Pass `next` back as `after` for the following page; it is
+absent on the last one. `limit` is 1–1000, default 100 — capped because nothing
+else bounds a response body. Each page costs one pass over the collection's ids
+(the index keeps no sorted order), and pages are weakly consistent: each is one
+moment, but a write between two requests may or may not show up.
+
+This is how to copy, reshard or re-embed a collection without keeping a list of
+its ids somewhere else.
 
 ### `DELETE /v1/collections/{name}/vectors/{id}` — delete one
 
@@ -266,6 +306,14 @@ within one query and meaningless across metrics.
 0.997 at 500 vectors down to 0.652 at 20,000, both at `ef=64`. Any constant that
 works today is wrong later. Omitted, the width is fitted from the corpus size and
 `target_recall`.
+
+### `POST /v1/collections/{name}/sync`
+
+`200` with `{"last_sequence": 1205}`. Every write acknowledged before the call is
+durable when it returns. Under `sync_policy: interval` or `never` an acknowledged
+write may still be in a user-space buffer; this is the barrier to call before
+recording somewhere else that the data is safe — one fsync, where a snapshot is
+seconds. Under `always` it returns at once.
 
 ### `POST /v1/collections/{name}/snapshot`
 
@@ -496,4 +544,4 @@ meant.
 | **Online compaction** | v2 item 2. `POST .../compact` stops the world, so you choose the moment. |
 | **Per-user auth, rate limiting, audit** | A proxy in front does these properly, and this process would do them badly. |
 | **Changing a collection's dimension, metric or M** | Structural. Create a new collection and re-index. |
-| **Pagination** | No endpoint returns an unbounded list: collections are few, and a search returns `k`. The list response is an object rather than a bare array so a cursor can be added without breaking clients. |
+| **Paging the collection list** | Collections are few, so the list is not paged. It is an object rather than a bare array so a cursor can be added without breaking clients. Vectors *are* paged — see `GET .../vectors`. |

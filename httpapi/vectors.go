@@ -3,15 +3,36 @@ package httpapi
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/khambampati-subhash/govecdb"
 )
 
-// vectorJSON is one record on the wire.
+// vectorJSON is one record on its way in.
 type vectorJSON struct {
 	ID       string         `json:"id"`
 	Values   []float32      `json:"values"`
 	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// vectorOut is one record on its way out. A separate type because metadata is
+// encoded differently in each direction — see metadataOut.
+type vectorOut struct {
+	ID       string      `json:"id"`
+	Values   []float32   `json:"values"`
+	Metadata metadataOut `json:"metadata,omitempty"`
+}
+
+func toOut(v govecdb.Vector) vectorOut {
+	return vectorOut{ID: v.ID, Values: v.Values, Metadata: metadataOut(v.Metadata)}
+}
+
+func toOutAll(vs []govecdb.Vector) []vectorOut {
+	out := make([]vectorOut, len(vs))
+	for i, v := range vs {
+		out[i] = toOut(v)
+	}
+	return out
 }
 
 // addRequest is the body of POST .../vectors.
@@ -29,11 +50,11 @@ func (s *Server) handleAddVectors(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	if len(req.Vectors) == 0 {
-		s.fail(w, r, fmt.Errorf("%w: no vectors", govecdb.ErrInvalidRequest))
-		return
-	}
-
+	// An empty batch is a no-op, as it is in the library. Refusing it here made
+	// the two deployments disagree about the same call, and a client batching
+	// whatever a document produced had to special-case the document that
+	// produced nothing. The collection is still resolved, so a typo in its name
+	// is a 404 rather than a silent success.
 	vs := make([]govecdb.Vector, len(req.Vectors))
 	for i, v := range req.Vectors {
 		md, err := metadata(v.Metadata)
@@ -77,7 +98,7 @@ func (s *Server) handleGetVector(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.write(w, r, http.StatusOK, vectorJSON{ID: v.ID, Values: v.Values, Metadata: v.Metadata})
+	s.write(w, r, http.StatusOK, toOut(v))
 }
 
 // handleDeleteVector removes a vector.
@@ -97,4 +118,93 @@ func (s *Server) handleDeleteVector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.write(w, r, http.StatusOK, map[string]any{"deleted": id})
+}
+
+// getBatchRequest is the body of POST .../vectors/get.
+type getBatchRequest struct {
+	IDs []string `json:"ids"`
+}
+
+// handleGetVectors reads many vectors in one request.
+//
+// A POST, because the ids are a body and not a query string: a thousand ids do
+// not fit in a URL any proxy will pass. Absent ids are listed in "missing"
+// rather than failing the call — in a batch, one stale id is not a reason to
+// withhold the rest. The batch is read under one lock, so it is a consistent
+// picture of the collection.
+func (s *Server) handleGetVectors(w http.ResponseWriter, r *http.Request) {
+	var req getBatchRequest
+	if err := decode(w, r, s.maxBody, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var vs []govecdb.Vector
+	err := s.mgr.Use(r.PathValue("name"), func(db *govecdb.DB) error {
+		var err error
+		vs, err = db.GetBatch(req.IDs)
+		return err
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	// GetBatch keeps request order and drops the absent, so one forward walk
+	// recovers which ones those were.
+	missing := []string{}
+	j := 0
+	for _, id := range req.IDs {
+		if j < len(vs) && vs[j].ID == id {
+			j++
+			continue
+		}
+		missing = append(missing, id)
+	}
+	s.write(w, r, http.StatusOK, map[string]any{"vectors": toOutAll(vs), "missing": missing})
+}
+
+// Page sizes for GET .../vectors. The cap is about the response, not the
+// database: a page of a thousand 1,536-dimension vectors is already ~15 MB of
+// JSON, and nothing else bounds how much one response body can make this
+// process buffer.
+const (
+	defaultPageLimit = 100
+	maxPageLimit     = 1000
+)
+
+// handleListVectors pages through a collection in id order.
+//
+// The cursor is the last id of the previous page, passed back as ?after=, and
+// "next" is omitted on the last page. Pages are weakly consistent: each is one
+// consistent moment, but a vector written between two requests may or may not
+// appear, which is the most a cursor held by a client between requests can
+// honestly promise.
+func (s *Server) handleListVectors(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := defaultPageLimit
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxPageLimit {
+			s.fail(w, r, fmt.Errorf("%w: limit %q, want 1..%d", govecdb.ErrInvalidRequest, v, maxPageLimit))
+			return
+		}
+		limit = n
+	}
+	after := q.Get("after")
+
+	var vs []govecdb.Vector
+	err := s.mgr.Use(r.PathValue("name"), func(db *govecdb.DB) error {
+		var err error
+		vs, err = db.Scan(after, limit)
+		return err
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	body := map[string]any{"vectors": toOutAll(vs)}
+	if len(vs) == limit {
+		body["next"] = vs[len(vs)-1].ID
+	}
+	s.write(w, r, http.StatusOK, body)
 }

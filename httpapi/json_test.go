@@ -76,7 +76,6 @@ func TestAddRejectsBadVectors(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, code string
 	}{
-		{"no vectors at all", `{"vectors":[]}`, codeInvalidRequest},
 		{"wrong dimension", `{"vectors":[{"id":"a","values":[1,0]}]}`, codeInvalidVector},
 		{"no values", `{"vectors":[{"id":"a"}]}`, codeInvalidVector},
 		{"empty id", `{"vectors":[{"id":"","values":[1,0,0,0]}]}`, codeInvalidVector},
