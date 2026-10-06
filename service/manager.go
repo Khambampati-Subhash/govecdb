@@ -41,6 +41,19 @@ type Options struct {
 	// mostly-idle process wake up constantly.
 	SweepInterval time.Duration
 
+	// DefaultSnapshotInterval is the SnapshotInterval a collection gets when
+	// Create is handed a spec that leaves it zero. Zero keeps the old
+	// behaviour: no automatic snapshots unless a spec asks.
+	//
+	// It exists because the library's default — off — is right for a
+	// short-lived program and wrong for a server. Nobody calls Snapshot before
+	// a daemon restarts, and a collection with no snapshot rebuilds its whole
+	// index from the log on the next open: about 23 minutes at 250,000
+	// vectors of dimension 512. The resolved value is written into the spec,
+	// so changing this later never alters an existing collection, and a spec
+	// can still opt out with SnapshotOff.
+	DefaultSnapshotInterval time.Duration
+
 	// now is the clock, unexported because only this package's tests replace it.
 	// Eviction is defined in elapsed time, and a test that demonstrates it by
 	// sleeping demonstrates it slowly and then flakily.
@@ -165,6 +178,12 @@ func (m *Manager) Create(name string, spec Spec) (err error) {
 	// dimension" should not be reported as a failed directory creation.
 	if spec.Dimension <= 0 {
 		return fmt.Errorf("%w: dimension is required", ErrInvalidSpec)
+	}
+	switch {
+	case spec.SnapshotInterval < 0: // SnapshotOff
+		spec.SnapshotInterval = 0
+	case spec.SnapshotInterval == 0:
+		spec.SnapshotInterval = m.opts.DefaultSnapshotInterval
 	}
 	spec = spec.Defaults()
 

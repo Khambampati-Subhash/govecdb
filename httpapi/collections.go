@@ -42,9 +42,15 @@ func (req createRequest) spec() (service.Spec, error) {
 	if err != nil {
 		return service.Spec{}, err
 	}
-	snapshotEvery, err := duration(req.SnapshotInterval, "snapshot_interval")
-	if err != nil {
-		return service.Spec{}, err
+	// "off" is the one non-duration accepted: with the daemon snapshotting by
+	// default, omitting the field no longer means "never", so never needs a
+	// spelling of its own.
+	snapshotEvery := service.SnapshotOff
+	if req.SnapshotInterval != "off" {
+		snapshotEvery, err = duration(req.SnapshotInterval, "snapshot_interval")
+		if err != nil {
+			return service.Spec{}, err
+		}
 	}
 	return service.Spec{
 		Dimension:        req.Dimension,
@@ -67,6 +73,9 @@ func duration(s, field string) (time.Duration, error) {
 	d, err := time.ParseDuration(s)
 	if err != nil {
 		return 0, fmt.Errorf("%w: %s: %s", govecdb.ErrInvalidRequest, field, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%w: %s is negative", govecdb.ErrInvalidRequest, field)
 	}
 	return d, nil
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sync"
@@ -695,7 +696,23 @@ func (db *DB) fail(err error) error {
 func (db *DB) snapshotLoop() {
 	defer close(db.doneSnap)
 
-	t := time.NewTicker(db.opts.snapshotEvery)
+	// The first snapshot lands somewhere in the second half of the interval
+	// rather than at exactly one interval. A service opens many databases at
+	// once — at start-up, or a whole generation of a rebuild — and identical
+	// timers would snapshot them all in the same instant, every interval, each
+	// holding its writers off while it serializes. A random phase spreads them
+	// out once, and the shared period keeps them apart.
+	d := db.opts.snapshotEvery
+	first := time.NewTimer(d/2 + rand.N(d/2+1))
+	defer first.Stop()
+	select {
+	case <-db.stopSnap:
+		return
+	case <-first.C:
+		_ = db.Snapshot()
+	}
+
+	t := time.NewTicker(d)
 	defer t.Stop()
 
 	for {

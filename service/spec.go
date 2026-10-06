@@ -69,7 +69,9 @@ type Spec struct {
 	// SyncInterval is how often SyncInterval fsyncs. Zero means the default.
 	SyncInterval time.Duration
 
-	// SnapshotInterval takes a snapshot on a timer. Zero leaves it off.
+	// SnapshotInterval takes a snapshot on a timer. Zero means the manager's
+	// Options.DefaultSnapshotInterval, which is itself off unless set;
+	// SnapshotOff turns it off whatever the manager's default.
 	//
 	// Worth setting for a service in a way it is not for a library: nobody is
 	// standing over a server to call Snapshot before a restart, and without one
@@ -84,6 +86,12 @@ type Spec struct {
 	// width. Zero means the default.
 	TargetRecall float64
 }
+
+// SnapshotOff, as a Spec.SnapshotInterval, asks for no automatic snapshots even
+// when the manager has a default. A spec on disk stores the resolved value, so
+// an opted-out collection is recorded as zero, exactly like one created before
+// the default existed.
+const SnapshotOff time.Duration = -1
 
 // Defaults returns the spec with every zero replaced by the value the library
 // would have chosen.

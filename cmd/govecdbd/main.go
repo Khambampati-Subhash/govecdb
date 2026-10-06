@@ -60,19 +60,20 @@ func main() {
 }
 
 type config struct {
-	dir      string
-	addr     string
-	maxOpen  int
-	idle     time.Duration
-	maxBody  int64
-	timeout  time.Duration
-	drain    time.Duration
-	shutdown time.Duration
-	tlsCert  string
-	tlsKey   string
-	logLevel string
-	logJSON  bool
-	version  bool
+	dir           string
+	addr          string
+	maxOpen       int
+	idle          time.Duration
+	snapshotEvery time.Duration
+	maxBody       int64
+	timeout       time.Duration
+	drain         time.Duration
+	shutdown      time.Duration
+	tlsCert       string
+	tlsKey        string
+	logLevel      string
+	logJSON       bool
+	version       bool
 }
 
 func parseFlags(args []string, stderr io.Writer) (config, error) {
@@ -85,6 +86,8 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&c.addr, "addr", "127.0.0.1:8080", "address to listen on")
 	fs.IntVar(&c.maxOpen, "max-open", 0, "maximum collections loaded at once (0 = no limit)")
 	fs.DurationVar(&c.idle, "idle-timeout", 0, "close a collection nothing has used for this long (0 = never)")
+	fs.DurationVar(&c.snapshotEvery, "snapshot-interval", 10*time.Minute,
+		"snapshot interval for new collections that do not set one (0 = none)")
 	fs.Int64Var(&c.maxBody, "max-body", httpapi.DefaultMaxBodyBytes, "maximum request body in bytes")
 	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "per-request read and write timeout")
 	fs.DurationVar(&c.drain, "drain", 0, "keep serving for this long after /readyz starts failing")
@@ -116,6 +119,9 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	if (c.tlsCert == "") != (c.tlsKey == "") {
 		return c, errors.New("-tls-cert and -tls-key must be given together")
 	}
+	if c.snapshotEvery < 0 {
+		return c, errors.New("-snapshot-interval must not be negative")
+	}
 	if c.maxBody <= 0 {
 		return c, errors.New("-max-body must be positive")
 	}
@@ -144,8 +150,9 @@ func run(ctx context.Context, args []string, stderr io.Writer, stop func(), read
 	}
 
 	mgr, err := service.NewManager(cfg.dir, service.Options{
-		MaxOpen:     cfg.maxOpen,
-		IdleTimeout: cfg.idle,
+		MaxOpen:                 cfg.maxOpen,
+		IdleTimeout:             cfg.idle,
+		DefaultSnapshotInterval: cfg.snapshotEvery,
 	})
 	if err != nil {
 		return err

@@ -56,6 +56,15 @@ below names what it fixes.
   generation rebuild that holds the old and the new collections open together.
   `UseWait` waits for a slot until `ctx` is done, then returns `ErrTooManyOpen`
   wrapping the context's error. `Use` is unchanged.
+- **The daemon snapshots new collections by default**, every 10 minutes
+  (`-snapshot-interval`; `service.Options.DefaultSnapshotInterval`). Off by
+  default was right for the library and wrong for a server: nobody calls
+  `Snapshot` before a restart, and a collection without one rebuilds its index
+  from the log — about 23 minutes at 250,000 × 512. The resolved value is written
+  into each new spec, so existing collections are untouched; `"snapshot_interval":
+  "off"` (`service.SnapshotOff`) opts out. The library's own timer now starts at
+  a random point in the second half of the interval, so collections opened
+  together do not all snapshot at once.
 - **`WithReadOnly()`.** Opens an existing database without writing anything —
   no log segment, no snapshot — under a *shared* lock, so any number of readers
   may coexist and none may coexist with a writer. Writes return `ErrReadOnly`.

@@ -517,6 +517,13 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   old and new collections open at once): it waits on the cond, with
   `context.AfterFunc` broadcasting when ctx ends, and restarts the whole lookup
   after each wake. Handlers keep calling `Use`.
+- **The daemon snapshots by default** (`-snapshot-interval 10m` →
+  `service.Options.DefaultSnapshotInterval`), resolved at `Create` and written
+  into the spec, so the default never changes an existing collection.
+  `SnapshotOff` (`"off"` on the wire) opts out; a negative wire duration is
+  refused. The library default stays off. `snapshotLoop` randomises the first
+  tick into the second half of the interval so collections opened together do
+  not snapshot in lockstep.
 - **Decoding is the security boundary, one layer out.** Bodies capped with
   `MaxBytesReader` (never by trusting `Content-Length`), **unknown fields
   rejected** (a silent `dimensions` builds a collection at the wrong width),

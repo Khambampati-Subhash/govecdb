@@ -636,3 +636,36 @@ func TestUseWaitGivesUpWithItsContext(t *testing.T) {
 		t.Fatalf("UseWait past its deadline = %v, want ErrTooManyOpen and DeadlineExceeded", err)
 	}
 }
+
+// TestDefaultSnapshotIntervalIsRecorded: the manager's default fills a spec
+// that left the interval zero, is written into the spec — so changing the
+// default later cannot alter this collection — and SnapshotOff opts out.
+func TestDefaultSnapshotIntervalIsRecorded(t *testing.T) {
+	root := t.TempDir()
+	m := newManagerAt(t, root, Options{DefaultSnapshotInterval: 7 * time.Minute})
+
+	mustCreate(t, m, "dflt", testSpec())
+	own := testSpec()
+	own.SnapshotInterval = time.Minute
+	mustCreate(t, m, "own", own)
+	off := testSpec()
+	off.SnapshotInterval = SnapshotOff
+	mustCreate(t, m, "off", off)
+
+	for name, want := range map[string]time.Duration{"dflt": 7 * time.Minute, "own": time.Minute, "off": 0} {
+		info, err := m.Get(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Spec.SnapshotInterval != want {
+			t.Errorf("%s: SnapshotInterval = %v, want %v", name, info.Spec.SnapshotInterval, want)
+		}
+		onDisk, err := readSpec(m.dir(name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if onDisk.SnapshotInterval != want {
+			t.Errorf("%s: spec on disk says %v, want %v", name, onDisk.SnapshotInterval, want)
+		}
+	}
+}

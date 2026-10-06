@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/khambampati-subhash/govecdb"
 	"github.com/khambampati-subhash/govecdb/service"
@@ -185,4 +186,29 @@ func TestGetCollectionCanLoad(t *testing.T) {
 		t.Fatalf("?load=true = %v", body)
 	}
 	a.expectError(a.do("GET", "/v1/collections/docs?load=maybe", nil), http.StatusBadRequest, codeInvalidRequest)
+}
+
+func TestSnapshotIntervalOff(t *testing.T) {
+	mgr, err := service.NewManager(t.TempDir(), service.Options{DefaultSnapshotInterval: 5 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { mgr.Close() })
+	a := newAPI(t, Config{Manager: mgr})
+
+	body := a.expect(a.do("POST", "/v1/collections", map[string]any{
+		"name": "dflt", "dimension": 4, "sync_policy": "never",
+	}), http.StatusCreated)
+	if body["snapshot_interval"] != "5m0s" {
+		t.Fatalf("default not applied: snapshot_interval = %v", body["snapshot_interval"])
+	}
+	body = a.expect(a.do("POST", "/v1/collections", map[string]any{
+		"name": "quiet", "dimension": 4, "sync_policy": "never", "snapshot_interval": "off",
+	}), http.StatusCreated)
+	if _, ok := body["snapshot_interval"]; ok {
+		t.Fatalf(`"off" still snapshots: %v`, body["snapshot_interval"])
+	}
+	a.expectError(a.do("POST", "/v1/collections", map[string]any{
+		"name": "neg", "dimension": 4, "snapshot_interval": "-1m",
+	}), http.StatusBadRequest, codeInvalidRequest)
 }

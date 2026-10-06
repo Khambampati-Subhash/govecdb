@@ -167,7 +167,7 @@ README](../httpapi/README.md#errors-are-one-shape).
 
   "sync_policy": "always",         // always (default) | interval | never
   "sync_interval": "50ms",         // used by sync_policy: interval
-  "snapshot_interval": "5m",       // automatic snapshots; omit to disable
+  "snapshot_interval": "5m",       // omit for the daemon's -snapshot-interval; "off" for none
   "snapshots_kept": 2,
   "target_recall": 0.95
 }
@@ -386,6 +386,7 @@ govecdbd -dir <directory> [flags]
 | `-dir` | *required* | Directory holding the collections. |
 | `-addr` | `127.0.0.1:8080` | Listen address. |
 | `-max-open` | `0` | Most collections loaded at once. 0 is no limit. |
+| `-snapshot-interval` | `10m` | Snapshot interval for new collections that do not set one. 0 for none. Recorded in each collection's spec, so changing it never alters an existing collection. |
 | `-idle-timeout` | `0` | Close a collection nothing has used for this long. 0 never does. |
 | `-max-body` | `32 MiB` | Largest request body. |
 | `-timeout` | `2m` | Per-request read and write timeout. |
@@ -444,10 +445,18 @@ Without a snapshot, starting a collection replays its whole log and rebuilds the
 index at roughly 700 µs per vector. With one, it loads a graph — about 1,900×
 faster for a million vectors.
 
-Set `snapshot_interval` on collections you care about restarting quickly. Minutes
+The daemon snapshots new collections every 10 minutes unless told otherwise
+(`-snapshot-interval`, or `"snapshot_interval"` per collection; `"off"` for
+none). That default exists because the library's — off — is wrong for a server:
+nobody calls `Snapshot` before a daemon restarts, and a collection with no
+snapshot rebuilds its index from the log, ~23 minutes at 250,000 × 512. Minutes
 is the right order of magnitude: every snapshot costs a ~10 ms fsync floor plus
 the time to write the index out, and it takes a read lock for the duration, so
-writers wait and searches do not.
+writers wait and searches do not. Each database's first snapshot lands at a
+random point in the second half of its interval, so collections opened together
+do not all snapshot in the same instant.
+
+Collections created before the default existed keep what their spec says.
 
 Snapshotting also truncates the log, which is the only thing that stops it
 growing forever. It truncates against the *oldest retained* snapshot rather than
