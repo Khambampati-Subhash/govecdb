@@ -11,6 +11,17 @@ Driven by a field report from the first application to run GoVecDB end to end at
 scale — millions of 512-dimension vectors across sixteen collections. Each item
 below names what it fixes.
 
+### Added
+
+- **`DB.GetBatch`, `DB.Scan` and `DB.Range` — a database can be enumerated.**
+  `Get` needed an id the caller already had, so anything rebuild-shaped —
+  resharding, re-embedding, copying a collection under a new spec — needed a
+  ledger kept outside the database. `GetBatch(ids)` reads many under one lock;
+  `Scan(after, limit)` pages in id order with a cursor; `Range(fn)` walks
+  everything, sorted once and read a page at a time with no lock held across
+  the walk, so writers are never stalled behind it. The `Index` interface gains
+  `IDs`, and `hnsw.Graph` gains `IDs`.
+
 ### Changed
 
 - **Non-finite float metadata is refused.** `Add` and `AddBatch` now return

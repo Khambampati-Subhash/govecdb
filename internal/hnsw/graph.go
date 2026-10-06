@@ -165,6 +165,24 @@ func (g *Graph) Vector(id string) ([]float32, bool) {
 	return out, true
 }
 
+// IDs calls fn for every live id, in no particular order, stopping early if fn
+// returns false. It is how a layer above enumerates the index — there is no other
+// way to learn an id the caller did not already have.
+//
+// fn runs under the read lock, so writers wait for the whole walk and fn must
+// not call back into the graph's write path. Callers that want to do real work
+// per id should collect the ids here and do it afterwards; that is what the
+// database's Scan and Range do, and why this hands out nothing but strings.
+func (g *Graph) IDs(fn func(id string) bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	for id := range g.ids {
+		if !fn(id) {
+			return
+		}
+	}
+}
+
 // Stats describes how much of the graph is still worth carrying. It exists to
 // answer one question — "is it time to compact?" — without exposing the graph's
 // internals to whatever ends up deciding that.

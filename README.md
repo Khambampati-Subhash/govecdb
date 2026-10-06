@@ -308,6 +308,15 @@ _ = db.Snapshot() // bounds restart time, and truncates the log behind it
 if db.Stats().DeadRatio() > 0.5 {
     _, _ = db.Compact() // rebuild over the live vectors; stop-the-world
 }
+
+// Reading many at once. All three are weakly consistent: no lock is held
+// across the walk, so writers are never stalled behind one.
+vs, _ := db.GetBatch([]string{"doc1", "doc2"})  // order kept, absent ids skipped
+page, _ := db.Scan("", 1000)                     // id order; pass the last id to continue
+_ = db.Range(func(v govecdb.Vector) bool {       // everything, sorted once, read in pages
+    return true
+})
+
 ```
 
 ### Filters

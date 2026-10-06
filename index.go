@@ -48,6 +48,12 @@ type Index interface {
 	// Len is how many vectors a search can return.
 	Len() int
 
+	// IDs calls fn for every live id, in no particular order, until fn returns
+	// false. It is the only way to enumerate an index, and it hands out ids
+	// rather than vectors so an implementation can hold whatever lock it needs
+	// for the walk without also holding it while a caller copies values.
+	IDs(fn func(id string) bool)
+
 	// Stats reports live and tombstoned occupancy.
 	Stats() (live, deleted, slots int)
 
@@ -86,6 +92,7 @@ func (h *hnswIndex) Insert(id string, values []float32) error { return h.g.Inser
 func (h *hnswIndex) Delete(id string) bool                    { return h.g.Delete(id) }
 func (h *hnswIndex) Lookup(id string) ([]float32, bool)       { return h.g.Vector(id) }
 func (h *hnswIndex) Len() int                                 { return h.g.Len() }
+func (h *hnswIndex) IDs(fn func(id string) bool)              { h.g.IDs(fn) }
 func (h *hnswIndex) Compact() int                             { return h.g.Compact() }
 
 func (h *hnswIndex) SuggestedEf(k int, targetRecall float64) int {

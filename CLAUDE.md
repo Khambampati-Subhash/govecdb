@@ -432,6 +432,11 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - **One writer per directory**, enforced in-process via `openDirs`. Cross-process
   locking is a deliberate gap — a lock file left by a crash blocks a restart that
   should have succeeded.
+- **Enumeration is `GetBatch`, `Scan(after, limit)` and `Range(fn)`**
+  (`enumerate.go`), all weakly consistent: no lock is held across a walk, each
+  page is read under one short lock. `Scan` is O(N log limit) per page because
+  the index keeps no sorted order — do not add one to the insert path for it;
+  `Range` sorts once and is the bulk path.
 - **Directories this package creates are 0700**; an existing directory's mode is
   left alone (`MkdirAll` only applies its mode on creation, and silently
   tightening an operator's choice would revoke access granted on purpose).

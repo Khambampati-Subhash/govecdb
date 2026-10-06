@@ -495,3 +495,41 @@ func TestConcurrentDeleteAndSearch(t *testing.T) {
 		}
 	}
 }
+
+// TestIDsListsLiveOnly pins that enumeration agrees with Search about what is in
+// the graph: a tombstone is a slot, not a vector, and an id replaced by an upsert
+// is listed once.
+func TestIDsListsLiveOnly(t *testing.T) {
+	g, data := buildGraph(t, 300, 8, 41)
+	for i := range 100 {
+		g.Delete(fmt.Sprintf("v%d", i))
+	}
+	// An upsert tombstones the old slot; the id must still appear exactly once.
+	if err := g.Insert("v200", randomVector(rand.New(rand.NewSource(1)), 8)); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]int{}
+	g.IDs(func(id string) bool { seen[id]++; return true })
+
+	if len(seen) != g.Len() {
+		t.Fatalf("IDs listed %d, Len is %d", len(seen), g.Len())
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Fatalf("%s listed %d times", id, n)
+		}
+		if _, ok := data[id]; !ok {
+			t.Fatalf("IDs invented %s", id)
+		}
+	}
+	if seen["v0"] != 0 || seen["v99"] != 0 {
+		t.Fatal("IDs listed a deleted vector")
+	}
+
+	calls := 0
+	g.IDs(func(string) bool { calls++; return calls < 5 })
+	if calls != 5 {
+		t.Fatalf("IDs kept going after fn returned false: %d calls", calls)
+	}
+}
