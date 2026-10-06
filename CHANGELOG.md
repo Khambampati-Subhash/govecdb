@@ -21,6 +21,17 @@ below names what it fixes.
   everything, sorted once and read a page at a time with no lock held across
   the walk, so writers are never stalled behind it. The `Index` interface gains
   `IDs`, and `hnsw.Graph` gains `IDs`.
+- **Per-collection search-width calibration.** A zero `Ef` used to come from
+  a formula alone, and no formula can see how hard the data is — at 62,500
+  vectors, uniform data at dimension 512 needs `ef ≈ 3,072` for 0.95 and tightly
+  clustered data needs `≈ 10`. The database now measures its own: whenever the
+  live count doubles or halves, a background goroutine searches for a sample of
+  its vectors (each with its own node hidden, as an un-inserted query would see
+  the graph), checks against an exact scan, and scales later suggestions to fit.
+  On clustered 62,500 × 512 data that took a k=100 search from ef 1,835 and
+  2.6 ms to ef 100 and 184 µs at 0.993 recall; on uniform 20,000 × 768, where the
+  formula undershot to 0.817, it widened the search to reach 0.981. New:
+  `DB.Calibrate`, `WithEfCalibration`, `Stats.EfScale`, `hnsw.(*Graph).Calibrate`.
 - **Cross-process directory locking.** `Open` takes an `flock` on the database
   directory, so a second process is refused with `ErrAlreadyOpen` rather than
   interleaving log segments with the first — two processes over one directory

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/khambampati-subhash/govecdb/internal/dirlock"
@@ -74,6 +75,14 @@ type DB struct {
 
 	stopSnap chan struct{}
 	doneSnap chan struct{}
+
+	// The background calibrator (calibrate.go). calKick holds at most one
+	// pending request; calAt is the live count the last calibration measured,
+	// 0 for never. All nil/zero under WithEfCalibration(false).
+	calKick chan struct{}
+	stopCal chan struct{}
+	doneCal chan struct{}
+	calAt   atomic.Int64
 }
 
 // Subdirectories. Separate rather than interleaved so retention on one is not a
@@ -179,6 +188,22 @@ func Open(dir string, opts ...Option) (db *DB, err error) {
 	if err := d.restore(); err != nil {
 		return nil, err
 	}
+	// Calibration writes nothing, so a read-only database gets it too: a
+	// static collection is exactly the one whose width is worth measuring once.
+	if o.calibrate {
+		d.calKick = make(chan struct{}, 1)
+		d.stopCal = make(chan struct{})
+		d.doneCal = make(chan struct{})
+		go d.calibrationLoop()
+		d.kickCalibration(d.index.Len())
+	}
+	defer func() {
+		if err != nil && d.stopCal != nil {
+			close(d.stopCal)
+			<-d.doneCal
+		}
+	}()
+
 	if o.readOnly {
 		// No writer at all, rather than a writer nobody calls: wal.Open starts a
 		// fresh segment, which is a file created by an open that promised not to
@@ -219,7 +244,11 @@ func (db *DB) Add(v Vector) error {
 	if err := db.writable(); err != nil {
 		return err
 	}
-	return db.putLocked(v)
+	if err := db.putLocked(v); err != nil {
+		return err
+	}
+	db.kickCalibration(db.index.Len())
+	return nil
 }
 
 // AddBatch stores many vectors. It validates all of them before writing any, so
@@ -264,6 +293,7 @@ func (db *DB) AddBatch(vs []Vector) error {
 			return fmt.Errorf("vector %d: %w", i, err)
 		}
 	}
+	db.kickCalibration(db.index.Len())
 	return nil
 }
 
@@ -310,6 +340,7 @@ func (db *DB) Delete(id string) error {
 	}
 	db.index.Delete(id)
 	db.store.Delete(id)
+	db.kickCalibration(db.index.Len())
 	return nil
 }
 
@@ -512,6 +543,7 @@ func (db *DB) Stats() Stats {
 		WithMetadata: db.store.Len(),
 		LastSeq:      db.lastSeqLocked(),
 		SnapshotSeq:  db.snapSeq,
+		EfScale:      efScaleOf(db.index),
 	}
 }
 
@@ -561,6 +593,11 @@ func (db *DB) Close() error {
 	if stop != nil {
 		close(stop)
 		<-done
+	}
+	// The calibrator too; a calibration in flight gives up between queries.
+	if db.stopCal != nil {
+		close(db.stopCal)
+		<-db.doneCal
 	}
 
 	db.mu.Lock()

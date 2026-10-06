@@ -118,6 +118,24 @@ func (h *hnswIndex) Search(query []float32, k, ef int, allow func(id string) boo
 	return out, nil
 }
 
+// indexCalibrator is an index that can measure how wide it needs to search and
+// fold that into SuggestedEf. Optional for the same reason serialization is: a
+// flat index has nothing to calibrate, and an HNSW one is still usable without.
+type indexCalibrator interface {
+	// Calibrate measures and applies, does nothing below a minimum size, and
+	// gives up with an error when stop closes first.
+	Calibrate(targetRecall float64, stop <-chan struct{}) error
+	// EfScale is the factor the last calibration applied; 1 when none has.
+	EfScale() float64
+}
+
+func (h *hnswIndex) Calibrate(targetRecall float64, stop <-chan struct{}) error {
+	_, err := h.g.Calibrate(hnsw.CalibrateOptions{Target: targetRecall, Seed: h.g.Config().Seed, Stop: stop})
+	return err
+}
+
+func (h *hnswIndex) EfScale() float64 { return h.g.EfScale() }
+
 // writeTo and readFrom are how the index takes part in a snapshot. They are not
 // on the Index interface: an implementation that cannot serialize itself is
 // still a usable index, and demanding it would make the interface bigger than

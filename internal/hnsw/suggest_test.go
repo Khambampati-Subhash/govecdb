@@ -105,8 +105,8 @@ func TestSuggestedEfShape(t *testing.T) {
 	})
 
 	t.Run("falls with M", func(t *testing.T) {
-		m16 := suggestEf(20000, 10, 0.95, 16)
-		m32 := suggestEf(20000, 10, 0.95, 32)
+		m16 := suggestEf(20000, 10, 0.95, 16, 1)
+		m32 := suggestEf(20000, 10, 0.95, 32, 1)
 		if m32 >= m16 || float64(m32) < 0.4*float64(m16) {
 			t.Fatalf("M=16 -> %d, M=32 -> %d; want M=32 a little over half", m16, m32)
 		}

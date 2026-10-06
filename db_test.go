@@ -350,7 +350,9 @@ func TestSearchRejects(t *testing.T) {
 // a constant: recall at a fixed width falls as a corpus grows, so any number
 // chosen today is wrong later.
 func TestSearchAutoEfGrowsWithTheCorpus(t *testing.T) {
-	db, _ := openDB(t)
+	// The formula's growth is under test, not the data's difficulty, so the
+	// calibrator stays out of it.
+	db, _ := openDB(t, WithEfCalibration(false))
 	rng := rand.New(rand.NewSource(12))
 
 	fill(t, db, 50, 12)

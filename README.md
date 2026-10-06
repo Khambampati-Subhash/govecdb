@@ -367,6 +367,7 @@ Everything is a functional option on `Open`. Only `WithDimension` is required.
 | `WithSearchTargetRecall(float64)` | `0.95` | What a zero `Ef` aims for. Treated as a floor. |
 | `WithLimits(id, k, ef, batch, mdKeys)` | `512, 10k, 100k, 10k, 256` | Per-call bounds. Configurable, not removable. |
 | `WithReadOnly()` | off | Open an existing directory without writing to it. Shares the directory with other readers, never with a writer. |
+| `WithEfCalibration(bool)` | on | Measure the data's search difficulty in the background and scale the automatic `Ef` to it. |
 
 **One process per directory.** `Open` takes an `flock` on the directory —
 exclusive, or shared under `WithReadOnly` — so a second process gets
@@ -547,10 +548,34 @@ carries margin, so 0.95 measures 0.969 at 1,000 vectors and 0.972 at 5,000.
 Calibrated exactly on the sweep it undershot on three of four verification
 corpora, because recall on one corpus does not transfer precisely to another.
 
-It is a starting point, not a guarantee: calibrated on uniform random 128-dim
-vectors at M=16, which is the pessimistic case. `TestSuggestedEfAchievesTarget`
-builds real graphs and fails if a suggestion misses, so the constants cannot rot
-quietly.
+`k` and `M` enter too, measured rather than assumed: ef grows only as
+**k^0.2** (a 100-candidate pool needs barely more width than a top-10), and
+falls as **(16/M)^0.85**. `TestSuggestedEfAchievesTarget` builds real graphs at
+k=10 and 100, M=16 and 32, and fails if a suggestion misses, so the constants
+cannot rot quietly.
+
+### And then the database measures its own data
+
+No formula can know how hard *your* data is, and the spread is enormous. At
+62,500 vectors and a 0.95 target, uniform random vectors at dimension 512 need
+`ef ≈ 3,072`; tightly clustered ones at the same size need `ef ≈ 10`. So a
+database calibrates itself: whenever its live count has doubled or halved, a
+background goroutine searches for a sample of its own vectors — each with its
+own node hidden from the traversal, as an un-inserted query would see the graph
+— checks them against an exact scan, and scales every later suggestion to fit.
+
+| 62,500 vectors unless noted, held-out queries | formula | calibrated |
+|---|---|---|
+| clustered, dim 512, k=10 | ef 1158 · 0.999 · 1.6 ms | **ef 15 · 0.978 · 49 µs** |
+| clustered, dim 512, k=100 | ef 1835 · 1.000 · 2.6 ms | **ef 100 · 0.993 · 184 µs** |
+| uniform, dim 128, k=10 | ef 1158 · 0.992 · 5.8 ms | ef 900 · 0.978 · 4.7 ms |
+| uniform, dim 768, 20,000, k=10 | ef 476 · **0.817** | ef 1320 · **0.981** |
+
+It narrows where the data is easy and widens where the formula undershoots.
+It costs one exact scan of the sample — 45 ms at 62,500 × 512, around a second
+at a million — outside any lock writers wait on. `Stats().EfScale` shows the
+factor; `WithEfCalibration(false)` turns it off for reproducible widths, and
+`db.Calibrate()` runs one now. An explicit `Ef` is never touched.
 
 ### Tombstones, and what `Compact()` gives back
 

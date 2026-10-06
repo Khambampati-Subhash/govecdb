@@ -194,6 +194,19 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   `TestSuggestedEfAchievesTarget`, which builds real graphs and fails if a
   suggestion misses. Its constants carry deliberate margin — calibrated exactly on
   the sweep it undershot on 3 of 4 corpora.
+- **`Calibrate` corrects the formula for the data, and must stay leave-one-out.**
+  No formula can see data difficulty: at 62.5K and 0.95, uniform × 512 needs
+  ef ≈ 3,072, clustered × 512 needs ≈ 10. `(*Graph).Calibrate` searches for a
+  sample of stored vectors **with each one's own slot hidden** (`searchState.hide`,
+  pre-marked visited in `searchLayer` — one branch per call, not per neighbor),
+  against a brute-force truth computed outside the lock, and stores
+  `1.5 × measured / prior` in an atomic `efScale`. Do not "simplify" into plain
+  self-queries: a stored vector's neighbor list *is* its kNN, so uniform data
+  "reached" 0.95 at ef=11 and then got 0.37 on held-out queries. The held-out
+  tests (`TestCalibrate*`) are what caught it. The scale is not serialized.
+  The DB runs it in a background goroutine (`calibrate.go` at the root) when
+  the live count doubles or halves past `hnsw.MinCalibrationSize`; writers only
+  kick a 1-slot channel. `WithEfCalibration(false)` for reproducible widths.
 - **ef scales as `k^0.2` and `(16/M)^0.85`, not linearly in k and not ignoring
   M.** Measured: the width that holds a target barely moves from k=10 to k=100
   (768 → 1024 at 62.5K × 128; 3072 → 3072 at × 512), and M=32 needs exactly

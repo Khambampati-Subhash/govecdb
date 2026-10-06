@@ -22,6 +22,11 @@ type searchState struct {
 	pruneBuf []candidate // pruneConnections' distance-annotated neighbors
 	selected []int       // insert's chosen neighbors for the current layer
 	queryBuf []float32   // normalized copy of the caller's query
+
+	// hide is 1 + the slot searchLayer must treat as absent, or 0 for none.
+	// Only Calibrate sets it — see searchWithout — and it is cleared before
+	// the state goes back to the pool.
+	hide int
 }
 
 // acquireState borrows scratch space for one traversal. Every path out must

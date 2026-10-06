@@ -23,7 +23,8 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `delete.go` | `Delete` — tombstoning a slot, and re-electing the entry point when it is the one deleted. |
 | `compact.go` | `Compact` — rebuilding the graph over its live vectors to reclaim tombstoned slots. |
 | `codec.go` | `(*Graph).WriteTo` / `Read` — the graph as bytes, so recovery loads an index instead of rebuilding one. |
-| `suggest.go` | `SuggestedEf` — the measured `ef ∝ n^0.78` curve, fitted so callers need not guess. |
+| `suggest.go` | `SuggestedEf` — the measured curve, `ef ∝ n^0.78 · k^0.2 · (16/M)^0.85`, fitted so callers need not guess. |
+| `calibrate.go` | `Calibrate` — measures this graph's own data (leave-one-out sample queries against an exact scan) and scales `SuggestedEf` to it. |
 | `search.go` | `Result`, `Search`, and the primitives it rides on: `greedyClosest`, `searchLayer`. |
 | `neighbors.go` | Edge management: alpha-pruned `selectNeighbors`, `pruneConnections`, `connect`, adjacency lookups. |
 | `node.go` | A single vector: `id`, `vector`, per-layer neighbor lists. |

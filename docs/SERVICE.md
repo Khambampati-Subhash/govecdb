@@ -185,11 +185,15 @@ would otherwise build a collection at the wrong width and be found weeks later.
 {"collections": [{"name": "docs", "dimension": 768, "...": "...", "loaded": true,
                   "stats": {"live": 1200, "deleted": 3, "slots": 1203,
                             "with_metadata": 1200, "dead_ratio": 0.0025,
-                            "last_sequence": 1205, "snapshot_sequence": 1100}}]}
+                            "last_sequence": 1205, "snapshot_sequence": 1100,
+                            "ef_scale": 0.06}}]}
 ```
 
 Listing loads nothing. `stats` is **absent** for a collection that is not loaded,
-because its size is unknown and `0` would be a different claim.
+because its size is unknown and `0` would be a different claim. `ef_scale` is
+what the collection's last search-width calibration multiplied the automatic
+`ef` by — below 1 when its data proved easier than the formula assumes, 1 until
+one has run (see the README on calibration).
 
 ### `GET /v1/collections/{name}` — one collection
 

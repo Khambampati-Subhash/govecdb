@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 )
 
 // Graph is an HNSW index. It is safe for concurrent use: any number of Search
@@ -46,6 +47,13 @@ type Graph struct {
 	// pool hands out per-traversal scratch so the hot path allocates nothing.
 	// It is internally synchronized, so it sits outside mu's coverage.
 	pool sync.Pool
+
+	// efScale is the float64 bits of the factor Calibrate measured, read by
+	// every SuggestedEf. Atomic rather than under mu, because a calibration
+	// finishes while searches are running and must not wait for them. Zero
+	// means never calibrated. It is not serialized: it describes the data, and
+	// a loaded graph is recalibrated by whoever owns it.
+	efScale atomic.Uint64
 }
 
 // New creates an empty graph. No memory is spent on the graph itself until the

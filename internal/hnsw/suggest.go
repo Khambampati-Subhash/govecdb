@@ -65,6 +65,12 @@ const efKExponent = 0.2
 // higher M twice.
 const efMExponent = 0.85
 
+// calibrationMargin is the headroom Calibrate adds over the width it measured.
+// The sample queries are the collection's own vectors, which sit exactly on the
+// data; real queries sit near it, and are a little harder. The margin is also
+// what absorbs the noise in a 64-query sample.
+const calibrationMargin = 1.5
+
 // SuggestedEf returns a starting search width for Search(query, k, ef) on a
 // corpus of n vectors.
 //
@@ -81,8 +87,9 @@ const efMExponent = 0.85
 // about the data it is asked about — which is the limit that matters most.
 // Measured at 62,500 vectors and a 0.95 target, uniform data at dimension 512
 // needs ef ≈ 3,072 and tightly clustered data at the same size needs ≈ 10; this
-// formula says 1,158 for both, wrong by 3x one way and 100x the other. Further
-// limits:
+// formula says 1,158 for both, wrong by 3x one way and 100x the other.
+// (*Graph).Calibrate measures the graph's own data and corrects for exactly
+// that, and is what a database built on this runs. Further limits:
 //
 //   - **Recall varies with the corpus, not just its size.** The same
 //     configuration measured on three different random corpora returned 0.595,
@@ -92,18 +99,20 @@ const efMExponent = 0.85
 //   - **k scales weakly**, as k^0.2 — see efKExponent. The result is never
 //     below k.
 //
-// So: use it to start, then measure on your own data. TestSuggestedEfAchievesTarget is what keeps this function honest: it
+// So: use it to start, then measure on your own data — which is what Calibrate
+// does. TestSuggestedEfAchievesTarget is what keeps this function honest: it
 // builds real graphs at several sizes, at k=10 and 100 and M=16 and 32, and
 // fails if a suggestion misses its target.
 //
-// This is the M=16 curve; (*Graph).SuggestedEf accounts for the graph's own M.
+// This is the M=16 curve; (*Graph).SuggestedEf accounts for the graph's own M
+// and for a calibration, when one has run.
 func SuggestedEf(n, k int, targetRecall float64) int {
-	return suggestEf(n, k, targetRecall, 16)
+	return suggestEf(n, k, targetRecall, 16, 1)
 }
 
 // suggestEf is the whole formula: the anchored base, scaled by corpus size, k
-// and M.
-func suggestEf(n, k int, targetRecall float64, m int) int {
+// and M, and then by a calibration factor that is 1 until Calibrate has run.
+func suggestEf(n, k int, targetRecall float64, m int, scale float64) int {
 	if k < 1 {
 		k = 1
 	}
@@ -125,7 +134,8 @@ func suggestEf(n, k int, targetRecall float64, m int) int {
 	ef := base *
 		math.Pow(float64(n)/1000, efGrowthExponent) *
 		math.Pow(float64(k)/10, efKExponent) *
-		math.Pow(16/float64(max(m, 2)), efMExponent)
+		math.Pow(16/float64(max(m, 2)), efMExponent) *
+		scale
 
 	out := int(math.Ceil(ef))
 	if out < k {
@@ -135,9 +145,10 @@ func suggestEf(n, k int, targetRecall float64, m int) int {
 }
 
 // SuggestedEf is the same calculation against this graph's live population and
-// its own M, so callers do not have to track what the graph already knows.
+// its own M, scaled by the last Calibrate if there was one, so callers do not
+// have to track what the graph already knows.
 func (g *Graph) SuggestedEf(k int, targetRecall float64) int {
-	return suggestEf(g.Len(), k, targetRecall, g.cfg.M)
+	return suggestEf(g.Len(), k, targetRecall, g.cfg.M, g.EfScale())
 }
 
 // interpolateAnchors reads a base width off the measured points, linearly

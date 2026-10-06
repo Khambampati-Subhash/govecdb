@@ -98,6 +98,7 @@ type statsResponse struct {
 	DeadRatio        float64 `json:"dead_ratio"`
 	LastSequence     uint64  `json:"last_sequence"`
 	SnapshotSequence uint64  `json:"snapshot_sequence"`
+	EfScale          float64 `json:"ef_scale"`
 }
 
 func describe(info service.Info) collectionResponse {
@@ -127,6 +128,7 @@ func describe(info service.Info) collectionResponse {
 			DeadRatio:        s.DeadRatio(),
 			LastSequence:     s.LastSeq,
 			SnapshotSequence: s.SnapshotSeq,
+			EfScale:          s.EfScale,
 		}
 	}
 	return out

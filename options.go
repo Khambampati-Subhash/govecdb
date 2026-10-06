@@ -141,6 +141,8 @@ type options struct {
 
 	readOnly bool
 
+	calibrate bool
+
 	maxIDBytes  int
 	maxK        int
 	maxEf       int
@@ -179,6 +181,7 @@ func defaultOptions() options {
 		maxEf:          defaultMaxEf,
 		maxBatch:       defaultMaxBatch,
 		maxMetadata:    defaultMaxMetadata,
+		calibrate:      true,
 	}
 }
 
@@ -310,6 +313,26 @@ func WithSnapshotInterval(d time.Duration) Option {
 			return fmt.Errorf("%w: snapshot interval %v must be positive", ErrInvalidConfig, d)
 		}
 		o.snapshotEvery = d
+		return nil
+	}
+}
+
+// WithEfCalibration turns automatic search-width calibration on or off. On by
+// default.
+//
+// A zero SearchRequest.Ef is chosen by a formula of corpus size, k and M, and
+// no formula can know how hard the data is: measured at 62,500 vectors, uniform
+// random data at dimension 512 needs ef ≈ 3,000 for 0.95 recall where tightly
+// clustered data needs ≈ 10. So the database measures its own data — a sample
+// of its vectors searched against an exact scan — whenever the live count has
+// doubled or halved since it last did, in a background goroutine that Close
+// stops. The result scales every later suggestion (Stats.EfScale).
+//
+// Turn it off for reproducible search widths, in tests or benchmarks. An
+// explicit Ef is never touched either way; call Calibrate to run one by hand.
+func WithEfCalibration(enabled bool) Option {
+	return func(o *options) error {
+		o.calibrate = enabled
 		return nil
 	}
 }

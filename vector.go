@@ -102,6 +102,12 @@ type Stats struct {
 	// zero if there is none. The gap between it and LastSeq is how much log a
 	// restart would have to replay.
 	SnapshotSeq uint64
+
+	// EfScale is what the last search-width calibration multiplied the
+	// suggested Ef by: below 1 when the data proved easier than the formula
+	// assumes, above it when harder. 1 until a calibration has run. See
+	// WithEfCalibration.
+	EfScale float64
 }
 
 // DeadRatio is the fraction of slots that are tombstones, in [0,1].

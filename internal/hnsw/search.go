@@ -150,6 +150,12 @@ func (g *Graph) greedyClosest(start int, target []float32, lc int) int {
 // depend on a query's filter.
 func (g *Graph) searchLayer(st *searchState, query []float32, entryPoint, ef, lc int, allow func(id string) bool) []candidate {
 	st.visited.reset(len(g.nodes))
+	if st.hide > 0 {
+		// Marked seen before the walk starts, so the slot is never expanded
+		// and never answers: the traversal runs as if it were not there. Once
+		// per call, not per neighbor, so the ordinary path pays one branch.
+		st.visited.visit(st.hide - 1)
+	}
 
 	// Reuse the heap backing arrays.
 	cands := st.cands[:0]
