@@ -7,6 +7,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+Nothing yet. See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned
+and in what order.
+
+## [1.2.0] - 2026-10-07
+
+A minor release: everything is additive except three changed defaults, each
+written down below — `Alpha` 1.0, calibrated automatic `ef`, and the daemon
+snapshotting new collections. No on-disk format changed; a v1.1.x directory
+opens unchanged, and graphs loaded from a snapshot keep the alpha they were
+built with.
+
 Driven by a field report from the first application to run GoVecDB end to end at
 scale — millions of 512-dimension vectors across sixteen collections. Each item
 below names what it fixes.
@@ -302,7 +313,8 @@ Stated here rather than discovered later:
 - **A highly selective filter approaches a full scan.** Past roughly one vector
   in a hundred, a scan over the metadata is the better tool.
 
-[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/khambampati-subhash/govecdb/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/khambampati-subhash/govecdb/releases/tag/v1.0.0
