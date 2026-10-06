@@ -83,7 +83,11 @@ with no borrowers is a candidate for eviction or for `Drop`.
   every loaded collection is busy it returns `ErrTooManyOpen` rather than
   queueing — waiting would turn a capacity problem into a latency problem that
   surfaces as a timeout somewhere else, and a request handler has a better answer
-  available: say so now.
+  available: say so now. **`UseWait(ctx, name, fn)`** is the exception you opt
+  into: it waits for a slot until `ctx` is done. It exists for background work
+  that holds two sets of collections at once — a rebuild loading replacements
+  while the live ones still serve — where failing half way is worse than
+  waiting. Request paths should keep calling `Use`.
 - `IdleTimeout` closes what nothing has touched. Reopening costs a snapshot load
   and a replay, so it wants to be long relative to how bursty the traffic is —
   minutes, not seconds.

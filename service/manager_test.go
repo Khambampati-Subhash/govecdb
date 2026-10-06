@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -573,4 +574,65 @@ func TestRootIsExclusive(t *testing.T) {
 		t.Fatalf("NewManager after Close = %v", err)
 	}
 	again.Close()
+}
+
+// TestUseWaitGetsASlotWhenOneFrees: the background-rebuild case — every slot
+// borrowed, and the caller would rather wait than fail part way through.
+func TestUseWaitGetsASlotWhenOneFrees(t *testing.T) {
+	m := newManager(t, Options{MaxOpen: 1})
+	mustCreate(t, m, "alpha", testSpec())
+	mustCreate(t, m, "beta", testSpec())
+
+	inUse := make(chan struct{})
+	finish := make(chan struct{})
+	go func() {
+		m.Use("beta", func(*govecdb.DB) error {
+			close(inUse)
+			<-finish
+			return nil
+		})
+	}()
+	<-inUse
+
+	got := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		got <- m.UseWait(ctx, "alpha", func(*govecdb.DB) error { return nil })
+	}()
+
+	select {
+	case err := <-got:
+		t.Fatalf("UseWait returned %v while every slot was busy", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(finish)
+	if err := <-got; err != nil {
+		t.Fatalf("UseWait after a slot freed = %v", err)
+	}
+}
+
+func TestUseWaitGivesUpWithItsContext(t *testing.T) {
+	m := newManager(t, Options{MaxOpen: 1})
+	mustCreate(t, m, "alpha", testSpec())
+	mustCreate(t, m, "beta", testSpec())
+
+	inUse := make(chan struct{})
+	finish := make(chan struct{})
+	go func() {
+		m.Use("beta", func(*govecdb.DB) error {
+			close(inUse)
+			<-finish
+			return nil
+		})
+	}()
+	<-inUse
+	defer close(finish)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	err := m.UseWait(ctx, "alpha", func(*govecdb.DB) error { return nil })
+	if !errors.Is(err, ErrTooManyOpen) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("UseWait past its deadline = %v, want ErrTooManyOpen and DeadlineExceeded", err)
+	}
 }

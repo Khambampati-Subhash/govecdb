@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -230,7 +231,7 @@ func (m *Manager) Create(name string, spec Spec) (err error) {
 // fn must not retain the database. Once it returns, the collection may be closed
 // at any moment.
 func (m *Manager) Use(name string, fn func(*govecdb.DB) error) error {
-	c, err := m.acquire(name)
+	c, err := m.acquire(nil, name)
 	if err != nil {
 		return err
 	}
@@ -238,11 +239,46 @@ func (m *Manager) Use(name string, fn func(*govecdb.DB) error) error {
 	return fn(c.db)
 }
 
-// acquire loads the collection if necessary and takes a reference to it.
-func (m *Manager) acquire(name string) (*collection, error) {
+// UseWait is Use for a caller that would rather wait for a slot than be told
+// there is none: when MaxOpen collections are loaded and every one is borrowed,
+// it waits until one is released or ctx is done, instead of returning
+// ErrTooManyOpen at once.
+//
+// Use stays fail-fast, and request paths should keep calling it — a request
+// queued behind a capacity limit becomes a timeout somewhere less visible. This
+// is for background work that holds two sets of collections at once, such as a
+// rebuild loading replacements while the live ones are still serving, where
+// failing part way is worse than waiting. When ctx ends first the error is
+// ErrTooManyOpen wrapping ctx's error, so both questions — "why did it fail"
+// and "was it capacity" — answer with errors.Is.
+func (m *Manager) UseWait(ctx context.Context, name string, fn func(*govecdb.DB) error) error {
+	c, err := m.acquire(ctx, name)
+	if err != nil {
+		return err
+	}
+	defer m.release(c)
+	return fn(c.db)
+}
+
+// acquire loads the collection if necessary and takes a reference to it. A nil
+// ctx refuses at once when there is no room; a non-nil one waits for room until
+// it is done.
+func (m *Manager) acquire(ctx context.Context, name string) (*collection, error) {
+	if ctx != nil {
+		// sync.Cond has no timed wait, so ctx ending is turned into a broadcast:
+		// every waiter wakes, and the one whose ctx this was sees it is done.
+		stop := context.AfterFunc(ctx, func() {
+			m.mu.Lock()
+			m.cond.Broadcast()
+			m.mu.Unlock()
+		})
+		defer stop()
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+retry:
 	for {
 		if m.closed {
 			return nil, ErrClosed
@@ -276,7 +312,17 @@ func (m *Manager) acquire(name string) (*collection, error) {
 		return nil, err
 	}
 	if err := m.makeRoomLocked(); err != nil {
-		return nil, err
+		if ctx == nil || !errors.Is(err, ErrTooManyOpen) {
+			return nil, err
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w: %w", err, ctx.Err())
+		}
+		// Every release that frees a slot broadcasts, as does ctx ending. The
+		// whole lookup starts again afterwards: while this waited, someone else
+		// may have loaded this very collection, or dropped it.
+		m.cond.Wait()
+		goto retry
 	}
 
 	// Registered before the lock is released, so concurrent callers wait on this

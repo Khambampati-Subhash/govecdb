@@ -51,6 +51,11 @@ below names what it fixes.
 - **`not_found` errors carry a `resource` field** — `"collection"` or
   `"vector"` — so a missed fetch says which was missing. Additive: the code is
   unchanged, so no client that branches on it breaks.
+- **`service.Manager.UseWait(ctx, name, fn)`.** `Use` with every slot borrowed
+  fails at once with `ErrTooManyOpen`, which is right for a request but broke a
+  generation rebuild that holds the old and the new collections open together.
+  `UseWait` waits for a slot until `ctx` is done, then returns `ErrTooManyOpen`
+  wrapping the context's error. `Use` is unchanged.
 - **`WithReadOnly()`.** Opens an existing database without writing anything —
   no log segment, no snapshot — under a *shared* lock, so any number of readers
   may coexist and none may coexist with a writer. Writes return `ErrReadOnly`.

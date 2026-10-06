@@ -35,7 +35,9 @@ var (
 	// It is deliberately not a queue. Waiting for a slot would turn a capacity
 	// problem into a latency problem that shows up as timeouts somewhere else,
 	// and the caller — which is usually a request handler — has a better answer
-	// available: say so, now, with a status a client can act on.
+	// available: say so, now, with a status a client can act on. A caller that
+	// genuinely prefers to wait — background work, not a request — opts in with
+	// Manager.UseWait, which returns this wrapping ctx's error if it gives up.
 	ErrTooManyOpen = errors.New("service: too many collections open")
 
 	// ErrInvalidSpec means a collection's configuration was rejected. Open

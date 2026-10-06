@@ -513,6 +513,10 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   search being closed underneath. `Drop` **waits** rather than failing.
 - **`ErrTooManyOpen` does not queue.** Waiting for a slot turns a capacity problem
   into a timeout somewhere else; the handler answers 503 with `Retry-After`.
+  `UseWait(ctx, …)` is the opt-in exception for background work (a rebuild with
+  old and new collections open at once): it waits on the cond, with
+  `context.AfterFunc` broadcasting when ctx ends, and restarts the whole lookup
+  after each wake. Handlers keep calling `Use`.
 - **Decoding is the security boundary, one layer out.** Bodies capped with
   `MaxBytesReader` (never by trusting `Content-Length`), **unknown fields
   rejected** (a silent `dimensions` builds a collection at the wrong width),
