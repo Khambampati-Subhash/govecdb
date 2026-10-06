@@ -194,6 +194,12 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   `TestSuggestedEfAchievesTarget`, which builds real graphs and fails if a
   suggestion misses. Its constants carry deliberate margin — calibrated exactly on
   the sweep it undershot on 3 of 4 corpora.
+- **ef scales as `k^0.2` and `(16/M)^0.85`, not linearly in k and not ignoring
+  M.** Measured: the width that holds a target barely moves from k=10 to k=100
+  (768 → 1024 at 62.5K × 128; 3072 → 3072 at × 512), and M=32 needs exactly
+  half of M=16's. The old linear-k term made every 100-candidate retrieval
+  search ten times wider than needed. The guard covers k ∈ {10, 100} and
+  M ∈ {16, 32}; do not drop those cells.
 - **Raising `M` is worth less than the M-vs-recall chart implies.** Compared at
   *equal recall* on the M×ef grid, M=32 beats M=16 by only ~10% latency (162µs vs
   180µs at ~0.96) for 6x the build time and ~2x the graph memory. M=16 is the right

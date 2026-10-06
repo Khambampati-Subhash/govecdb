@@ -57,6 +57,15 @@ below names what it fixes.
 - **`ErrAlreadyOpen` and `ErrReadOnly` have broader messages** ("directory is
   already open", "database is read-only"), because each now has a second cause.
   A durability failure still reads "read-only after a durability failure: …".
+- **`SuggestedEf` scales with k as k^0.2, not linearly, and accounts for M.**
+  The linear term was an assumption the code itself flagged as unmeasured, and it
+  was the largest error in the formula: a 100-candidate retrieval pool searched
+  ten times wider than a k=10 query. Measured, the width that holds a target
+  barely moves from k=10 to k=100 — 768 to 1,024 at 62,500 × 128, 3,072 to 3,072
+  at × 512 — and M=32 needs half the width of M=16, which the formula ignored, so
+  a higher-M index paid for its extra edges twice. At 5,000 vectors and k=100 the
+  suggestion falls from 1,620 to 256 and still measures 0.987 against a 0.95
+  target. `TestSuggestedEfAchievesTarget` now covers k=100 and M=32.
 - **HNSW `Alpha` defaults to 1.0, down from 1.2.** On clustered data — which
   real embeddings are — 1.2 left clusters nearly disconnected: at 62,500 vectors
   of dimension 512 in 1,024 tight clusters, recall@10 never passed 0.954 at any

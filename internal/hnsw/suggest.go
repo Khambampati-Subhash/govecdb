@@ -41,6 +41,30 @@ var efAnchors = [...]struct{ recall, ef float64 }{
 // which have no cluster structure for the graph to exploit.
 const efGrowthExponent = 0.78
 
+// efKExponent describes how the required width grows with k: ef ∝ k^0.2.
+//
+// It used to be assumed linear, which was never measured and turned out to be
+// the largest error in the formula. Asked for a 100-candidate pool — the shape a
+// retrieval system reranking to 20 asks for — a linear term made every search
+// ten times wider than a k=10 one. Measured, the width that holds a recall
+// target barely moves with k as long as it is at least k:
+//
+//	uniform, dim 128, n=62.5k, target 0.95   k=10 → ef 768    k=100 → ef 1024
+//	uniform, dim 512, n=62.5k, target 0.95   k=10 → ef 3072   k=100 → ef 3072
+//	uniform, dim 128, n=5k,    target 0.95   k=10 → ef 128    k=100 → ef 192
+//
+// That is an exponent between 0 and 0.18; 0.2 is the top of that range plus a
+// little, because undershooting a floor is the expensive direction to be wrong.
+const efKExponent = 0.2
+
+// efMExponent describes how the required width falls as M rises: ef ∝
+// (16/M)^0.85. Measured at equal recall, M=32 needs half the width M=16 does —
+// 384 → 192 at 20k × 128, 3072 → 1536 at 62.5k × 512 — which is an exponent of
+// 1. The 0.85 keeps some of that as margin. Without the term, an M=32 index
+// searched as wide as an M=16 one with twice the edges per hop, paying for the
+// higher M twice.
+const efMExponent = 0.85
+
 // SuggestedEf returns a starting search width for Search(query, k, ef) on a
 // corpus of n vectors.
 //
@@ -53,27 +77,33 @@ const efGrowthExponent = 0.78
 //
 // # This is a starting point, not a guarantee
 //
-// It is calibrated on **uniform random 128-dimensional vectors at M=16**, which
-// is the hardest case a graph index faces — real embeddings cluster, and
-// clustered data in the same sweep reached higher recall at a third of the
-// latency. Two further limits worth knowing before trusting a number from here:
+// It is fitted to **uniform random 128-dimensional vectors**, and knows nothing
+// about the data it is asked about — which is the limit that matters most.
+// Measured at 62,500 vectors and a 0.95 target, uniform data at dimension 512
+// needs ef ≈ 3,072 and tightly clustered data at the same size needs ≈ 10; this
+// formula says 1,158 for both, wrong by 3x one way and 100x the other. Further
+// limits:
 //
 //   - **Recall varies with the corpus, not just its size.** The same
 //     configuration measured on three different random corpora returned 0.595,
 //     0.646 and 0.677 — an eight-point spread. Variance is widest in the middle
 //     of the recall range and compresses near saturation, so a suggestion aimed
 //     at 0.95 lands far more reliably than one aimed at 0.65.
-//   - **Only k=10 was measured.** Scaling with k is assumed linear, which is
-//     the reasonable default and is not something the sweeps checked.
+//   - **k scales weakly**, as k^0.2 — see efKExponent. The result is never
+//     below k.
 //
-// So: use it to start, then measure on your own data. TestSuggestedEfAchieves-
-// Target is what keeps this function honest — it builds real graphs at several
-// sizes and fails if a suggestion misses its target.
+// So: use it to start, then measure on your own data. TestSuggestedEfAchievesTarget is what keeps this function honest: it
+// builds real graphs at several sizes, at k=10 and 100 and M=16 and 32, and
+// fails if a suggestion misses its target.
 //
-// Larger M shifts the whole curve: at M=32 the same recall arrives at roughly
-// half the ef. Since M is paid once at build and ef on every query, a read-heavy
-// workload is usually better off raising M than following this function upward.
+// This is the M=16 curve; (*Graph).SuggestedEf accounts for the graph's own M.
 func SuggestedEf(n, k int, targetRecall float64) int {
+	return suggestEf(n, k, targetRecall, 16)
+}
+
+// suggestEf is the whole formula: the anchored base, scaled by corpus size, k
+// and M.
+func suggestEf(n, k int, targetRecall float64, m int) int {
 	if k < 1 {
 		k = 1
 	}
@@ -92,7 +122,10 @@ func SuggestedEf(n, k int, targetRecall float64) int {
 	}
 
 	base := interpolateAnchors(targetRecall)
-	ef := base * math.Pow(float64(n)/1000, efGrowthExponent) * float64(k) / 10
+	ef := base *
+		math.Pow(float64(n)/1000, efGrowthExponent) *
+		math.Pow(float64(k)/10, efKExponent) *
+		math.Pow(16/float64(max(m, 2)), efMExponent)
 
 	out := int(math.Ceil(ef))
 	if out < k {
@@ -101,10 +134,10 @@ func SuggestedEf(n, k int, targetRecall float64) int {
 	return out
 }
 
-// SuggestedEf is the same calculation against this graph's live population, so
-// callers do not have to track a count the graph already knows.
+// SuggestedEf is the same calculation against this graph's live population and
+// its own M, so callers do not have to track what the graph already knows.
 func (g *Graph) SuggestedEf(k int, targetRecall float64) int {
-	return SuggestedEf(g.Len(), k, targetRecall)
+	return suggestEf(g.Len(), k, targetRecall, g.cfg.M)
 }
 
 // interpolateAnchors reads a base width off the measured points, linearly
