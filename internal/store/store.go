@@ -70,13 +70,17 @@ type Store interface {
 type Map struct {
 	mu sync.RWMutex
 	m  map[string]Metadata
+
+	// strs holds one shared copy of every string in m, keys and values both;
+	// see intern.go. Guarded by mu like m, and always replaced with it.
+	strs internTable
 }
 
 var _ Store = (*Map)(nil)
 
 // New returns an empty Map.
 func New() *Map {
-	return &Map{m: make(map[string]Metadata)}
+	return &Map{m: make(map[string]Metadata), strs: make(internTable)}
 }
 
 // Put stores a copy of md.
@@ -89,6 +93,11 @@ func (s *Map) Put(id string, md Metadata) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// The copy is adopt's: it builds a fresh map out of shared strings, so the
+	// caller's map is neither kept nor touched.
+	if old, ok := s.m[id]; ok {
+		s.strs.release(old)
+	}
 	if len(md) == 0 {
 		// Storing an empty map would make "absent" and "present but empty" two
 		// spellings of the same thing, which every caller would then have to
@@ -96,9 +105,7 @@ func (s *Map) Put(id string, md Metadata) {
 		delete(s.m, id)
 		return
 	}
-	cp := make(Metadata, len(md))
-	maps.Copy(cp, md)
-	s.m[id] = cp
+	s.m[id] = s.strs.adopt(md)
 }
 
 // Get returns a copy of the metadata under id, for the same reason Put stores
@@ -138,9 +145,11 @@ func (s *Map) Delete(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.m[id]; !ok {
+	old, ok := s.m[id]
+	if !ok {
 		return false
 	}
+	s.strs.release(old)
 	delete(s.m, id)
 	return true
 }

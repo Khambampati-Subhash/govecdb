@@ -24,6 +24,7 @@ meaningful, which is what makes the trade defensible rather than merely cheap.
 |------|----------------|
 | `store.go` | The `Store` interface and `Map`, the in-memory implementation. |
 | `codec.go` | Validation, the wire format, and the limits enforced both ways. |
+| `intern.go` | One shared copy of each distinct key and string value, reference-counted. |
 
 ## The value types are a closed set
 
@@ -80,6 +81,18 @@ keep, unlike an arbitrary caller — which is why `Get` still copies.
 An id with no metadata is passed a `nil` map rather than skipped. "Has no
 metadata" is a thing a filter can legitimately ask about, and a nil map reads as
 empty for every operation a predicate performs on one.
+
+## Repeated strings are stored once
+
+Every vector carries the same key names, and every chunk of a document carries
+the same document id, path and title. `Map` keeps one copy of each distinct
+string — and one `any` box for it — shared by every entry that holds it, with a
+reference count so that deleting a document's vectors frees its strings.
+Measured at 200,000 vectors, eleven keys, fifty chunks to a document: **1,141 →
+754 bytes a vector**. With every value unique the key names alone pay for the
+table (1,143 against 1,147). The price is two map lookups per entry on `Put` —
+229 → 407 ns, inside an insert that costs half a millisecond — and nothing on
+`Match`, which still allocates nothing.
 
 ## One spelling for "no metadata"
 

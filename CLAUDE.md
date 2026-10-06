@@ -386,6 +386,11 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - **The predicate is over ids, not metadata.** `internal/hnsw` must stay ignorant
   of metadata: giving it a second data model would make every future `Index`
   implementation responsible for one. The root package closes over the store.
+- **`store.Map` interns keys and string values** (`intern.go`), refcounted and
+  released on replace/delete, and rebuilt by `ReadFrom` on a snapshot load.
+  1,141 → 754 B/vector on repeated-per-document metadata; neutral when values
+  are unique. Any new path that writes `s.m` must go through `adopt`/`release`,
+  or the counts drift and strings leak (`TestInternedStringsAreReleased`).
 - **`store.Map.Match` does not copy**, which is why it exists next to `Get`. It
   runs once per candidate node, and `Get`'s per-call map copy would become the
   dominant cost of a search. `TestMatchDoesNotAllocate` pins it at 0 allocs, and

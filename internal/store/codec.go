@@ -380,6 +380,7 @@ func (s *Map) ReadFrom(r *bufio.Reader, maxIDBytes int) error {
 	// Built aside and swapped in, so a section that fails halfway leaves the
 	// store as it was rather than half-replaced.
 	m := make(map[string]Metadata, min(count, 1<<16))
+	strs := make(internTable)
 
 	var idLen [4]byte
 	body := make([]byte, 0, 1024)
@@ -410,11 +411,11 @@ func (s *Map) ReadFrom(r *bufio.Reader, maxIDBytes int) error {
 		if _, dup := m[id]; dup {
 			return fmt.Errorf("%w: duplicate id %q", ErrMetadataCorrupt, id)
 		}
-		m[id] = md
+		m[id] = strs.adopt(md)
 	}
 
 	s.mu.Lock()
-	s.m = m
+	s.m, s.strs = m, strs
 	s.mu.Unlock()
 	return nil
 }

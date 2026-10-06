@@ -102,6 +102,13 @@ below names what it fixes.
   at dimension 768 rises from 0.972 to 0.988. Existing graphs keep the alpha
   they were built with (it is in the snapshot); new and replay-rebuilt ones get
   1.0.
+- **Metadata strings are interned.** Keys and string values are stored once
+  per distinct value, reference-counted, instead of once per vector — the same
+  document id, path and title on every chunk of a document, and the same key
+  names on every vector. Measured at 200,000 vectors with eleven keys and fifty
+  chunks to a document: 1,141 → 754 bytes a vector of metadata. Neutral when
+  every value is unique. `Put` costs 178 ns more; `Match` still allocates
+  nothing.
 - **Non-finite float metadata is refused.** `Add` and `AddBatch` now return
   `ErrInvalidMetadata` for a NaN or ±Inf metadata value, as they already did for
   a vector component. A stored NaN was invisible to every range filter, and it is
