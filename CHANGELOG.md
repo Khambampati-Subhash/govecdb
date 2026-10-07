@@ -10,6 +10,47 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Nothing yet. See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned
 and in what order.
 
+## [1.3.0] - 2026-10-07
+
+A minor release, entirely additive: v2 item 1 (the observability seam) and 3a (a
+parallel batch build). No exported API changed, no on-disk format changed, and
+every locked baseline holds. One behaviour is new by default: `AddBatch` and log
+replay use every core, which makes the graph they build non-deterministic —
+`WithInsertWorkers(1)` restores the serial build exactly.
+
+### Added
+
+- **The observability seam: `WithObserver(func(Event))`** (v2 item 1). A torn
+  log tail found during recovery used to be repaired and reported to nobody; a
+  corrupt snapshot passed over, a truncation skipped because the oldest snapshot
+  failed verification, a background snapshot or calibration that failed, and the
+  moment a database went read-only all reached a `_`. Each is now a typed event —
+  `Recovered`, `TornLog`, `SnapshotRejected`, `SnapshotTaken`, `SnapshotFailed`,
+  `TruncationSkipped`, `DurabilityFailure`, `Calibrated`, `CalibrationFailed` —
+  with a `String` for logging as is. Nothing fires per search or write, so the
+  1 alloc/op search baseline holds. The observer is called synchronously and
+  must not call back into the DB.
+- **`service.Options.Observer`** receives every collection's events tagged with
+  the collection's name.
+- **Batch writes and log replay build the index on every core.** Insert is the
+  whole cost of a write at high dimension — 2–4 ms a vector at 512 — and the
+  graph's write lock made it one core per database, so a 250,000-vector
+  collection took ~23 minutes to rebuild and as long again to reopen without a
+  snapshot. `AddBatch` now links its vectors in parallel, and replay gathers runs
+  of PUTs into the same path. Measured at 20,000 × 512 on 16 cores: a build in
+  batches of 1,000 goes from 43 s to 3.7 s, and reopening with no snapshot from
+  42.2 s to 3.7 s, at the same recall and with every vector reachable. It works
+  for batches into a non-empty index — a rebuild over REST is hundreds of them —
+  and searches get the lock back between chunks of a batch, so a large one never
+  stalls them for long. New: `WithInsertWorkers` (0 = GOMAXPROCS; 1 builds the
+  graph serial `Add`s would, for reproducibility) and `hnsw.(*Graph).InsertBatch`.
+  A parallel graph is not deterministic; a batch naming an id twice still ends
+  with its last vector and metadata.
+- **The daemon logs and counts events.** `httpapi.Events` logs each at Info
+  (routine work), Warn (anything repaired or declined) or Error (read-only), and
+  `/metrics` gains `govecdb_events_total{collection,event}`.
+  `httpapi.Config.Events` wires it in.
+
 ## [1.2.0] - 2026-10-07
 
 A minor release: everything is additive except three changed defaults, each
@@ -313,7 +354,8 @@ Stated here rather than discovered later:
 - **A highly selective filter approaches a full scan.** Past roughly one vector
   in a hundred, a scan over the metadata is the better tool.
 
-[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/khambampati-subhash/govecdb/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.0.0...v1.1.0
