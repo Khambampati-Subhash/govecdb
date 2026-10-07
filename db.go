@@ -288,13 +288,43 @@ func (db *DB) AddBatch(vs []Vector) error {
 	if err != nil {
 		return db.fail(err)
 	}
-	// In order, so a batch naming one id twice ends as replay would end it.
-	for i := range vs {
-		if err := db.applyPut(vs[i]); err != nil {
-			return fmt.Errorf("vector %d: %w", i, err)
-		}
+	if err := db.applyPuts(vs); err != nil {
+		return err
 	}
 	db.kickCalibration(db.index.Len())
+	return nil
+}
+
+// applyPuts applies PUTs that are already in the log, in order, so a batch
+// naming one id twice ends as replaying it would: with the last vector and the
+// last metadata. Callers hold the write lock.
+//
+// An index that batches gets them in one call and links them in parallel; one
+// that does not gets them one Insert at a time.
+func (db *DB) applyPuts(vs []Vector) error {
+	b, ok := db.index.(indexBatcher)
+	if !ok || len(vs) < 2 {
+		for i := range vs {
+			if err := db.applyPut(vs[i]); err != nil {
+				return fmt.Errorf("vector %d: %w", i, err)
+			}
+		}
+		return nil
+	}
+
+	ids := make([]string, len(vs))
+	values := make([][]float32, len(vs))
+	for i := range vs {
+		ids[i], values[i] = vs[i].ID, vs[i].Values
+	}
+	if err := b.InsertBatch(ids, values, db.opts.insertWorkers); err != nil {
+		// As in applyPut: the records are durable and the next start replays
+		// them, so failing the call is right and the gap closes on restart.
+		return fmt.Errorf("govecdb: index insert batch: %w", err)
+	}
+	for i := range vs {
+		db.store.Put(vs[i].ID, vs[i].Metadata)
+	}
 	return nil
 }
 
@@ -409,7 +439,8 @@ func (db *DB) Search(req SearchRequest) ([]Match, error) {
 // Snapshot writes the current state to disk and prunes older snapshots.
 //
 // It is what bounds recovery time: without one, starting up replays the whole
-// log and rebuilds the index at roughly 700 µs per vector; with one, it loads a
+// log and rebuilds the index at roughly 700 µs of CPU per vector, spread across
+// cores; with one, it loads a
 // graph instead. The cost is a read lock held for the write — searches continue,
 // writers wait — plus a fixed ~10 ms of fsync whatever the size.
 //

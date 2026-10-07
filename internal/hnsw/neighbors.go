@@ -136,6 +136,43 @@ func (g *Graph) connect(from, to, lc int) {
 	n.neighbors[lc] = append(nbrs, to)
 }
 
+// readNeighbors returns node idx's neighbors on layer lc for a traversal to
+// iterate. Outside a parallel batch that is the list itself; inside one, other
+// workers rewrite lists in place, so it is a copy taken under the node's lock,
+// valid until the next readNeighbors on st — and it leaves out nodes still
+// being linked, so a worker only ever builds on finished ones.
+func (g *Graph) readNeighbors(st *searchState, idx, lc int) []int {
+	if st.locks == nil {
+		return g.neighborsAt(idx, lc)
+	}
+	m := st.locks.of(idx)
+	m.Lock()
+	buf := st.nbrBuf[:0]
+	for _, nb := range g.neighborsAt(idx, lc) {
+		if !g.nodes[nb].linking.Load() {
+			buf = append(buf, nb)
+		}
+	}
+	m.Unlock()
+	st.nbrBuf = buf
+	return buf
+}
+
+// lockNode and unlockNode bracket a write to idx's neighbor lists. No-ops
+// outside a parallel batch. A worker never holds two at once, which is the
+// whole of the deadlock argument.
+func (g *Graph) lockNode(st *searchState, idx int) {
+	if st.locks != nil {
+		st.locks.of(idx).Lock()
+	}
+}
+
+func (g *Graph) unlockNode(st *searchState, idx int) {
+	if st.locks != nil {
+		st.locks.of(idx).Unlock()
+	}
+}
+
 // neighborsAt returns node idx's neighbor slice on layer lc (nil if the node
 // does not reach that layer).
 func (g *Graph) neighborsAt(idx, lc int) []int {

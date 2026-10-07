@@ -123,14 +123,24 @@ func (db *DB) checkConfig(idx *hnswIndex) error {
 
 // replayLog applies every record written after the snapshot, and reports how
 // many it applied and how many segments it read.
+//
+// Consecutive PUTs are gathered and applied as one batch, which an index that
+// batches links in parallel: replay without a snapshot is a full index build,
+// and serially that was ~23 minutes for 250,000 vectors of dimension 512. A
+// DELETE flushes what is pending first, so every operation still lands in log
+// order and the state is the one record-by-record replay would leave.
 func (db *DB) replayLog(dir string) (applied, segments int, err error) {
+	r := replayer{db: db}
 	res, err := wal.Replay(dir, wal.Options{}, func(rec wal.Record) error {
 		if rec.Seq <= db.snapSeq {
 			return nil // already inside the snapshot
 		}
 		applied++
-		return db.apply(rec)
+		return r.apply(rec)
 	})
+	if err == nil {
+		err = r.flush()
+	}
 	for _, t := range res.Tears {
 		db.emit(TornLog{Segment: t.File(), Offset: t.Offset, Discarded: t.Discarded, Cause: t.Cause})
 	}
@@ -151,11 +161,40 @@ func (db *DB) replayLog(dir string) (applied, segments int, err error) {
 	return applied, res.Segments, nil
 }
 
+// replayBatch is how many consecutive PUTs replay gathers before applying
+// them: enough to keep every worker busy across several chunks, and at
+// dimension 512 about 8 MiB of vectors held at once.
+const replayBatch = 4096
+
+// replayer applies log records, holding back runs of PUTs to apply together.
+// Decoded records own their memory, so holding them past the callback that
+// produced them is safe; the raw payload is never kept.
+type replayer struct {
+	db      *DB
+	pending []Vector
+	lastSeq uint64
+}
+
+// flush applies the PUTs held back so far.
+func (r *replayer) flush() error {
+	if len(r.pending) == 0 {
+		return nil
+	}
+	err := r.db.applyPuts(r.pending)
+	if err != nil {
+		err = fmt.Errorf("PUTs through seq %d: %w", r.lastSeq, err)
+	}
+	clear(r.pending) // drop the references, so applied vectors are not pinned
+	r.pending = r.pending[:0]
+	return err
+}
+
 // apply replays one record into the in-memory state.
 //
 // It does not write to the log. These records are already in it, and appending
 // them again would grow the log by its own contents on every start.
-func (db *DB) apply(rec wal.Record) error {
+func (r *replayer) apply(rec wal.Record) error {
+	db := r.db
 	switch rec.Type {
 	case wal.TypePut:
 		v, isPut, err := decodeRecord(rec.Type, rec.Payload, &db.opts)
@@ -165,13 +204,18 @@ func (db *DB) apply(rec wal.Record) error {
 		if !isPut {
 			return fmt.Errorf("%w: seq %d decoded as a delete under a PUT", ErrCorrupt, rec.Seq)
 		}
-		if err := db.index.Insert(v.ID, v.Values); err != nil {
-			return fmt.Errorf("seq %d: index insert %q: %w", rec.Seq, v.ID, err)
+		r.pending = append(r.pending, v)
+		r.lastSeq = rec.Seq
+		if len(r.pending) >= replayBatch {
+			return r.flush()
 		}
-		db.store.Put(v.ID, v.Metadata)
 		return nil
 
 	case wal.TypeDelete:
+		// Everything before this record lands before it does.
+		if err := r.flush(); err != nil {
+			return err
+		}
 		v, _, err := decodeRecord(rec.Type, rec.Payload, &db.opts)
 		if err != nil {
 			return fmt.Errorf("seq %d: %w", rec.Seq, err)

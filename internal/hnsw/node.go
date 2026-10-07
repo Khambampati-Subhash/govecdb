@@ -1,5 +1,7 @@
 package hnsw
 
+import "sync/atomic"
+
 // node is a single vector living in the graph.
 //
 // A node exists on layers 0..topLevel. neighbors[l] holds the indexes (into
@@ -18,6 +20,14 @@ type node struct {
 	// See Delete for why the alternative — actually removing the slot — is not
 	// on the table.
 	deleted bool
+
+	// linking is set while a parallel batch is still building this node's
+	// edges, and parallel traversals step around it (readNeighbors). A node
+	// can be found on an upper layer before its worker has reached layer 0,
+	// and a search seeded from it then sees an empty list — the newcomer links
+	// to one or two nodes and the graph grows an island. Never set outside a
+	// batch, and never read by a search.
+	linking atomic.Bool
 }
 
 // topLevel is the highest layer this node participates in.

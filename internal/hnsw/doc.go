@@ -34,6 +34,7 @@
 //	config.go     Config knobs, defaults, and the sentinel errors callers see.
 //	graph.go      The Graph type: state, construction, and shared helpers.
 //	insert.go     Insert — building the graph, and replacing an existing id.
+//	batch.go      InsertBatch — the same, on several workers at once.
 //	delete.go     Delete — tombstoning, and re-electing the entry point.
 //	compact.go    Compact — rebuilding the graph to reclaim tombstoned slots.
 //	codec.go      The graph as bytes: WriteTo and Read, for snapshots.

@@ -19,7 +19,8 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `doc.go` | Package overview and this file map. |
 | `config.go` | `Config` knobs, `DefaultConfig`, and the sentinel errors callers match on. |
 | `graph.go` | The `Graph` type: state, `New`, `Len`, and the shared helpers (`randomLevel`, `prepare`). |
-| `insert.go` | `Insert` — building the graph, and replacing an id that is already in it. |
+| `insert.go` | `Insert` — building the graph, and replacing an id that is already in it; `link`, the part of an insert a batch parallelizes. |
+| `batch.go` | `InsertBatch` — linking a batch on several workers under striped node locks, in chunks that hold the write lock. |
 | `delete.go` | `Delete` — tombstoning a slot, and re-electing the entry point when it is the one deleted. |
 | `compact.go` | `Compact` — rebuilding the graph over its live vectors to reclaim tombstoned slots. |
 | `codec.go` | `(*Graph).WriteTo` / `Read` — the graph as bytes, so recovery loads an index instead of rebuilding one. |
@@ -33,6 +34,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `visited.go` | Generation-stamped visited set, reused across searches. |
 | `state.go` | `searchState`: the pooled per-traversal scratch that makes `Search` read-only. |
 | `graph_test.go` | Correctness + recall-vs-brute-force at 32 and 768 dimensions. |
+| `batch_test.go` | Parallel builds: recall against serial, reachability, structural validity, upsert semantics, searches between chunks. |
 | `concurrent_test.go` | Parallel-vs-serial equivalence, mixed reader/writer race coverage. |
 | `delete_test.go` | Tombstone semantics, recall under deletes, entry re-election, stranding. |
 | `upsert_test.go` | Replacement semantics, replay no-ops, recall under updates, atomicity. |

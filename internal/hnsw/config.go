@@ -8,6 +8,9 @@ var (
 	ErrDimensionMismatch = errors.New("hnsw: vector dimension mismatch")
 	// ErrEmptyVector is returned for a nil/zero-length vector.
 	ErrEmptyVector = errors.New("hnsw: empty vector")
+	// ErrBatchMismatch is returned by InsertBatch when ids and vectors differ
+	// in length.
+	ErrBatchMismatch = errors.New("hnsw: ids and vectors differ in length")
 	// ErrInvalidConfig is returned by New for a Config it cannot build a graph
 	// from. The wrapped message names the field and the value.
 	ErrInvalidConfig = errors.New("hnsw: invalid config")

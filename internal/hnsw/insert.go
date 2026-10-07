@@ -77,14 +77,8 @@ func (g *Graph) Insert(id string, vector []float32) error {
 //
 // Callers hold the write lock.
 func (g *Graph) insertPrepared(id string, vec []float32) {
-	st := g.acquireState()
-	defer g.releaseState(st)
-
 	level := g.randomLevel()
-	n := newNode(id, vec, level)
-	idx := len(g.nodes)
-	g.nodes = append(g.nodes, n)
-	g.ids[id] = idx
+	idx := g.place(id, vec, level)
 
 	// First node ever: it becomes the entry point and we're done.
 	if g.entry == -1 {
@@ -93,11 +87,51 @@ func (g *Graph) insertPrepared(id string, vec []float32) {
 		return
 	}
 
+	st := g.acquireState()
+	defer g.releaseState(st)
+	g.link(st, idx)
+
+	// If the new node reaches higher than any existing node, it becomes entry.
+	if level > g.maxLevel {
+		g.maxLevel = level
+		g.entry = idx
+	}
+}
+
+// place appends a node with no edges and binds id to it, returning its slot.
+// Nothing can reach it until link connects it.
+func (g *Graph) place(id string, vec []float32, level int) int {
+	idx := len(g.nodes)
+	g.nodes = append(g.nodes, newNode(id, vec, level))
+	g.ids[id] = idx
+	return idx
+}
+
+// link finds a placed node's neighbors on every layer it reaches and connects
+// it to them, both ways. It reads entry and maxLevel and never writes them;
+// promoting a new top node is the caller's business.
+//
+// It is the whole of an insert's cost and the part a parallel batch runs on
+// several workers at once (batch.go). Everything it writes — idx's lists, and
+// each neighbor's list plus that neighbor's prune — happens under the node's
+// lock when st carries locks, one node at a time, and is unlocked work
+// otherwise. The ordering below is the same either way, which is what keeps a
+// serial build bit-identical to what it was before the split.
+func (g *Graph) link(st *searchState, idx int) {
+	vec := g.nodes[idx].vector
+	level := g.nodes[idx].topLevel()
+
+	// The node itself is hidden from its own searches. Serially nothing can
+	// reach it yet, so this changes nothing; in a parallel batch another
+	// worker may already have linked to it, and without this it could choose
+	// itself as a neighbor.
+	st.hide = idx + 1
+
 	// Phase 1: greedily descend from the top down to level+1 with ef=1, just to
 	// find a good entry point near the new node.
 	cur := g.entry
 	for lc := g.maxLevel; lc > level; lc-- {
-		cur = g.greedyClosest(cur, vec, lc)
+		cur = g.greedyClosest(st, cur, vec, lc)
 	}
 
 	// Phase 2: from min(maxLevel, level) down to 0, find neighbors and connect.
@@ -119,19 +153,26 @@ func (g *Graph) insertPrepared(id string, vec []float32) {
 			neighbors = append(neighbors, cur)
 		}
 
+		// The node's own edges first. The prune is a no-op serially — at most
+		// maxConn were selected — but in a batch other workers may have linked
+		// to this node already, and a list over its cap is one a snapshot load
+		// would refuse.
+		g.lockNode(st, idx)
 		for _, nb := range neighbors {
 			g.connect(idx, nb, lc)
+		}
+		g.pruneConnections(st, idx, lc)
+		g.unlockNode(st, idx)
+
+		for _, nb := range neighbors {
+			g.lockNode(st, nb)
 			g.connect(nb, idx, lc)
 			g.pruneConnections(st, nb, lc)
+			g.unlockNode(st, nb)
 		}
 		if len(w) > 0 {
 			cur = w[0].idx // closest, to seed the next lower layer
 		}
 	}
-
-	// If the new node reaches higher than any existing node, it becomes entry.
-	if level > g.maxLevel {
-		g.maxLevel = level
-		g.entry = idx
-	}
+	st.hide = 0
 }

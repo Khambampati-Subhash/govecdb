@@ -77,7 +77,7 @@ func (g *Graph) SearchFilter(query []float32, k, ef int, allow func(id string) b
 	// Descend the upper layers greedily to reach the right region.
 	cur := g.entry
 	for lc := g.maxLevel; lc > 0; lc-- {
-		cur = g.greedyClosest(cur, q, lc)
+		cur = g.greedyClosest(st, cur, q, lc)
 	}
 
 	// Do the wide search on layer 0. The descent above stays unfiltered: it is
@@ -114,12 +114,12 @@ func (g *Graph) admits(idx int, allow func(id string) bool) bool {
 // It is deliberately blind to tombstones: this is pure routing on the upper
 // layers, and the node it lands on is a seed for the next layer down, never an
 // answer. Skipping dead nodes here would only make the descent worse.
-func (g *Graph) greedyClosest(start int, target []float32, lc int) int {
+func (g *Graph) greedyClosest(st *searchState, start int, target []float32, lc int) int {
 	best := start
 	bestDist := g.dist(g.nodes[start].vector, target)
 	for {
 		improved := false
-		for _, nb := range g.neighborsAt(best, lc) {
+		for _, nb := range g.readNeighbors(st, best, lc) {
 			d := g.dist(g.nodes[nb].vector, target)
 			if d < bestDist {
 				bestDist, best, improved = d, nb, true
@@ -176,7 +176,7 @@ func (g *Graph) searchLayer(st *searchState, query []float32, entryPoint, ef, lc
 		if len(results) >= ef && c.dist > results[0].dist {
 			break
 		}
-		for _, nb := range g.neighborsAt(c.idx, lc) {
+		for _, nb := range g.readNeighbors(st, c.idx, lc) {
 			if st.visited.visit(nb) {
 				continue
 			}

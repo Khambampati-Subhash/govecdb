@@ -118,6 +118,20 @@ func (h *hnswIndex) Search(query []float32, k, ef int, allow func(id string) boo
 	return out, nil
 }
 
+// indexBatcher is an index that can insert many vectors faster than one at a
+// time. Optional: an index without it gets the vectors one Insert at a time,
+// which is correct and merely slower.
+type indexBatcher interface {
+	// InsertBatch stores every vector, with the same per-id outcome a loop
+	// over Insert would give — an id named twice ends with its last vector —
+	// using up to workers goroutines, or all available for zero.
+	InsertBatch(ids []string, values [][]float32, workers int) error
+}
+
+func (h *hnswIndex) InsertBatch(ids []string, values [][]float32, workers int) error {
+	return h.g.InsertBatch(ids, values, workers)
+}
+
 // indexCalibrator is an index that can measure how wide it needs to search and
 // fold that into SuggestedEf. Optional for the same reason serialization is: a
 // flat index has nothing to calibrate, and an HNSW one is still usable without.

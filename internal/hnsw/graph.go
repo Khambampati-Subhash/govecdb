@@ -17,6 +17,8 @@ import (
 // mutate neighbor lists several hops away from the new node, so there is no
 // small region to lock instead. Read-heavy workloads (the expected shape) scale;
 // concurrent *writers* serialize, and finer-grained writes are a later step.
+// The exception is InsertBatch, which holds the lock for a chunk and links that
+// chunk on several workers inside it (batch.go).
 type Graph struct {
 	// mu guards every mutable field below it. cfg, dist, the M/ml/alpha knobs
 	// and normalized are written once in New and only read afterwards.
@@ -43,6 +45,10 @@ type Graph struct {
 	// numDeleted counts tombstoned slots. Kept as a running total rather than
 	// recomputed, because it is what a compaction policy polls.
 	numDeleted int
+
+	// locks guards neighbor lists while InsertBatch links in parallel.
+	// Allocated on the first batch that needs it, under mu, and never freed.
+	locks *nodeLocks
 
 	// pool hands out per-traversal scratch so the hot path allocates nothing.
 	// It is internally synchronized, so it sits outside mu's coverage.

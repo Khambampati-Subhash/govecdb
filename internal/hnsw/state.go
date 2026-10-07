@@ -22,6 +22,13 @@ type searchState struct {
 	pruneBuf []candidate // pruneConnections' distance-annotated neighbors
 	selected []int       // insert's chosen neighbors for the current layer
 	queryBuf []float32   // normalized copy of the caller's query
+	nbrBuf   []int       // a neighbor list copied out under its lock
+
+	// locks is non-nil only for a worker of a parallel batch (batch.go), and
+	// it is what switches neighbor-list access to locked copies. Nil for every
+	// search and every serial insert, so those pay one branch per expansion
+	// and nothing else. Cleared before the state goes back to the pool.
+	locks *nodeLocks
 
 	// hide is 1 + the slot searchLayer must treat as absent, or 0 for none.
 	// Only Calibrate sets it — see searchWithout — and it is cleared before
