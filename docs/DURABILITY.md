@@ -247,9 +247,25 @@ cost:
 | Stage | Per record | 1M records |
 |---|---|---|
 | Reading the log (`wal.Replay`) | 368 ns (5.7 GB/s, **0 allocs/record**) | 0.37 s |
-| Applying it (`hnsw.Insert`) | 703 µs | **703 s** (11.7 min) |
+| Applying it (`hnsw.Insert`), one core | 703 µs | **703 s** (11.7 min) |
 
 **Reading the log is 0.05% of recovery.** Rebuilding the index is everything.
+
+**Replay now applies runs of PUTs as a parallel batch** (`InsertBatch`, flushed at
+every DELETE so log order holds). The per-vector CPU is unchanged; it is spread
+over `WithInsertWorkers` cores, GOMAXPROCS by default. Measured end to end through
+`Open`, 20,000 × 512 with no snapshot, Apple M4 Max:
+
+| Replay | Wall clock |
+|---|---|
+| `WithInsertWorkers(1)` — the old behaviour | 42.2 s |
+| default, 16 cores | **3.7 s** (11.3×) |
+
+That narrows the gap below but does not close it. If the 11× measured at
+dimension 512 carries over to 128 — not measured; less arithmetic per lock may
+parallelize worse — a million × 128 rebuilds in about a minute against 0.37 s to
+load a graph, and a snapshot is still worth over 100×. Nothing in the argument
+that follows changes.
 
 That single fact settled the design question the snapshot phase left open —
 whether a snapshot should store the **graph** or just the **live vectors**. The
@@ -258,7 +274,7 @@ dim 128 at `M=16` encodes to **662 bytes per vector**, so 1M vectors is ~662 MB:
 
 | Snapshot holds | 1M × 128 recovery | Cost |
 |---|---|---|
-| Live vectors | Rebuild every vector at 703 µs | **~703 s** |
+| Live vectors | Rebuild every vector at 703 µs | **~703 s** on one core; about a minute on 16, extrapolated |
 | The graph itself | verify 662 MB at 6.4 GB/s, decode at 2.46 GB/s | **~0.37 s** |
 
 About **1,900×** — three orders of magnitude. A vectors-only snapshot would bound

@@ -32,11 +32,12 @@ matches, _ := db.Search(govecdb.SearchRequest{Query: query, K: 10})
 
 ## Status
 
-**v1.2.0 — released and usable, as a library or as a server.** `govecdb.Open`
-gives you add, get, delete, search, filter, snapshot and compact over one
-directory, durable through a write-ahead log and recoverable from snapshots.
-`cmd/govecdbd` serves a directory of collections over HTTP, and adds no
-dependencies doing it.
+**v1.3.0 — released and usable, as a library or as a server.** `govecdb.Open`
+gives you add, get, delete, search, filter, enumerate, snapshot and compact over
+one directory, durable through a write-ahead log and recoverable from snapshots.
+Batch writes and recovery build the index on every core, and everything the
+database does on its own is reported through one observer. `cmd/govecdbd` serves
+a directory of collections over HTTP, and adds no dependencies doing it.
 
 GoVecDB was rewritten from the ground up; the previous ~45,700-line
 implementation remains in git history. See [the record](docs/MIGRATION.md) for
@@ -63,14 +64,13 @@ Worth knowing before you adopt it, rather than after:
 |---|---|
 | **Linux and macOS only** | The log and snapshot store fsync the containing *directory*, which is not portable to Windows. Untested there. |
 | **`Compact()` stops the world** | It holds the write lock for a full rebuild. You choose the moment; the database never triggers it. |
-| **Writers serialize** | Reads scale across cores, writes do not. |
+| **Writers serialize** | Reads scale across cores. Separate writes do not; one `AddBatch` links its vectors on every core (`WithInsertWorkers`), and so does log replay. |
 | **One database is one index** | Many indexes in one process means [running it as a service](docs/SERVICE.md); the library itself is still one directory, one index. |
-| **No logger or metrics seam** | Inside the library. A torn log tail found during recovery is repaired correctly and reported to nobody — the daemon logs and exports metrics, the library does not yet. |
 | **Selective filters approach a scan** | Past roughly one vector in a hundred, scanning the metadata is the better tool. |
 | **The service is a single process** | No clustering, no replication. [v2 item 8](docs/MIGRATION.md#v2-scope). |
 
 Still out of scope and planned for [v2](docs/MIGRATION.md#v2-scope): clustering,
-gRPC, quantization, online compaction, and that observability seam. See
+gRPC, quantization, and online compaction. See
 [durability and latency](docs/DURABILITY.md) for what is guaranteed today and
 what it costs.
 
@@ -183,8 +183,8 @@ up to one interval to a crash. See [durability and latency](docs/DURABILITY.md).
 
 Nothing snapshots automatically. Call `db.Snapshot()`, or set
 `WithSnapshotInterval` — without one, a restart replays the whole log and rebuilds
-the index at ~700 µs per vector; with one, it loads a graph at gigabytes per
-second.
+the index at ~700 µs of CPU per vector (spread across cores); with one, it loads
+a graph at gigabytes per second.
 
 ## Or run it as a service
 
@@ -278,8 +278,8 @@ accuracy: `M` (connections per node) and `EfConstruction`/`ef` (how wide the sea
 explores).
 
 For the design decisions behind the implementation — why vectors are normalized on
-insert, why neighbor selection is alpha-pruned, how the search path reaches two
-allocations — see [`internal/hnsw/README.md`](internal/hnsw/README.md).
+insert, why neighbor selection is alpha-pruned, how the search path reaches one
+allocation, how a batch is linked on many cores — see [`internal/hnsw/README.md`](internal/hnsw/README.md).
 
 ## The API
 
@@ -341,12 +341,36 @@ knowing up front:
 `Filter` is an interface, so a predicate with no constructor here is a legitimate
 thing to implement yourself.
 
-| Knob | Where | Adaptable? |
-|------|-------|-----------|
-| `M` — neighbors per node (layers > 0; layer 0 uses `2*M`) | `Config`, set once | **No** — structural; changing it means rebuilding |
-| `EfConstruction` — search width during inserts | `Config` | Kept fixed (100–200) |
-| `Alpha` — pruning relaxation | `Config` | Fixed per graph; default 1.0 — larger values cost recall on clustered data |
-| `ef` — search width at query time | `SearchRequest.Ef` | **Yes** — per query; auto-clamped to `>= k`. Grows with `N`, so leave it zero and it is chosen for you, [see the charts](#measured-behaviour) |
+### Observability
+
+Pass `WithObserver` and the database tells you what it does on its own — and
+what it repaired rather than failed on:
+
+```go
+db, _ := govecdb.Open("data", govecdb.WithDimension(768),
+    govecdb.WithObserver(func(e govecdb.Event) {
+        switch e := e.(type) {
+        case govecdb.DurabilityFailure:
+            alert(e.Cause) // read-only from here until a restart
+        default:
+            log.Print(e) // every event has a String
+        }
+    }))
+```
+
+| Event | Fires when |
+|---|---|
+| `Recovered` | `Open` finished — snapshot used, records replayed, and how long it took |
+| `TornLog` | a log segment ended in a damaged record (normal after a crash; worrying otherwise) |
+| `SnapshotRejected` | a snapshot failed its checksum and an older one was used |
+| `SnapshotTaken` / `SnapshotFailed` | every snapshot, including the ones on a timer |
+| `TruncationSkipped` | the log was kept because the snapshot that would replace it did not verify |
+| `DurabilityFailure` | a write could not be made durable; the database is now read-only |
+| `Calibrated` / `CalibrationFailed` | the automatic search width was re-measured |
+
+Nothing fires per search or write, so the 1 alloc/op search path is untouched.
+The observer runs synchronously and must not call back into the database. The
+daemon logs every event and counts them as `govecdb_events_total` in `/metrics`.
 
 ### Configuration
 
@@ -367,12 +391,17 @@ Everything is a functional option on `Open`. Only `WithDimension` is required.
 | `WithSearchTargetRecall(float64)` | `0.95` | What a zero `Ef` aims for. Treated as a floor. |
 | `WithLimits(id, k, ef, batch, mdKeys)` | `512, 10k, 100k, 10k, 256` | Per-call bounds. Configurable, not removable. |
 | `WithReadOnly()` | off | Open an existing directory without writing to it. Shares the directory with other readers, never with a writer. |
+| `WithInsertWorkers(int)` | `0` (GOMAXPROCS) | Cores one `AddBatch`, or log replay, links vectors on. `1` builds exactly the graph serial `Add`s would — set it with `WithSeed` for a reproducible index. |
 | `WithEfCalibration(bool)` | on | Measure the data's search difficulty in the background and scale the automatic `Ef` to it. |
 
 **One process per directory.** `Open` takes an `flock` on the directory —
 exclusive, or shared under `WithReadOnly` — so a second process gets
 `ErrAlreadyOpen` instead of a corrupted log. The kernel releases it when the
 holder dies, so a crash leaves nothing stale to clean up.
+
+`M` (neighbours per node) and the metric are structural, `EfConstruction` is
+fixed per build, and the search width `Ef` is the one knob to tune per query —
+leave it zero and it is [chosen for you](#measured-behaviour).
 
 Three of these interact in a way worth stating plainly:
 
@@ -449,10 +478,14 @@ Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
 | Euclidean distance | 21.7 ns, 0 allocs |
 | Insert | 479 µs, 6 allocs |
 | `AddBatch`, 100 vectors, `SyncAlways` | 47 ms — one fsync, not 100 |
+| Build 20,000 × 512, batches of 1,000 | 43 s on one core → **3.7 s** on 16 |
+| Reopen 20,000 × 512, no snapshot | 42.2 s → **3.7 s** on 16 |
 | Recall@10 (dim 32) | **0.999** |
 | Recall@10 (dim 768) | **0.988** |
 
 Recall is measured against brute-force ground truth in `graph_test.go`, not estimated.
+A parallel build's recall matches a serial one's within measurement noise, and
+every vector stays reachable — both are tested, not assumed.
 
 ## Measured behaviour
 
@@ -655,11 +688,14 @@ data being at fault. Clustered data, which is what real embeddings look like, is
     directory, loaded on demand and evicted when idle
 12. ~~**REST server**~~ — done in `httpapi/` and `cmd/govecdbd`; `net/http` only,
     so the zero-dependency guarantee survives it
+13. ~~**Observability**~~ — done; typed events through `WithObserver`, logged and
+    counted by the daemon
+14. ~~**Parallel batch build**~~ — done; `AddBatch` and log replay link on every
+    core, ~11× at 16
 
-**v1 is complete, and v2 has started at the server end.** The rest is
-[scoped](docs/MIGRATION.md#v2-scope) in dependency order — an observability seam,
-online compaction, fine-grained write locking, filter selectivity estimation, a
-quantized index, then gRPC and clustering. Those last two land in a *separate
+**Next, in [dependency order](docs/MIGRATION.md#v2-scope):** online compaction,
+fine-grained write locking, filter selectivity estimation, a quantized index,
+then gRPC and clustering. Those last two land in a *separate
 module*: neither gRPC nor Raft is stdlib, and this one keeps its guarantee. See
 [the module decision](docs/SERVICE.md#the-module-decision), which was made before
 the server was written rather than after.
@@ -721,8 +757,9 @@ no `require` block, and there is no `go.sum`. Keep it that way.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Note that during the v1 rebuild the codebase
-is changing shape quickly; open an issue before starting substantial work.
+See [CONTRIBUTING.md](CONTRIBUTING.md). For anything substantial, open an issue
+first and check [the v2 scope](docs/MIGRATION.md#v2-scope) — much of what is
+missing is already planned, in an order that matters.
 
 ## License
 

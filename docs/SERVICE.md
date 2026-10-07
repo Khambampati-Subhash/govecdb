@@ -442,8 +442,9 @@ and restart.
 ### Snapshots are what bound restart time
 
 Without a snapshot, starting a collection replays its whole log and rebuilds the
-index at roughly 700 µs per vector. With one, it loads a graph — about 1,900×
-faster for a million vectors.
+index — roughly 700 µs of CPU per vector, spread across cores. With one, it loads
+a graph: about 1,900× faster than a one-core rebuild for a million vectors, and
+still over 100× faster than one on 16 cores.
 
 The daemon snapshots new collections every 10 minutes unless told otherwise
 (`-snapshot-interval`, or `"snapshot_interval"` per collection; `"off"` for
@@ -470,7 +471,7 @@ fast.
 
 ### What to watch
 
-`/metrics` is Prometheus text. The four that matter:
+`/metrics` is Prometheus text. The ones that matter:
 
 | Metric | Watch for |
 |---|---|
@@ -478,11 +479,16 @@ fast.
 | `govecdb_collection_wal_sequence` − `..._snapshot_sequence` | A widening gap is a slow restart waiting to happen. |
 | `govecdb_http_requests_total{class="5xx"}` | Anything above zero. |
 | `govecdb_collections_loaded` vs `-max-open` | At the cap, with `503 too_many_open` appearing. |
+| `govecdb_events_total{event="durability_failure"}` | Anything above zero: that collection is read-only until a restart. |
+| `govecdb_events_total{event=~"torn_log\|snapshot_rejected\|truncation_skipped"}` | A torn log after a crash is expected; on a clean restart, or repeatedly, it is the disk. A rejected snapshot or skipped truncation should never happen on a healthy machine. |
+| `govecdb_events_total{event="snapshot_failed"}` | Rising: snapshots are not landing, so the next restart replays the whole log. |
 
 There is no latency histogram, and the [reason](../httpapi/README.md#metrics-counters-and-gauges-no-histogram)
 is that bucket boundaries chosen without a dependency are boundaries chosen badly.
 `govecdb_http_request_duration_seconds_total` over the request count is an honest
-mean; percentiles wait for the observability seam.
+mean. The library's event seam does not add one: it reports what a database does
+on its own, never per request. Each event is also logged — Info for routine work,
+Warn for anything repaired or declined, Error for going read-only.
 
 ### Shutting down
 

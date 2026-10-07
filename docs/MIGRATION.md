@@ -66,17 +66,18 @@ govecdb/
 ├── db.go                # the DB facade                               ✅ done
 ├── options.go           # functional-options construction             ✅ done
 ├── errors.go            # exported sentinel errors                    ✅ done
+├── events.go            # the observability seam: WithObserver, Event ✅ v2 item 1
 ├── internal/
 │   ├── hnsw/            # index engine — concurrent reads             ✅ done
 │   ├── wal/             # write-ahead log — writer + replay + truncate ✅ done
 │   ├── snapshot/        # store + graph codec (in hnsw/)              ✅ done
 │   ├── store/           # metadata storage                            ✅ done
-│   ├── filter/          # metadata query engine                       ✅ done
-│   └── obs/             # Logger + Metrics interfaces, no-op defaults  ⬜ v2
+│   └── filter/          # metadata query engine                       ✅ done
 └── docs/
 ```
 
-`internal/obs` is the only box still empty, and it is [v2 item 1](#1-the-observability-seam).
+`internal/obs` was planned here and turned out not to be needed — see
+[v2 item 1](#1-the-observability-seam) for why the seam lives at the root.
 Note what is *not* here: no `collection/`, no `api/`, no `cluster/`. Those are
 v2, and they are layers above this rather than changes to it — which is what made
 cutting them from v1 clean rather than costly.
@@ -128,7 +129,7 @@ it, because several of these look independent and are not.
 
 | | Item | Blocked on | |
 |---|---|---|---|
-| 1 | `internal/obs` — Logger + Metrics seam | nothing | |
+| 1 | Observability seam | nothing | **done** |
 | 2 | Online (non-blocking) compaction | 1, for the same reason everything wants 1 | |
 | 3 | Fine-grained write locking | 2 | |
 | 4 | Collections / namespaces | nothing, but wants 1 | **done in v1.1.0** |
@@ -160,7 +161,9 @@ items up in practice even though the dependency order stands:
 - **Insert is 2–4 ms a vector at dimension 512** under one writer lock, so a
   collection builds on one core: 1M vectors over sixteen collections in 7–10
   minutes, a 250K collection rebuilt in ~23. Item 3 is the structural answer.
-- **A bulk build is not blocked the way item 3 is.** Building a graph that no
+- **A bulk build is not blocked the way item 3 is.** *(Done — see
+  [3a](#3a-parallel-batch-build--done); this sketch was wrong in one place that
+  mattered.)* Building a graph that no
   reader can see yet — `AddBatch` into an empty index, which is every rebuild
   and every reshard — has neither the WAL-ordering question (the batch is logged
   whole before any of it is applied) nor concurrent searches to protect. It needs
@@ -172,7 +175,7 @@ items up in practice even though the dependency order stands:
 - **Full vectors are the larger half of memory at dimension 512** (`4 × dim` =
   2 KB of ~3.4 KB a vector, before interning cut the metadata share). Item 6.
 
-### 1. The observability seam
+### 1. The observability seam — done
 
 The first thing, because it is the thing every other item needs and the one gap
 that is currently *silent*. Today a torn log tail found during recovery is
@@ -190,6 +193,41 @@ happen inside `internal/`, which cannot name a root-package type. So the seam is
 defined in `internal/obs` and adapted at the root, the same shape `Index` already
 uses.
 
+**Shipped as `events.go` at the root, and two parts of the sketch above were
+wrong.**
+
+- **The constraint was not real.** Reading every site that dropped an event to a
+  `_`, none was inside `internal/`. `wal.Replay` already returns its tears in
+  `Result.Tears`, `snapshot.Load` its rejections in `Result.Rejected`, `Prune`
+  and `Truncate` their counts — the internal packages report what they found as
+  *values*, and the root package was discarding them. So there is no
+  `internal/obs`: the internal packages stay ignorant of any observer, which is
+  better than teaching five of them a callback, and the root is the one place
+  values become events.
+- **Not a Logger and a Metrics interface.** One callback, `WithObserver(func(Event))`,
+  over a sealed set of typed events: `Recovered`, `TornLog`, `SnapshotRejected`,
+  `SnapshotTaken`, `SnapshotFailed`, `TruncationSkipped`, `DurabilityFailure`,
+  `Calibrated`, `CalibrationFailed`. A Logger interface would have made the
+  library choose messages and levels; a Metrics interface, names and a label
+  model. Typed events carry the facts and leave both choices to the consumer —
+  the daemon logs them at a severity it picks and counts them as
+  `govecdb_events_total{collection,event}` from the one callback
+  (`httpapi.Events`). Adding an event is additive; a consumer's type switch keeps
+  a default.
+
+What it deliberately does **not** do: fire per Search or per Add. An event is
+boxed into an interface, which allocates, and the search path is held at one
+allocation by a locked baseline. Per-operation latency is measured by timing the
+call; the daemon's percentile gap stays a gap (`docs/SERVICE.md`).
+
+One contract to know: the observer runs synchronously, and `DurabilityFailure`
+fires under the write lock, so an observer must not call back into the same DB.
+Deferring it past the unlock would thread a pending event through four write
+paths for something that fires at most once in a database's life.
+
+Items 2 and 3 were blocked on this for the reason stated above — they need to
+report what they do — and are now unblocked.
+
 ### 2. Online compaction
 
 `Compact()` stops the world — it holds the write lock for a full index rebuild,
@@ -201,6 +239,39 @@ Building the replacement outside the lock means writes landing in the old graph
 while the new one is built, and reconciling them wants a change log and a
 double-buffered swap. The WAL should shape that, since it is already recording
 exactly those writes — which is why this was deferred rather than attempted in v1.
+
+### 3a. Parallel batch build — done
+
+`hnsw.(*Graph).InsertBatch`, used by `AddBatch` and by log replay. 20,000 × 512
+on 16 cores: 43 s → 3.7 s to build, 42.2 s → 3.7 s to reopen without a snapshot,
+recall unchanged, every vector reachable. Three things the sketch above got wrong
+or did not see, each found by measuring:
+
+- **"AddBatch into an empty index" would have sped up almost nothing.** A rebuild
+  over REST arrives as hundreds of batches of at most 1,000, and only the first
+  lands in an empty index. So the parallel path works on a *live* graph: each
+  chunk of a batch holds the write lock, workers link inside it under striped
+  per-node locks on neighbor lists, and searches get the lock back between
+  chunks. Upserts, level draws and slot placement happen serially first, and a
+  node that would become the entry is linked alone, so `entry`, `maxLevel`,
+  `nodes` and `ids` are constant while workers run and need no lock.
+- **Nodes in flight must be invisible to other workers.** A node is linked top
+  layer first, so it is briefly findable on layer 1 with an empty layer-0 list;
+  a worker seeded from it links to one or two nodes and the graph grows islands.
+  Without the rule, 17 of 10,000 vectors were unreachable at dimension 8 and 16
+  workers; with it, none of 710,000. A repair pass (find nodes with no inbound
+  edge, re-link them) was written first and deleted once the rule left it
+  nothing to do — and its cheap check had a hole: a stranded pair can vouch for
+  each other.
+- **Concurrency has to scale with the graph.** Into 50 vectors, 16 linking blind
+  is a third of the graph, and self-searches at the suggested width missed 0.8%.
+  A chunk may use one worker per 32 live vectors (`nodesPerWorker`), so a small
+  graph grows serially and full width arrives by ~500.
+
+What it does not do: make `Compact` parallel (it is the same rebuild, but
+`TestCompactMatchesAFreshBuild` asserts bit-equality with a serial build, and
+deciding to give that up is a separate change), or make separate `Add` calls
+concurrent — that is still item 3.
 
 ### 3. Fine-grained write locking
 

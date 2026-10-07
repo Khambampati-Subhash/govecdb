@@ -13,8 +13,8 @@ Thanks for your interest in GoVecDB.
 > Small fixes and test improvements are welcome without ceremony. For anything
 > substantial, **open an issue first** — and check
 > [the v2 scope](docs/MIGRATION.md#v2-scope), because collections, a server,
-> clustering, quantization, online compaction and an observability seam are
-> already planned in dependency order.
+> clustering, quantization and online compaction are already planned in
+> dependency order.
 
 ## Development setup
 

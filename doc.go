@@ -50,8 +50,9 @@
 //
 // Open loads the newest snapshot that passes its checksum, then replays the log
 // records written after it. A snapshot is what bounds startup time: without one,
-// recovery rebuilds the index at roughly 700 µs per vector, and with one it
-// loads a graph at gigabytes per second. Snapshots are taken by calling Snapshot
+// recovery rebuilds the index — roughly 700 µs of CPU per vector at dimension
+// 128, spread across cores — and with one it loads a graph at gigabytes per
+// second. Snapshots are taken by calling Snapshot
 // or by setting WithSnapshotInterval; nothing is written automatically by
 // default, because how long a restart may take is the caller's decision.
 //
@@ -80,18 +81,22 @@
 // # Concurrency
 //
 // A DB is safe for concurrent use. Searches run in parallel with each other and
-// with everything except Compact; writes serialize. One process should hold one
-// directory — Open refuses a second handle on the same path from the same
-// process, and does not attempt to police other processes.
+// with everything except Compact; writes serialize, though one AddBatch links
+// its vectors on several cores (WithInsertWorkers). One process should hold one
+// directory — Open refuses a second handle on the same path, from this process
+// or, through an flock on the directory, from another.
 //
-// # Not implemented yet
+// # Collections
 //
-// Observability: there is no logger or metrics seam, so a torn log tail found
-// during recovery is repaired correctly and reported to nobody, and a skipped
-// truncation says nothing about why.
+// One database is one index. Multiple named collections sit above this, in the
+// service package, rather than change it.
 //
-// Collections: one database is one index. Multiple named collections would sit
-// above this rather than change it.
+// # Observability
+//
+// WithObserver receives an Event for everything the database does on its own or
+// repairs without failing: recovery, a torn log tail, a rejected snapshot, a
+// snapshot taken or failed, a skipped truncation, going read-only, and
+// calibration. Nothing fires per Search or Add.
 //
 // The package is split one responsibility per file:
 //
@@ -103,5 +108,6 @@
 //	codec.go     Domain encoding: log payloads and the snapshot payload.
 //	db.go        The DB facade and its lifecycle.
 //	recovery.go  Rebuilding state on Open: snapshot first, then the log.
+//	events.go    The observability seam: WithObserver and the Event types.
 //	errors.go    Sentinel errors callers match on.
 package govecdb

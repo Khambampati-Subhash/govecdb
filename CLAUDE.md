@@ -1,5 +1,6 @@
 # CLAUDE.md
 
+### You are a senior most developer.
 Guidance for Claude Code (and humans) working in this repository.
 
 ## What this is
@@ -13,90 +14,71 @@ Module path: `github.com/khambampati-subhash/govecdb` · Go 1.24+ (built with 1.
 **Zero third-party dependencies** — `go.mod` has no `require` block and there is no
 `go.sum`. Do not add a dependency without asking; stdlib-only is a design goal.
 
-## Where the project is: v1 complete, v2 started at the server end
+## Where the project is
 
-Work lands on **`main`**. v1 was a **rebuild from scratch, one subsystem at a
-time**, using the old implementation as a reference in git history rather than as
-a source to copy — and it is **done**: an embeddable library with durability,
-recovery and metadata filtering.
+**v1.3.0 on `main`.** v1 — a from-scratch rebuild, one subsystem at a time — is
+complete: an embeddable library with durability, recovery and filtering. v2 is
+under way, taken partly out of dependency order where an item needed nothing
+from the ones ahead of it.
 
-**v1.1.0 added the service**: collections (`service/`), a REST API (`httpapi/`)
-and a daemon (`cmd/govecdbd`) — v2 items 4 and 7, taken out of order because
-neither needed the observability seam and together they are what makes this
-operable. They sit strictly above `DB`; embedding the library is unchanged.
+| v2 item | State | Where |
+|---|---|---|
+| 1 Observability seam | **done** (v1.3.0) | `events.go`, `httpapi/events.go` |
+| 2 Online compaction | **next** — unblocked by 1 | — |
+| 3a Parallel batch build | **done** (v1.3.0) | `internal/hnsw/batch.go` |
+| 3 Fine-grained write locking | after 2 | — |
+| 4 Collections | **done** (v1.1.0) | `service/` |
+| 5 Filter selectivity estimation | open | — |
+| 6 Quantized index | open — the `Index` interface was built for it | — |
+| 7 REST / 7b gRPC | REST **done** (v1.1.0); gRPC open, separate module | `httpapi/`, `cmd/govecdbd/` |
+| 8 Clustering / replication | last | — |
 
-Read `docs/MIGRATION.md` before making structural changes. It now holds both the
-v1 record (why each subsystem is shaped the way it is) and **the v2 scope**, in
-dependency order: observability seam → online compaction → fine-grained write
-locking → ~~collections~~ → selectivity estimation → quantized index →
-~~REST~~/gRPC → clustering. Do not start one of those without reading what blocks
-it; several look independent and are not. `docs/SERVICE.md` is the service
-manual and holds the module decision.
+`docs/MIGRATION.md` holds the full scope, what blocks each item, and the record
+of every finished one — including what its original sketch got wrong. **Read the
+item there before starting it**; several look independent and are not. Known
+deferred decision: `Compact` could use the parallel build, but that gives up
+`TestCompactMatchesAFreshBuild`'s bit-equality — the owner's call, not yet made.
 
-`docs/DURABILITY.md` is the companion: what survives which failure, what each
-guarantee costs, and every latency number in one place. **Update it when you
-change a durability guarantee or move a benchmark** — it is the document a user
-would be misled by if it went stale. `docs/PLAN.md` and `docs/PLAN_PROGRESS.md`
-are the original plan and its execution log.
+**Two v2 constraints.** gRPC and Raft go in a **separate module** that imports
+this one; never add a `require` block to `go.mod` (CI fails the build).
+Replication should be built on the WAL's `Replay` and record format — a format
+change, if it needs one, is far cheaper before v2 ships than after.
 
-**Two v2 constraints worth knowing before writing any of it.** The first is now
-**decided rather than pending**: the library and the HTTP API are one module
-because `net/http` is stdlib, and **gRPC and Raft go in a separate module** that
-imports this one. Do not add a `require` block to `go.mod`; CI fails the build if
-one appears. The second is unchanged: replication should be built on the WAL's
-existing `Replay` and record format, and if it needs a format change, making it
-before v2 ships is far cheaper than after.
+### Before you change X, read Y
 
-### The codebase is the root package, `internal/`, and the service on top
-The root package (`db.go`, `vector.go`, `filter.go`, `options.go`, `validate.go`,
-`index.go`, `codec.go`, `recovery.go`, `errors.go`) is the public API. Under it:
-`internal/hnsw`, `internal/wal`, `internal/snapshot`, `internal/store`,
-`internal/filter`. Each internal package has its own `README.md`, and
-`internal/hnsw/` is the reference for style: small single-responsibility files,
-comments that explain *why*, measured rather than assumed.
+| Changing | Read first |
+|---|---|
+| anything structural | `docs/MIGRATION.md` |
+| a durability guarantee, or any benchmark number | `docs/DURABILITY.md` — **update it in the same commit**; it is what a user is misled by when stale |
+| the service, the daemon, the wire format | `docs/SERVICE.md`, `service/README.md`, `httpapi/README.md` |
+| an internal package | its own `README.md`, and its quick reference below |
+| the index | `internal/hnsw/README.md` — also the reference for code style |
 
-**All 11 rebuild steps are done.** What remains is deferred work, not gaps:
-online compaction, finer write locking, an observability seam, and a crash
-harness — see `docs/MIGRATION.md`.
+### The layout
+The root package is the public API — `db.go`, `vector.go`, `filter.go`,
+`options.go`, `validate.go`, `index.go`, `codec.go`, `recovery.go`,
+`enumerate.go`, `calibrate.go`, `events.go`, `errors.go` — one responsibility per
+file. Under it, `internal/hnsw` (the index), `internal/wal` (the log),
+`internal/snapshot` (point-in-time state; the graph codec is
+`internal/hnsw/codec.go`), `internal/store` (metadata), `internal/filter` (the
+query engine), `internal/dirlock` (the directory flock).
 
-- `internal/hnsw/` — the index. Complete: concurrent reads, tombstone delete,
-  upsert, compaction, serialization, filtered search, and a measurement harness
-  behind `-results`.
-- `internal/wal/` — durability. Complete: record format, append-only writer with
-  segment rotation and sync policies, `Replay` — a CRC-validating scan that
-  truncates torn tails and carries the sequence forward — and `Truncate`.
-- `internal/snapshot/` — point-in-time state. Complete: atomic writes, checksummed
-  framing keyed by WAL sequence, discovery, fallback and retention, with an
-  **opaque payload**. The graph codec lives in `internal/hnsw/codec.go`.
-- `internal/store/` — metadata storage, and `Match` for the filtered search path.
-- `internal/filter/` — the metadata query engine.
+Above it, strictly: `service/` (collections), `httpapi/` (REST over a
+`service.Manager`, stdlib only), `cmd/govecdbd/` (the daemon). Nothing in the
+root package or `internal/` knows these exist — if a change needs it to, it is
+the wrong change.
 
-**v2 items 4 and 7 shipped in v1.1.0**, as three packages strictly *above* `DB`
-— nothing in the root package or `internal/` knows they exist, and adding them
-changed no behaviour for anyone embedding the library:
-
-- `service/` — collections: many independent databases in one directory, with
-  on-disk specs, load-on-demand and idle eviction.
-- `httpapi/` — a REST/JSON `http.Handler` over a `service.Manager`. `net/http`
-  and `encoding/json` only.
-- `cmd/govecdbd/` — the daemon: flags, TLS, signals, graceful shutdown.
-
-See the service quick reference below, `docs/SERVICE.md`, and the two package
-READMEs.
-
-### The legacy code is gone
-Every previous package (`index/`, `store/`, `persist/`, `api/`, `collection/`,
-`filter/`, `cluster/`, `segment/`, `proto/`, and the dead experiments) was deleted
-in the clean-slate commit. **Nothing is lost** — `main` has it all. To consult the
-old implementation rather than resurrect it:
+### The legacy code is in history, not the tree
+The previous implementation (`index/`, `store/`, `persist/`, `api/`,
+`collection/`, `filter/`, `cluster/`, `segment/`, `proto/`, …) was deleted in
+`853b2d7`. To consult it:
 
 ```bash
-git show main:persist/wal.go
-git log main --oneline -- persist/
+git show 853b2d7^:persist/wal.go
+git ls-tree -r --name-only 853b2d7^ -- persist/
 ```
 
-Do not restore these packages into the tree. If something there is worth having,
-rewrite it to the current bar.
+Never restore it; rewrite anything worth having to the current bar.
 
 ## Commands
 
@@ -138,8 +120,10 @@ stdlib-only — do not add a charting dependency.
 The sweeps **skip themselves under `-race`** (`skipUnderRace`, via a `race`
 build-tag constant): they are single-goroutine, so the detector observes nothing
 while costing ~10× and pushing the package past the default 10-minute timeout.
-Race coverage lives in the five `TestConcurrent*` tests. Do not "fix" the skip by
-raising the timeout.
+Race coverage lives in the `TestConcurrent*` tests and the multi-worker
+`TestInsertBatch*` tests. Do not "fix" the skip by raising the timeout.
+
+Scratch measurement files are named `zz_*_test.go` and are never committed.
 
 If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 
@@ -160,7 +144,11 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   owner asked for this explicitly (2026-08-28), superseding the earlier
   `v1-restructure` rule. That branch still exists and is level with `main`.
 - **Commit messages must NOT include a `Co-Authored-By` trailer** (repo owner
-  preference).
+  preference). Conventional prefixes — `feat(scope):`, `fix:`, `perf(hnsw):`,
+  `docs:`, `release: vX.Y.Z` — subject says what changed, body says why.
+- **A release** moves CHANGELOG's `[Unreleased]` under a version heading, updates
+  the version in README's Status, commits as `release: vX.Y.Z`, and pushes an
+  annotated tag; the tag runs `release.yml`.
 - Commit/push only when asked.
 
 ## HNSW quick reference
@@ -222,7 +210,24 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - The graph is **safe for concurrent use**: `Search` holds `RLock` and runs in
   parallel, `Insert` holds the write lock. Per-traversal scratch comes from a
   pooled `searchState` (`state.go`) — that is *why* `Search` can be a reader, so
-  never move scratch back onto `Graph`. Concurrent writers still serialize.
+  never move scratch back onto `Graph`. Concurrent writers still serialize —
+  except inside one `InsertBatch`, below.
+- **`InsertBatch` (`batch.go`) links a batch on several workers**, used by
+  `AddBatch` and by replay (runs of PUTs, flushed at every DELETE). Each chunk
+  holds the write lock; phase 1 is serial (upserts, `randomLevel` in batch order,
+  `place`); a node outranking `maxLevel` is linked alone so `entry`/`maxLevel`
+  are constant; then workers `link` under **striped** node locks (`nodeLocks`,
+  32 KiB, never two held at once). Lock use is switched by `st.locks != nil`, so
+  `Search` and serial `Insert` pay one branch. Two rules were each found by
+  losing vectors — do not remove either: **in-flight nodes are invisible** to
+  other workers' traversals (`node.linking`, filtered in `readNeighbors`;
+  without it 17/10,000 unreachable), and **workers scale with the graph**
+  (`nodesPerWorker` = 32; at 50 vectors × 16 workers self-search missed 0.8%).
+  `TestInsertBatchStrandsNothing` walks reachability; `TestInsertBatchOneWorkerIsSerial`
+  pins workers=1 to the serial graph. The serial path (`insertPrepared` →
+  `place` + `link`) is bit-identical to before. Parallel builds are not
+  deterministic: `WithInsertWorkers(1)` with `WithSeed` for reproducibility.
+  11.5× at 16 workers, 20K × 512.
 - Insert **copies** the caller's vector (and normalizes it for Cosine), so the graph
   never aliases a reused caller buffer.
 - `Insert` is an **upsert** — there is no `Update`. A second Insert under a live id
@@ -484,6 +489,17 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   left alone (`MkdirAll` only applies its mode on creation, and silently
   tightening an operator's choice would revoke access granted on purpose).
 - Reopening with a different **dimension, metric or M** is refused — structural.
+- **The observability seam is `WithObserver(func(Event))` in `events.go`** — one
+  callback over a sealed set of typed events, not a Logger and a Metrics
+  interface (those would make the library choose messages, levels and metric
+  names). There is **no `internal/obs`**: internal packages report what they find
+  as values (`wal.Result.Tears`, `snapshot.Result.Rejected`, Prune/Truncate
+  counts) and the root turns them into events — keep it that way rather than
+  handing an observer down. **Nothing fires per Search or Add**: boxing an event
+  allocates and the search baseline is 1 alloc/op. The observer is synchronous,
+  and `DurabilityFailure` fires under the write lock, so it must not call back
+  into the DB. `Snapshot` emits on every attempt — the interval timer drops its
+  error, so the event is the only place a background failure shows.
 
 ## Service quick reference (`service`, `httpapi`, `cmd/govecdbd`)
 
@@ -565,8 +581,14 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   and its size. No users, no roles; that would imply an authorization story this
   does not have.
 - **No latency histogram.** Bucket boundaries chosen without a dependency are
-  chosen badly. Count plus total duration is an honest mean; percentiles wait for
-  the observability seam (v2 item 1).
+  chosen badly. Count plus total duration is an honest mean. The event seam does
+  not change this — it never fires per request.
+- **`httpapi.Events` is built before the Manager** and given to both
+  (`service.Options.Observer`, `httpapi.Config.Events`), because the Manager
+  needs its observer at construction and the Server needs the Manager. Severity
+  is policy and lives there: Info routine, Warn repaired/declined, Error
+  read-only; an unknown event is Warn. The `event` label values are a
+  compatibility surface — spelled out, never derived from Go type names.
 - **The daemon binds `127.0.0.1` by default** and reads its token from
   `GOVECDB_AUTH_TOKEN`, never a flag — a flag lands in `ps` output and shell
   history. Non-loopback without a token **warns, does not refuse**: binding
@@ -587,6 +609,9 @@ Any index change must hold these; they are enforced by tests and `-benchmem`:
 | Filtered search allocations | 1 alloc/op | `BenchmarkSearchFilter -benchmem` |
 | Metadata predicate allocations | 0 allocs/op | `TestMatchDoesNotAllocate` |
 | Recall spread across seeds | ≤ 0.05 | `TestRecallIsStableAcrossSeeds` |
+| Unreachable vectors after a parallel build | 0 | `TestInsertBatchStrandsNothing` |
+| Parallel recall vs serial | within 0.02 | `TestInsertBatchRecallMatchesSerial` |
+| Serial build is bit-identical | exact | `TestCompactMatchesAFreshBuild`, `TestInsertBatchOneWorkerIsSerial` |
 
 The sweep tests in `recall_test.go` defend **shape**, not absolute values: recall
 must not fall as `ef` rises, nor as `M` rises, must recover under a wide search
