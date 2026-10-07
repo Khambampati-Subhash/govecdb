@@ -143,6 +143,8 @@ type options struct {
 
 	calibrate bool
 
+	observer func(Event)
+
 	maxIDBytes  int
 	maxK        int
 	maxEf       int

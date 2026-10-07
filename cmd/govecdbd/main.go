@@ -149,10 +149,16 @@ func run(ctx context.Context, args []string, stderr io.Writer, stop func(), read
 		return err
 	}
 
+	// Built before the manager, because the manager needs it as its observer
+	// and the server needs the manager: a torn log found while loading a
+	// collection is logged and counted like any other event.
+	events := httpapi.NewEvents(log)
+
 	mgr, err := service.NewManager(cfg.dir, service.Options{
 		MaxOpen:                 cfg.maxOpen,
 		IdleTimeout:             cfg.idle,
 		DefaultSnapshotInterval: cfg.snapshotEvery,
+		Observer:                events.Observe,
 	})
 	if err != nil {
 		return err
@@ -169,6 +175,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, stop func(), read
 		MaxBodyBytes: cfg.maxBody,
 		AuthToken:    token,
 		Version:      buildVersion(),
+		Events:       events,
 	})
 	if err != nil {
 		return err

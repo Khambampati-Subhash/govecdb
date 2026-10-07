@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"time"
 
 	"github.com/khambampati-subhash/govecdb/internal/snapshot"
 	"github.com/khambampati-subhash/govecdb/internal/store"
@@ -27,13 +28,24 @@ import (
 // nextSeq is where the log resumes. It lives on DB because Open needs it between
 // restore and opening the writer.
 func (db *DB) restore() error {
+	start := time.Now()
 	snapDir := filepath.Join(db.dir, snapshotSubdir)
 	walDir := filepath.Join(db.dir, walSubdir)
 
 	if err := db.loadSnapshot(snapDir); err != nil {
 		return err
 	}
-	return db.replayLog(walDir)
+	replayed, segments, err := db.replayLog(walDir)
+	if err != nil {
+		return err
+	}
+	db.emit(Recovered{
+		SnapshotSeq: db.snapSeq,
+		Replayed:    replayed,
+		Segments:    segments,
+		Took:        time.Since(start),
+	})
+	return nil
 }
 
 // loadSnapshot installs the newest usable snapshot, or an empty database if
@@ -53,6 +65,11 @@ func (db *DB) loadSnapshot(dir string) error {
 		idx, st, err = readSnapshot(r, db.opts.maxIDBytes)
 		return err
 	})
+	// Reported before the error check: a rejection followed by an I/O error on
+	// the next file is two facts, and the second should not hide the first.
+	for _, r := range res.Rejected {
+		db.emit(SnapshotRejected{Path: r.Snapshot.Path, Seq: r.Snapshot.Seq, Cause: r.Cause})
+	}
 	if err != nil {
 		return fmt.Errorf("govecdb: load snapshot: %w", err)
 	}
@@ -104,16 +121,21 @@ func (db *DB) checkConfig(idx *hnswIndex) error {
 	return nil
 }
 
-// replayLog applies every record written after the snapshot.
-func (db *DB) replayLog(dir string) error {
+// replayLog applies every record written after the snapshot, and reports how
+// many it applied and how many segments it read.
+func (db *DB) replayLog(dir string) (applied, segments int, err error) {
 	res, err := wal.Replay(dir, wal.Options{}, func(rec wal.Record) error {
 		if rec.Seq <= db.snapSeq {
 			return nil // already inside the snapshot
 		}
+		applied++
 		return db.apply(rec)
 	})
+	for _, t := range res.Tears {
+		db.emit(TornLog{Segment: t.File(), Offset: t.Offset, Discarded: t.Discarded, Cause: t.Cause})
+	}
 	if err != nil {
-		return fmt.Errorf("govecdb: replay log: %w", err)
+		return applied, res.Segments, fmt.Errorf("govecdb: replay log: %w", err)
 	}
 
 	// The log can be *behind* the snapshot — a snapshot taken and the log
@@ -124,10 +146,9 @@ func (db *DB) replayLog(dir string) error {
 	db.nextSeq = max(db.nextSeq, res.NextSeq())
 
 	// Tears are the expected shape after a crash, not a reason to refuse to
-	// start: a torn tail is a write that was never acknowledged. They are worth
-	// surfacing, and there is nowhere yet to surface them to — see the note on
-	// observability in doc.go.
-	return nil
+	// start: a torn tail is a write that was never acknowledged. They are
+	// reported as events above rather than returned.
+	return applied, res.Segments, nil
 }
 
 // apply replays one record into the in-memory state.

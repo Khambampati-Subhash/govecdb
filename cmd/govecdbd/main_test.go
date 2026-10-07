@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -18,10 +20,11 @@ import (
 // other test in this module stops at an http.Handler, and the things that only
 // break for real — binding, shutdown, the listener actually closing — live here.
 type daemon struct {
-	t    *testing.T
-	base string
-	stop func()
-	done chan error
+	t      *testing.T
+	base   string
+	stop   func()
+	done   chan error
+	stderr *syncBuffer
 }
 
 func start(t *testing.T, args ...string) *daemon {
@@ -31,9 +34,9 @@ func start(t *testing.T, args ...string) *daemon {
 	addr := make(chan net.Addr, 1)
 	done := make(chan error, 1)
 
-	var stderr syncBuffer
+	stderr := new(syncBuffer)
 	go func() {
-		done <- run(ctx, args, &stderr, nil, func(a net.Addr) { addr <- a })
+		done <- run(ctx, args, stderr, nil, func(a net.Addr) { addr <- a })
 	}()
 
 	var bound net.Addr
@@ -48,9 +51,10 @@ func start(t *testing.T, args ...string) *daemon {
 	}
 
 	d := &daemon{
-		t:    t,
-		base: "http://" + bound.String(),
-		done: done,
+		t:      t,
+		base:   "http://" + bound.String(),
+		done:   done,
+		stderr: stderr,
 	}
 	// Once, because a test that stops the daemon explicitly still has the
 	// cleanup registered below — and the second wait would block on a channel
@@ -108,6 +112,26 @@ func (d *daemon) do(method, path, body, token string) (int, map[string]any) {
 		}
 	}
 	return resp.StatusCode, out
+}
+
+// raw fetches a path with no body and returns it as text, for the endpoints
+// that do not answer in JSON.
+func (d *daemon) raw(method, path string) (int, string) {
+	d.t.Helper()
+	req, err := http.NewRequest(method, d.base+path, nil)
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		d.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	return resp.StatusCode, string(body)
 }
 
 func (d *daemon) mustDo(method, path, body, token string, want int) map[string]any {
@@ -196,6 +220,53 @@ func TestDataSurvivesARestart(t *testing.T) {
 	md, _ := got["metadata"].(map[string]any)
 	if md["kept"] != true {
 		t.Fatalf("vector came back as %v, want its metadata intact", got)
+	}
+}
+
+// TestATornLogIsLoggedAndCounted is the gap the observability seam closed: a
+// crash-torn log used to be repaired on load and reported to nobody. Over the
+// real daemon it now reaches both the log and /metrics, against its collection.
+func TestATornLogIsLoggedAndCounted(t *testing.T) {
+	dir := t.TempDir()
+
+	first := start(t, "-dir", dir, "-addr", "127.0.0.1:0")
+	first.mustDo("POST", "/v1/collections",
+		`{"name":"docs","dimension":4,"sync_policy":"never","snapshot_interval":"off"}`, "", http.StatusCreated)
+	first.mustDo("POST", "/v1/collections/docs/vectors",
+		`{"vectors":[{"id":"a","values":[1,0,0,0]},{"id":"b","values":[0,1,0,0]}]}`, "", http.StatusOK)
+	first.stop()
+
+	// Cut the last record short, as power loss mid-write would.
+	segments, err := filepath.Glob(filepath.Join(dir, "docs", "*", "wal", "*.log"))
+	if err != nil || len(segments) == 0 {
+		t.Fatalf("no log segments under %s: %v", dir, err)
+	}
+	var last string
+	for _, s := range segments {
+		if fi, err := os.Stat(s); err == nil && fi.Size() > 8 {
+			last = s
+		}
+	}
+	if last == "" {
+		t.Fatalf("no segment holds a record: %v", segments)
+	}
+	fi, err := os.Stat(last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(last, fi.Size()-6); err != nil {
+		t.Fatal(err)
+	}
+
+	second := start(t, "-dir", dir, "-addr", "127.0.0.1:0")
+	second.mustDo("GET", "/v1/collections/docs?load=true", "", "", http.StatusOK)
+
+	if log := second.stderr.String(); !strings.Contains(log, "torn_log") || !strings.Contains(log, "collection=docs") {
+		t.Fatalf("the torn log was not logged:\n%s", log)
+	}
+	status, body := second.raw("GET", "/metrics")
+	if status != http.StatusOK || !strings.Contains(body, `govecdb_events_total{collection="docs",event="torn_log"} 1`) {
+		t.Fatalf("the torn log was not counted (%d):\n%s", status, body)
 	}
 }
 

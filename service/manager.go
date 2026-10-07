@@ -54,6 +54,13 @@ type Options struct {
 	// can still opt out with SnapshotOff.
 	DefaultSnapshotInterval time.Duration
 
+	// Observer receives every collection's events, tagged with the collection's
+	// name. Nil discards them. It is called on the collection's own goroutines,
+	// sometimes under its write lock, so it must be safe for concurrent use and
+	// must not call back into the Manager or the collection — see
+	// govecdb.WithObserver.
+	Observer func(collection string, e govecdb.Event)
+
 	// now is the clock, unexported because only this package's tests replace it.
 	// Eviction is defined in elapsed time, and a test that demonstrates it by
 	// sleeping demonstrates it slowly and then flakily.
@@ -225,7 +232,7 @@ func (m *Manager) Create(name string, spec Spec) (err error) {
 		return err
 	}
 
-	db, err := govecdb.Open(filepath.Join(dir, dataSubdir), spec.options()...)
+	db, err := govecdb.Open(filepath.Join(dir, dataSubdir), m.openOptions(name, spec)...)
 	if err != nil {
 		return wrapOpen(name, err)
 	}
@@ -350,7 +357,7 @@ retry:
 	m.cols[name] = c
 
 	m.mu.Unlock()
-	db, err := govecdb.Open(filepath.Join(dir, dataSubdir), spec.options()...)
+	db, err := govecdb.Open(filepath.Join(dir, dataSubdir), m.openOptions(name, spec)...)
 	m.mu.Lock()
 
 	c.loading = false
@@ -706,4 +713,15 @@ func wrapOpen(name string, err error) error {
 		return fmt.Errorf("%w: %q: %w", ErrInvalidSpec, name, err)
 	}
 	return fmt.Errorf("service: open %q: %w", name, err)
+}
+
+// openOptions is the spec's options plus this manager's observer, bound to the
+// collection's name. The observer is not in the spec because it is not a
+// property of the collection: it is where this process sends its reports.
+func (m *Manager) openOptions(name string, spec Spec) []govecdb.Option {
+	opts := spec.options()
+	if obs := m.opts.Observer; obs != nil {
+		opts = append(opts, govecdb.WithObserver(func(e govecdb.Event) { obs(name, e) }))
+	}
+	return opts
 }

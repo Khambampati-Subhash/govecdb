@@ -21,10 +21,11 @@ import (
 // ratio is a mean — a statistic that is honest about being a mean rather than a
 // p99 wearing one's coat.
 //
-// The gap is deliberate and bounded: percentile latency belongs to the
-// observability seam in the library (v2 item 1), where it can be measured at the
-// operation rather than at the socket, and where a caller can plug in whatever
-// their metrics stack already does well.
+// The gap is deliberate. The library's observability seam (govecdb.Event)
+// reports what the database does on its own — recoveries, snapshots, repairs —
+// and deliberately fires nothing per search, because the search path is held
+// at one allocation. Percentile latency is measured by timing the call, which
+// is what a proxy or a caller's own metrics stack in front of this does well.
 type metrics struct {
 	// requests is indexed by status class: index 2 is 2xx, 5 is 5xx. Index 0
 	// catches anything outside 1xx-5xx, which should be nothing.
@@ -126,6 +127,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 				snapSeq:   info.Stats.SnapshotSeq,
 			}))
 		}
+	}
+
+	if s.events != nil {
+		s.events.writeMetrics(&b)
 	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

@@ -3,6 +3,7 @@ package govecdb
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/khambampati-subhash/govecdb/internal/hnsw"
 )
@@ -44,8 +45,7 @@ func (db *DB) Calibrate() error {
 	if !ok {
 		return fmt.Errorf("govecdb: index of type %T cannot be calibrated", idx)
 	}
-	db.calAt.Store(int64(idx.Len()))
-	if err := cal.Calibrate(db.opts.targetRecall, nil); err != nil {
+	if err := db.calibrate(idx, cal, nil); err != nil {
 		return fmt.Errorf("govecdb: calibrate: %w", err)
 	}
 	return nil
@@ -86,18 +86,33 @@ func (db *DB) calibrationLoop() {
 		if !ok {
 			return
 		}
-		// Recorded before measuring, so the writes that land during a
-		// calibration are compared against the count it measured.
-		db.calAt.Store(int64(idx.Len()))
-
-		// Errors are dropped: a calibration that fails or is stopped leaves the
-		// previous scale in place, which is a search width, not a correctness
-		// problem. Calibrate is the call that reports one.
-		err = cal.Calibrate(db.opts.targetRecall, db.stopCal)
-		if errors.Is(err, hnsw.ErrCalibrationStopped) {
+		// Errors go no further than an event: a calibration that fails leaves
+		// the previous scale in place, which is a search width, not a
+		// correctness problem.
+		if err := db.calibrate(idx, cal, db.stopCal); errors.Is(err, hnsw.ErrCalibrationStopped) {
 			return
 		}
 	}
+}
+
+// calibrate runs one calibration and reports it. Being stopped by Close is not
+// a failure and is not reported.
+func (db *DB) calibrate(idx Index, cal indexCalibrator, stop <-chan struct{}) error {
+	// Recorded before measuring, so the writes that land during a calibration
+	// are compared against the count it measured.
+	live := idx.Len()
+	db.calAt.Store(int64(live))
+
+	start := time.Now()
+	err := cal.Calibrate(db.opts.targetRecall, stop)
+	switch {
+	case errors.Is(err, hnsw.ErrCalibrationStopped):
+	case err != nil:
+		db.emit(CalibrationFailed{Cause: err})
+	default:
+		db.emit(Calibrated{Live: live, Scale: cal.EfScale(), Took: time.Since(start)})
+	}
+	return err
 }
 
 func efScaleOf(idx Index) float64 {

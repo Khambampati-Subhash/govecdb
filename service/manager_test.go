@@ -669,3 +669,63 @@ func TestDefaultSnapshotIntervalIsRecorded(t *testing.T) {
 		}
 	}
 }
+
+// TestObserverTagsEventsWithTheCollection: every collection's events reach the
+// one observer, and each says which collection it came from — on Create, on a
+// load after restart, and for work done inside Use.
+func TestObserverTagsEventsWithTheCollection(t *testing.T) {
+	type tagged struct {
+		name string
+		e    govecdb.Event
+	}
+	var (
+		mu  sync.Mutex
+		got []tagged
+	)
+	observe := func(name string, e govecdb.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, tagged{name, e})
+	}
+	count := func(name string, match func(govecdb.Event) bool) int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, g := range got {
+			if g.name == name && match(g.e) {
+				n++
+			}
+		}
+		return n
+	}
+	isRecovered := func(e govecdb.Event) bool { _, ok := e.(govecdb.Recovered); return ok }
+	isSnapshot := func(e govecdb.Event) bool { _, ok := e.(govecdb.SnapshotTaken); return ok }
+
+	root := t.TempDir()
+	m := newManagerAt(t, root, Options{Observer: observe})
+	mustCreate(t, m, "alpha", testSpec())
+	mustCreate(t, m, "beta", testSpec())
+	mustAdd(t, m, "alpha", govecdb.Vector{ID: "a", Values: []float32{1, 0, 0, 0}})
+	if err := m.Use("alpha", func(db *govecdb.DB) error { return db.Snapshot() }); err != nil {
+		t.Fatal(err)
+	}
+
+	if count("alpha", isRecovered) != 1 || count("beta", isRecovered) != 1 {
+		t.Fatalf("want one Recovered per created collection, got %v", got)
+	}
+	if count("alpha", isSnapshot) != 1 || count("beta", isSnapshot) != 0 {
+		t.Fatalf("the snapshot was reported against the wrong collection: %v", got)
+	}
+
+	// A load after restart is an Open too, and reports against its name.
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	m = newManagerAt(t, root, Options{Observer: observe})
+	if err := m.Use("alpha", func(*govecdb.DB) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if n := count("alpha", isRecovered); n != 2 {
+		t.Fatalf("%d Recovered events for alpha after a reload, want 2", n)
+	}
+}

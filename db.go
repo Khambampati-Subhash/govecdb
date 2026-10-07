@@ -431,31 +431,51 @@ func (db *DB) Snapshot() error {
 	idx, st := db.index, db.store
 	db.mu.Unlock()
 
-	ser, ok := idx.(indexSerializer)
-	if !ok {
-		return fmt.Errorf("govecdb: index of type %T cannot be snapshotted", idx)
-	}
-
-	dir := filepath.Join(db.dir, snapshotSubdir)
-	if _, err := snapshot.Create(dir, seq, func(w io.Writer) error {
-		return writeSnapshot(w, ser, st)
-	}); err != nil {
-		return fmt.Errorf("govecdb: snapshot: %w", err)
-	}
-
-	// Pruned only after the new one is durable, so the number of usable copies
-	// never dips below the retention on the way through.
-	if _, err := snapshot.Prune(dir, db.opts.snapshotsKept); err != nil {
-		return fmt.Errorf("govecdb: prune snapshots: %w", err)
-	}
-	if err := db.truncateLog(dir); err != nil {
+	// Every attempt past this point reports, success or failure, because the
+	// interval timer discards the error and an event is the only way its
+	// failures are seen.
+	start := time.Now()
+	taken, err := db.snapshotAt(seq, idx, st)
+	if err != nil {
+		db.emit(SnapshotFailed{Cause: err})
 		return err
 	}
+	taken.Took = time.Since(start)
+	db.emit(taken)
 
 	db.mu.Lock()
 	db.snapSeq = max(db.snapSeq, seq)
 	db.mu.Unlock()
 	return nil
+}
+
+// snapshotAt writes a snapshot of idx and st as of seq, prunes, and truncates
+// the log behind it.
+func (db *DB) snapshotAt(seq uint64, idx Index, st *store.Map) (SnapshotTaken, error) {
+	ser, ok := idx.(indexSerializer)
+	if !ok {
+		return SnapshotTaken{}, fmt.Errorf("govecdb: index of type %T cannot be snapshotted", idx)
+	}
+
+	dir := filepath.Join(db.dir, snapshotSubdir)
+	snap, err := snapshot.Create(dir, seq, func(w io.Writer) error {
+		return writeSnapshot(w, ser, st)
+	})
+	if err != nil {
+		return SnapshotTaken{}, fmt.Errorf("govecdb: snapshot: %w", err)
+	}
+
+	// Pruned only after the new one is durable, so the number of usable copies
+	// never dips below the retention on the way through.
+	pruned, err := snapshot.Prune(dir, db.opts.snapshotsKept)
+	if err != nil {
+		return SnapshotTaken{}, fmt.Errorf("govecdb: prune snapshots: %w", err)
+	}
+	removed, err := db.truncateLog(dir)
+	if err != nil {
+		return SnapshotTaken{}, err
+	}
+	return SnapshotTaken{Seq: seq, Bytes: snap.Bytes, Pruned: pruned, SegmentsRemoved: removed}, nil
 }
 
 // truncateLog deletes log segments that the retained snapshots make redundant.
@@ -476,30 +496,31 @@ func (db *DB) Snapshot() error {
 // problem, while deleting records only an unreadable snapshot could replace is a
 // data problem, and the two are not close enough to trade.
 //
-// There is nowhere to report the skip to yet, which is one of the things an
-// observability seam would be for.
-func (db *DB) truncateLog(snapDir string) error {
+// The skip is reported as a TruncationSkipped event instead. It reports how
+// many segments it removed.
+func (db *DB) truncateLog(snapDir string) (int, error) {
 	all, err := snapshot.List(snapDir)
 	if err != nil {
-		return fmt.Errorf("govecdb: list snapshots: %w", err)
+		return 0, fmt.Errorf("govecdb: list snapshots: %w", err)
 	}
 	if len(all) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	// List is newest first.
 	oldest := all[len(all)-1]
 	if err := snapshot.Verify(oldest); err != nil {
-		return nil
+		db.emit(TruncationSkipped{Path: oldest.Path, Seq: oldest.Seq, Cause: err})
+		return 0, nil
 	}
 
 	// Records at or below the snapshot's sequence are reconstructible from it;
 	// everything above has to stay.
-	_, err = wal.Truncate(filepath.Join(db.dir, walSubdir), oldest.Seq+1, wal.Options{})
+	removed, err := wal.Truncate(filepath.Join(db.dir, walSubdir), oldest.Seq+1, wal.Options{})
 	if err != nil {
-		return fmt.Errorf("govecdb: truncate log: %w", err)
+		return removed, fmt.Errorf("govecdb: truncate log: %w", err)
 	}
-	return nil
+	return removed, nil
 }
 
 // Compact rebuilds the index over its live vectors and reports how many slots
@@ -682,9 +703,15 @@ func (db *DB) lastSeqLocked() uint64 {
 
 // fail records the first durability failure and returns it wrapped in
 // ErrReadOnly, so a caller can match the category and still print the cause.
+//
+// The event fires here, under the write lock, which is the reason WithObserver
+// forbids calling back into the DB. Deferring it past the unlock would mean
+// threading a pending event through all four callers for an event that fires
+// at most once in a database's life.
 func (db *DB) fail(err error) error {
 	if db.failed == nil {
 		db.failed = fmt.Errorf("%w after a durability failure: %w", ErrReadOnly, err)
+		db.emit(DurabilityFailure{Cause: err})
 	}
 	return db.failed
 }
@@ -723,8 +750,9 @@ func (db *DB) snapshotLoop() {
 			// Errors are dropped rather than escalated. A failed snapshot costs
 			// a longer replay on the next start, which is a performance problem;
 			// turning it into a durability failure would take a working database
-			// read-only over one that is still entirely correct. A caller who
-			// needs to know calls Snapshot directly and gets the error.
+			// read-only over one that is still entirely correct. Snapshot
+			// reports the failure as a SnapshotFailed event, which is how an
+			// operator sees it.
 			_ = db.Snapshot()
 		}
 	}

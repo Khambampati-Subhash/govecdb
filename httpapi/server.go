@@ -48,6 +48,11 @@ type Config struct {
 
 	// Version is reported by /metrics and in the Server header. Cosmetic.
 	Version string
+
+	// Events, when set, adds govecdb_events_total to /metrics. It has to be
+	// the same Events the Manager was given as its Observer, or the counters
+	// count nothing; see Events for why the two are wired separately.
+	Events *Events
 }
 
 // Server is an http.Handler over a collection manager.
@@ -57,6 +62,7 @@ type Server struct {
 	maxBody int64
 	token   []byte
 	version string
+	events  *Events
 
 	handler http.Handler
 	started time.Time
@@ -80,6 +86,7 @@ func New(cfg Config) (*Server, error) {
 		maxBody: cfg.MaxBodyBytes,
 		token:   []byte(cfg.AuthToken),
 		version: cfg.Version,
+		events:  cfg.Events,
 		started: time.Now(),
 	}
 	if s.log == nil {

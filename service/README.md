@@ -88,6 +88,10 @@ with no borrowers is a candidate for eviction or for `Drop`.
   that holds two sets of collections at once — a rebuild loading replacements
   while the live ones still serve — where failing half way is worse than
   waiting. Request paths should keep calling `Use`.
+- `Observer` receives every collection's `govecdb.Event`s, tagged with the
+  collection's name — including the `Recovered` and any `TornLog` from a load on
+  demand, which is when a crash-damaged collection is first noticed. It is
+  per-process, not per-collection, so it is not in the spec.
 - `IdleTimeout` closes what nothing has touched. Reopening costs a snapshot load
   and a replay, so it wants to be long relative to how bursty the traffic is —
   minutes, not seconds.

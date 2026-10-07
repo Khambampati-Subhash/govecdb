@@ -45,6 +45,9 @@ type Tear struct {
 	Cause error
 }
 
+// File is the name of the torn segment within the log directory.
+func (t Tear) File() string { return segmentName(t.Segment) }
+
 func (t Tear) String() string {
 	return fmt.Sprintf("%s: %v at offset %d, %d bytes discarded",
 		segmentName(t.Segment), t.Cause, t.Offset, t.Discarded)

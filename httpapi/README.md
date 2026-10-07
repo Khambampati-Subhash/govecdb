@@ -33,6 +33,7 @@ build if one appears.
 | `filter.go` | The filter wire format. |
 | `json.go` | Decoding, and the rules for turning JSON into metadata. |
 | `metrics.go` | Prometheus text exposition. |
+| `events.go` | The database's events, logged at a severity and counted for `/metrics`. |
 | `errors.go` | One error shape, and the mapping onto status codes. |
 
 ## Routes
@@ -179,8 +180,11 @@ badly, and a hand-rolled one produces a number that looks like a quantile and is
 not. So there is a request count and a total duration, whose ratio is an honest
 mean.
 
-Percentile latency belongs to the observability seam in the library (v2 item 1),
-where it can be measured at the operation rather than at the socket.
+The library's observability seam (`govecdb.Event`) does not change that: it
+reports what a database does on its own — recoveries, snapshots, repairs,
+failures — and deliberately fires nothing per search, because the search path is
+held at one allocation. Those events are what `govecdb_events_total` counts;
+see `Events`, which also logs each at a severity this package chooses.
 
 Collection names are interpolated into labels without escaping, which is safe
 only because `service.ValidateName` allows nothing a label parser reacts to. That
