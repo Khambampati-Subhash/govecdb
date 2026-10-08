@@ -224,7 +224,7 @@ leaves the collection untouched. That is a guarantee about *validation*, not
 durability: a batch whose write fails may have made a prefix durable, which the
 next start replays; the collection is read-only by then. A successful batch is
 logged with **one** fsync under `sync_policy: always`, not one per vector — 100
-vectors cost 47 ms, where they cost 0.56–0.70 s before.
+vectors cost 9.3 ms, where they cost 0.48–0.51 s one at a time.
 
 Metadata values must be a string, a bool, or a number — no nested objects, no
 arrays, no `null`. A number written without a decimal point becomes an integer
@@ -307,7 +307,7 @@ squared for `euclidean`, a negated dot product for `dotproduct`. It is comparabl
 within one query and meaningless across metrics.
 
 **Leave `ef` out.** Recall at a fixed search width *falls* as a collection grows:
-0.997 at 500 vectors down to 0.652 at 20,000, both at `ef=64`. Any constant that
+1.000 at 500 vectors down to 0.622 at 20,000, both at `ef=64`. Any constant that
 works today is wrong later. Omitted, the width is fitted from the corpus size and
 `target_recall`.
 
@@ -427,8 +427,8 @@ and it is per collection:
 | `sync_policy` | An acknowledged write survives | Cost |
 |---|---|---|
 | `always` *(default)* | power loss | ~4 ms per append |
-| `interval` | neither a process crash nor power loss, up to one interval | ~692 ns per append |
-| `never` | neither, up to a 64 KiB buffer | ~692 ns per append |
+| `interval` | neither a process crash nor power loss, up to one interval | ~1 µs per append |
+| `never` | neither, up to a 64 KiB buffer | ~780 ns per append |
 
 The fast policies do **not** survive a process crash: records sit in a user-space
 buffer until it fills. Full numbers and what each guarantee costs are in
@@ -442,8 +442,8 @@ and restart.
 ### Snapshots are what bound restart time
 
 Without a snapshot, starting a collection replays its whole log and rebuilds the
-index — roughly 700 µs of CPU per vector, spread across cores. With one, it loads
-a graph: about 1,900× faster than a one-core rebuild for a million vectors, and
+index — roughly 500 µs of CPU per vector, spread across cores. With one, it loads
+a graph: about 1,400× faster than a one-core rebuild for a million vectors, and
 still over 100× faster than one on 16 cores.
 
 The daemon snapshots new collections every 10 minutes unless told otherwise

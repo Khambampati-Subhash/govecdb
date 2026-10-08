@@ -94,14 +94,14 @@ for a snapshot that turns out to be bad. It needs no idempotence and no undo.
 
 | 64 MiB snapshot | |
 |---|---|
-| Verify pass (checksum) | 10.5 ms |
-| Apply pass | + 3.7 ms |
-| **`Load` total** | **14.5 ms** |
-| Streaming once, checksum after | 10.5 ms |
+| Verify pass (checksum) | 10.2 ms |
+| Apply pass | + 3.9 ms |
+| **`Load` total** | **14.7 ms** |
+| Streaming once, checksum after | 10.2 ms |
 
-So the property costs about **+38%**, not the 2× an extra pass suggests: the
+So the property costs about **+44%**, not the 2× an extra pass suggests: the
 verify pass leaves the file in the page cache, so the apply pass runs at
-**18.2 GB/s** because it is reading memory. On a 1 GiB snapshot that is under
+**17.1 GB/s** because it is reading memory. On a 1 GiB snapshot that is about
 60 ms — bought against the alternative, rebuilding an index from the log, which
 is three orders of magnitude more. See [`docs/DURABILITY.md`](../../docs/DURABILITY.md).
 
@@ -152,14 +152,14 @@ Apple M4 Max:
 
 | | ns/op | throughput | allocs |
 |---|---|---|---|
-| `Create`, 1 MiB | 10,103,512 | 104 MB/s | 24 |
-| `Create`, 64 MiB | 34,205,718 | 1.96 GB/s | 24 |
-| `Load`, 1 MiB | 451,833 | 2.3 GB/s | 30 |
-| `Load`, 64 MiB | 14,521,713 | 4.6 GB/s | 30 |
-| verify only, 64 MiB | 10,453,687 | 6.4 GB/s | 10 |
-| apply only, 64 MiB | 3,690,253 | 18.2 GB/s | 6 |
+| `Create`, 1 MiB | 12,059,043 | 87 MB/s | 24 |
+| `Create`, 64 MiB | 39,156,444 | 1.71 GB/s | 24 |
+| `Load`, 1 MiB | 453,813 | 2.3 GB/s | 30 |
+| `Load`, 64 MiB | 14,685,751 | 4.6 GB/s | 30 |
+| verify only, 64 MiB | 10,190,775 | 6.6 GB/s | 10 |
+| apply only, 64 MiB | 3,934,235 | 17.1 GB/s | 6 |
 
-`Create` carries a **~10 ms floor** at any size — two fsyncs, one for the file and
+`Create` carries a **~12 ms floor** at any size — two fsyncs, one for the file and
 one for the directory. That is the cost of the atomicity guarantee, it does not
 shrink with the payload, and it is why snapshots are taken on a checkpoint
 interval measured in minutes rather than on a WAL fsync interval measured in

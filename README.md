@@ -52,9 +52,9 @@ release.
 - **`internal/` is not part of that promise**, and cannot be imported from
   outside the module. That is where the design still has room to move.
 - **The on-disk formats are versioned and frozen.** The WAL record header, the
-  snapshot framing, the graph codec and the metadata encoding each have a
-  `TestLayoutIsFrozen` guarding them, so a v1.x release will read a v1.0
-  directory.
+  snapshot framing and the graph codec each have a frozen-layout test guarding
+  them (`TestLayoutIsFrozen`, `TestCodecLayoutIsFrozen`), so a v1.x release will
+  read a v1.0 directory.
 
 ### Known limitations
 
@@ -178,12 +178,12 @@ as a corpus gets bigger, so any constant you pick today is wrong later.
 
 Durability is a knob and the zero value is the safe one: `SyncAlways` means an
 acknowledged write has survived power loss, at roughly 4 ms each.
-`WithSyncPolicy(govecdb.SyncInterval)` is about a thousand times faster and loses
-up to one interval to a crash. See [durability and latency](docs/DURABILITY.md).
+`WithSyncPolicy(govecdb.SyncInterval)` makes the append ~4,000× cheaper — 8.8× end
+to end, because indexing then dominates — and loses up to one interval to a crash. See [durability and latency](docs/DURABILITY.md).
 
 Nothing snapshots automatically. Call `db.Snapshot()`, or set
 `WithSnapshotInterval` — without one, a restart replays the whole log and rebuilds
-the index at ~700 µs of CPU per vector (spread across cores); with one, it loads
+the index at ~500 µs of CPU per vector (spread across cores); with one, it loads
 a graph at gigabytes per second.
 
 ## Or run it as a service
@@ -193,17 +193,17 @@ network hop is not. When the clients are not one Go program, `cmd/govecdbd`
 serves a directory of **collections** over HTTP:
 
 ```bash
-govecdbd -dir ./data                      # or: docker run -v data:/data govecdb
+govecdbd -dir ./data      # or: docker build -t govecdb . && docker run -p 8080:8080 -v data:/data govecdb
 ```
 
 ```bash
-curl -sX POST localhost:8080/v1/collections \
+curl -sX POST localhost:8080/v1/collections -H 'Content-Type: application/json' \
   -d '{"name": "docs", "dimension": 768, "metric": "cosine"}'
 
-curl -sX POST localhost:8080/v1/collections/docs/vectors \
+curl -sX POST localhost:8080/v1/collections/docs/vectors -H 'Content-Type: application/json' \
   -d '{"vectors": [{"id": "doc-1", "values": [...], "metadata": {"page": 3}}]}'
 
-curl -sX POST localhost:8080/v1/collections/docs/search \
+curl -sX POST localhost:8080/v1/collections/docs/search -H 'Content-Type: application/json' \
   -d '{"query": [...], "k": 10,
        "filter": {"op": "gte", "key": "page", "value": 2}}'
 ```
@@ -411,7 +411,7 @@ Three of these interact in a way worth stating plainly:
   reaches back far enough to replay on top of the older copy.
 - **`SyncAlways` is the zero value on purpose**, so a caller who configures
   nothing gets the safe answer rather than the fast one. It costs ~4 ms per write
-  against ~692 ns for `SyncNever`.
+  against ~780 ns for `SyncNever`.
 - **The fast policies do not survive a process crash either.** Records sit in a
   64 KiB user-space buffer, so under `SyncInterval` or `SyncNever` an
   acknowledged write may not have reached the kernel at all. See
@@ -427,7 +427,8 @@ govecdb/
 │   ├── wal/              write-ahead log: writer, replay, truncation
 │   ├── snapshot/         atomic checksummed state keyed by log sequence
 │   ├── store/            metadata storage
-│   └── filter/           the metadata query engine
+│   ├── filter/           the metadata query engine
+│   └── dirlock/          the directory flock: one writer per directory
 ├── service/              collections: many databases in one directory
 ├── httpapi/              the REST layer, net/http only
 ├── cmd/govecdbd/         the daemon
@@ -458,9 +459,12 @@ One responsibility per file:
 | `validate.go` | The input boundary: what is checked, and the limits. |
 | `codec.go` | Domain encoding: log payloads and the snapshot payload. |
 | `recovery.go` | Rebuilding state on `Open`: snapshot first, then the log. |
+| `enumerate.go` | `GetBatch`, `Scan` and `Range`: reading the stored vectors back. |
+| `calibrate.go` | Background calibration of the automatic search width. |
+| `events.go` | `WithObserver` and the typed events it delivers. |
 | `errors.go` | Sentinel errors to match with `errors.Is`. |
 
-Each `internal/` package has its own README explaining the decisions behind it —
+Each `internal/` package but the small `dirlock` has its own README explaining the decisions behind it —
 [`hnsw`](internal/hnsw/README.md), [`wal`](internal/wal/README.md),
 [`snapshot`](internal/snapshot/README.md), [`store`](internal/store/README.md),
 [`filter`](internal/filter/README.md) — and so do the two service packages,
@@ -472,16 +476,21 @@ Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
 
 | Metric | Value |
 |---|---|
-| Search | 73,840 ns/op |
+| Search | 84,700 ns/op |
 | Search allocations | **1 alloc/op**, 240 B/op |
-| Cosine distance (normalized) | 18.9 ns, 0 allocs |
-| Euclidean distance | 21.7 ns, 0 allocs |
-| Insert | 479 µs, 6 allocs |
-| `AddBatch`, 100 vectors, `SyncAlways` | 47 ms — one fsync, not 100 |
-| Build 20,000 × 512, batches of 1,000 | 43 s on one core → **3.7 s** on 16 |
-| Reopen 20,000 × 512, no snapshot | 42.2 s → **3.7 s** on 16 |
+| Cosine distance (normalized) | 19.2 ns, 0 allocs |
+| Euclidean distance | 21.8 ns, 0 allocs |
+| Insert | 506 µs, 6 allocs |
+| `AddBatch`, 100 vectors, `SyncAlways` | 9.3 ms — one fsync, not 100, linked on every core |
+| Build 20,000 × 512, batches of 1,000 | 41 s on one core → **3.7 s** on 16 |
+| Reopen 20,000 × 512, no snapshot | 41.7 s → **3.8 s** on 16 |
 | Recall@10 (dim 32) | **0.999** |
 | Recall@10 (dim 768) | **0.988** |
+
+Search and insert are medians of five runs. Search is ~8% slower than the
+73.8 µs measured under `Alpha` 1.2, because 1.0 does more work per query at the
+same `ef` — and finds more for it (recall at `ef=64` rose from 0.787 to 0.808).
+Measured on one fixture, both ways.
 
 Recall is measured against brute-force ground truth in `graph_test.go`, not estimated.
 A parallel build's recall matches a serial one's within measurement noise, and
@@ -504,8 +513,8 @@ Apple M4 Max · 5,000 vectors · k=10 · recall against brute-force ground truth
 ![Recall and latency against ef](docs/benchmarks/recall-vs-ef.svg)
 
 `ef` is the search width, the one parameter you can change per query. At 5,000
-vectors of 128 dimensions it spans **0.310 recall at 27 µs** to **0.999 at
-438 µs**. The suite asserts the shape as well as the numbers: a wider search may
+vectors of 128 dimensions it spans **0.325 recall at 18 µs** to **1.000 at
+334 µs**. The suite asserts the shape as well as the numbers: a wider search may
 cost more, but it must never find *less*.
 
 ### Recall at a fixed `ef` falls as the corpus grows
@@ -513,12 +522,12 @@ cost more, but it must never find *less*.
 ![Search latency against corpus size](docs/benchmarks/latency-vs-corpus-size.svg)
 
 This is the most practically useful thing in this README. Hold `ef` at 64 and
-recall slides from 0.997 at 500 vectors to **0.652 at 20,000** — not because the
+recall slides from 1.000 at 500 vectors to **0.622 at 20,000** — not because the
 index degrades, but because a fixed-width beam covers a shrinking share of a
 growing space. **`ef` has to grow with `N`.** That it is a `Search` argument
 rather than a build-time constant is the whole point.
 
-Latency, meanwhile, grows **3.2× for a 40× corpus** — the sub-linear behaviour
+Latency, meanwhile, grows **2.8× for a 40× corpus** — the sub-linear behaviour
 the index exists for. (Even that overstates it: past ~4 MB of vectors the
 distance kernels start paying for memory rather than arithmetic, so the measured
 curve is nearer `sqrt(N)` than the `log(N)` the algorithm implies.)
@@ -527,17 +536,17 @@ curve is nearer `sqrt(N)` than the `log(N)` the algorithm implies.)
 
 ![Recall and latency across dimensions](docs/benchmarks/recall-vs-dimension.svg)
 
-At `ef=64`, recall runs from 1.000 at 8 dimensions to **0.558 at 1536** while a
-query goes from 17 µs to 1,090 µs. High-dimensional embeddings need a wider `ef`,
-and the build cost rises with them: the same corpus takes 0.65 s to index at 8
-dimensions and 56 s at 1536.
+At `ef=64`, recall runs from 1.000 at 8 dimensions to **0.557 at 1536** while a
+query goes from 17 µs to 653 µs. High-dimensional embeddings need a wider `ef`,
+and the build cost rises with them: the same corpus takes 0.46 s to index at 8
+dimensions and 27 s at 1536.
 
 ### `M` is structural — read this chart before you build
 
 ![Recall and build time against M](docs/benchmarks/recall-vs-m.svg)
 
 `M` cannot be changed without rebuilding, and it buys recall at a steep build
-price: **M=4 gives 0.294 recall for a 0.6 s build; M=48 gives 0.994 for 73 s.**
+price: **M=4 gives 0.314 recall for a 0.5 s build; M=48 gives 0.994 for 16 s.**
 The default of 16 sits where the curve turns.
 
 ### Choosing `M` and `ef` together
@@ -545,7 +554,7 @@ The default of 16 sits where the curve turns.
 ![Recall against latency for every M and ef](docs/benchmarks/recall-vs-latency-pareto.svg)
 
 The two charts above each vary one knob with the other at its default, which
-shows a slope but cannot answer *"which pair?"* — "M=16 gives 0.823" really means
+shows a slope but cannot answer *"which pair?"* — "M=16 gives 0.821" really means
 "M=16 *at a narrow ef*". This is the surface: one line per `M`, one point per
 `ef`, ringed where nothing beats that point on both axes at once.
 
@@ -554,11 +563,11 @@ suggests:
 
 | Target | via `ef` (M=16) | via `M` (ef=64/128) | Build cost |
 |---|---|---|---|
-| ~0.96 | ef=128 → 0.964, **180 µs** | M=32/ef=64 → 0.968, **162 µs** | 3.8 s → 23 s |
-| ~0.997 | ef=256 → 0.998, **282 µs** | M=32/ef=128 → 0.997, **251 µs** | 3.8 s → 23 s |
+| ~0.97 | ef=128 → 0.973, **142 µs** | M=32/ef=64 → 0.975, **119 µs** | 2.4 s → 7.6 s |
+| ~0.999 | ef=256 → 1.000, **232 µs** | M=32/ef=128 → 0.999, **183 µs** | 2.4 s → 7.6 s |
 
-**About 10% latency, for 6× the build time and roughly double the graph memory.**
-That is a much weaker case for raising `M` than comparing the two 1-D charts
+**About 15–20% latency, for 3× the build time and roughly double the graph memory.**
+That is a weaker case for raising `M` than comparing the two 1-D charts
 implies — which is exactly why the 2-D grid is the one to read. `M=16` is a good
 default; reach for `M=24`–`32` only when query latency is the binding constraint
 and you can afford the build.
@@ -572,8 +581,8 @@ Holding a recall target needs a wider search as the corpus grows — measured,
 the guidance lives where it is used:
 
 ```go
-ef := g.SuggestedEf(10 /*k*/, 0.95 /*target recall*/)
-results, _ := g.Search(query, 10, ef)
+// Ef left at zero: the width is chosen to clear TargetRecall (default 0.95).
+matches, _ := db.Search(govecdb.SearchRequest{Query: query, K: 10, TargetRecall: 0.95})
 ```
 
 `targetRecall` is a **floor to clear, not a point to hit** — the calibration
@@ -614,14 +623,14 @@ factor; `WithEfCalibration(false)` turns it off for reproducible widths, and
 
 ![Latency with tombstones and after compaction](docs/benchmarks/tombstones-vs-compaction.svg)
 
-Dead slots ride the search frontier, so latency climbs with them — 104 µs clean,
-**243 µs at 75% tombstoned**, back to **69 µs** after `Compact()`.
+Dead slots ride the search frontier, so latency climbs with them — 78 µs clean,
+**183 µs at 75% tombstoned**, back to **50 µs** after `Compact()`.
 
 There is a subtlety worth knowing, because it looks like a regression and isn't:
-compaction *slightly lowers* recall (0.968 → 0.949 at 50% dead). Tombstones keep
+compaction *slightly lowers* recall (0.978 → 0.955 at 50% dead). Tombstones keep
 the result set under-filled, which loosens the pruning bound and makes the search
 explore wider than `ef` asked for. That bought recall nobody requested at a
-latency nobody wanted — 184 µs against 88 µs. A marginally larger `ef` on the
+latency nobody wanted — 127 µs against 71 µs. A marginally larger `ef` on the
 compacted graph recovers the recall and is still twice as fast.
 
 ### Filtering costs search width, not allocations
@@ -637,7 +646,7 @@ What it costs is travel. 10,000 × 128, `k=10`, `ef=64`:
 
 | Admitted | none (unfiltered) | 1 in 2 | 1 in 10 | 1 in 50 |
 |---|---|---|---|---|
-| Latency | 60 µs | 115 µs | 271 µs | 769 µs |
+| Latency | 66 µs | 131 µs | 346 µs | 812 µs |
 | Allocs | **1** | **1** | **1** | **1** |
 
 This is the same curve tombstones produce and the same mechanism: with fewer
@@ -656,14 +665,29 @@ visiting most of the graph anyway.
 
 | Metric | recall @ ef=64 | @ ef=256 | | Corpus | recall | latency |
 |---|---|---|---|---|---|---|
-| Cosine | 0.830 | 0.998 | | centered | 0.852 | 120 µs |
-| Euclidean | 0.820 | 0.980 | | positive orthant | 0.865 | 90 µs |
-| DotProduct | 0.848 | 0.999 | | clustered | 0.884 | 38 µs |
+| Cosine | 0.831 | 0.997 | | centered | 0.845 | 77 µs |
+| Euclidean | 0.900 | 0.998 | | positive orthant | 0.891 | 77 µs |
+| DotProduct | 0.854 | 0.997 | | clustered | 0.896 | 25 µs |
 
 All three metrics behave alike — no metric is weak here, and a wide search
 recovers every one of them, which is what rules out the graph rather than the
 data being at fault. Clustered data, which is what real embeddings look like, is
 **3× faster** to search than uniform noise.
+
+![Recall by metric](docs/benchmarks/recall-by-metric.svg)
+
+![Recall by corpus distribution](docs/benchmarks/recall-by-distribution.svg)
+
+### Why `Alpha` defaults to 1.0, not DiskANN's 1.2
+
+![Recall at alpha 1.0 and 1.2 on clustered data](docs/benchmarks/alpha-on-clustered-data.svg)
+
+`Alpha` is the neighbour-diversity factor. A larger one keeps more near
+candidates, and since they arrive nearest-first they take the slots that the
+long edges between clusters needed. On 40,000 × 256 vectors in 1,024 clusters
+at `ef=16`, alpha 1.0 reaches **0.989** recall against 1.2's **0.938**, and it
+builds in **less than half the time** (16.7 s against 39.3 s). On uniform data
+the two need the same `ef`. `TestSweepClusteredAlpha` guards this.
 
 ## Roadmap
 
@@ -675,8 +699,8 @@ data being at fault. Clustered data, which is what real embeddings look like, is
 6. ~~**WAL**~~ — done; record format, append-only writer with segment rotation, and
    `Replay` — a CRC-validating scan that truncates torn tails
 7. ~~**Snapshots**~~ — done; atomic checksummed store keyed by WAL sequence, plus
-   a graph codec so recovery loads an index (~0.37 s/1M vectors) instead of
-   rebuilding one (~703 s)
+   a graph codec so recovery loads an index (~0.36 s/1M vectors) instead of
+   rebuilding one (~506 s)
 8. ~~**Public API**~~ — done; `Open` / `Add` / `Get` / `Search` / `Snapshot` /
    `Compact`, with restore-on-open and snapshot scheduling
 9. ~~**WAL truncation**~~ — done; segments a snapshot has made redundant are
@@ -729,7 +753,7 @@ go test ./cmd/... -v             # the daemon, over a real socket
 Benchmarks, including the filter-selectivity and durability numbers quoted above:
 
 ```bash
-go test ./internal/hnsw/ -run='^$' -bench=. -benchmem
+go test . ./internal/hnsw/ ./internal/wal/ ./internal/snapshot/ -run='^$' -bench=. -benchmem
 ```
 
 Regenerating the charts. The sweeps *are* the benchmark harness — the same code

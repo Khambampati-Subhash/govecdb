@@ -163,7 +163,7 @@ has to travel to fill `k`. 10,000 × 128, `k=10`, `ef=64`:
 
 | Admitted | none (unfiltered) | 1 in 2 | 1 in 10 | 1 in 50 |
 |---|---|---|---|---|
-| Latency | 60 µs | 115 µs | 271 µs | 769 µs |
+| Latency | 66 µs | 131 µs | 346 µs | 812 µs |
 | Allocs | 1 | 1 | 1 | 1 |
 
 The allocation count does not move, which is the property worth defending:

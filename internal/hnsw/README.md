@@ -255,10 +255,10 @@ the curve a compaction threshold should be set against:
 
 | Tombstones | Search | vs. clean |
 |---|---|---|
-| 0% | 72.6 µs | — |
-| 25% | 90.3 µs | 1.2× |
-| 50% | 121 µs | 1.7× |
-| 75% | 191 µs | 2.6× |
+| 0% | 82.6 µs | — |
+| 25% | 101 µs | 1.2× |
+| 50% | 139 µs | 1.7× |
+| 75% | 225 µs | 2.7× |
 
 Allocations stay at 1/op throughout — tombstones cost time, not memory churn.
 Recall does not degrade: with half the graph deleted, recall@10 against brute
@@ -268,9 +268,9 @@ force over the survivors is 1.000.
 
 | Operation | Cost | |
 |---|---|---|
-| `Insert`, new id | 479 µs, 6 allocs | — |
-| `Insert`, replacing an id | 520 µs, 5 allocs | insert + tombstone, +9% |
-| `Insert`, vector unchanged | **279 ns**, 2 allocs | the WAL-replay path |
+| `Insert`, new id | 506 µs, 6 allocs | — |
+| `Insert`, replacing an id | 514 µs, 5 allocs | insert + tombstone, +2% |
+| `Insert`, vector unchanged | **309 ns**, 2 allocs | the WAL-replay path |
 
 Recall@10 after replacing half the graph is 0.999 — updates are held to the same
 bar as inserts.
@@ -354,7 +354,7 @@ argument for having them:
   together suggested M=32 was roughly twice as fast as M=16 at matched recall.
   It is not — those two charts each hold the *other* knob at its default, so the
   points being compared sat at different recall levels. The 2-D grid puts the
-  real figure at **~10% latency for 6× the build time**, which turns "raise M"
+  real figure at **~15–20% latency for 3× the build time**, which turns "raise M"
   from advice into a narrow special case.
 
 ## Usage
@@ -396,18 +396,18 @@ g, err := hnsw.Read(r)   // the counterpart to New
 
 | | Latency | Throughput | Allocs |
 |---|---|---|---|
-| `WriteTo`, 10k × 128 | 1.36 ms | 4.9 GB/s | **5** |
-| `Read`, 10k × 128 | 2.69 ms | 2.46 GB/s | 50,676 |
+| `WriteTo`, 10k × 128 | 1.22 ms | 5.4 GB/s | **5** |
+| `Read`, 10k × 128 | 2.59 ms | 2.55 GB/s | 50,676 |
 
 `WriteTo` allocates a **constant** five times whatever the graph's size — the
 scratch buffers are reused, so a million vectors costs the same five allocations
 as ten. `Read`'s ~5 per node *are* the graph: the node, its vector, its
 neighbour slices, its id.
 
-**Why the graph and not just the vectors.** Replay reads a log at 368 ns/record
-but *applying* a record costs 703 µs, so the rebuild is essentially all of
-recovery. At 662 bytes per vector, 1M × 128 is ~0.37 s to verify and decode
-against ~703 s to rebuild — about **1,900×**. See
+**Why the graph and not just the vectors.** Replay reads a log at 390 ns/record
+but *applying* a record costs 506 µs, so the rebuild is essentially all of
+recovery. At 662 bytes per vector, 1M × 128 is ~0.36 s to verify and decode
+against ~506 s to rebuild — about **1,400×**. See
 [`docs/DURABILITY.md`](../../docs/DURABILITY.md).
 
 The price is that this freezes the graph's internal representation on disk:

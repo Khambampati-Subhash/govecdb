@@ -39,19 +39,19 @@ Durability is a knob, and this is what each setting actually promises.
 
 | Policy | Per append | Throughput | A crashed **process** loses | **Power loss** loses |
 |---|---|---|---|---|
-| `SyncAlways` *(default)* | **4.04 ms** | 248 writes/s | nothing | nothing |
-| `SyncInterval` | 897 ns | ~1.1M writes/s | ≤ one interval (50 ms) | ≤ one interval (50 ms) |
-| `SyncNever` | 692 ns | ~1.4M writes/s | ≤ 64 KiB | everything not yet written back |
+| `SyncAlways` *(default)* | **4.24 ms** | 236 writes/s | nothing | nothing |
+| `SyncInterval` | 1.04 µs | ~960K writes/s | ≤ one interval (50 ms) | ≤ one interval (50 ms) |
+| `SyncNever` | 780 ns | ~1.3M writes/s | ≤ 64 KiB | everything not yet written back |
 
-**Durability costs about 5,800×.** That gap is why this is a knob and not a
+**Durability costs about 5,400×.** That gap is why this is a knob and not a
 constant — and why the zero value is `SyncAlways`: a caller who configures
 nothing gets the safe answer, not the fast one.
 
 **A batch pays the fsync once.** `AddBatch` — and so every REST upsert — logs
 the whole batch through `wal.Writer.AppendBatch` and syncs after the last record,
 so `SyncAlways` costs one fsync per *call*, not per vector: 100 records in
-4.5 ms at the WAL, 100 vectors in 47 ms end to end (0.56–0.70 s when it synced
-each one). The guarantee is unchanged — nothing is acknowledged before it is
+4.6 ms at the WAL, 100 vectors in 9.3 ms end to end — the batch is also linked
+on every core (0.48–0.51 s when it synced each one). The guarantee is unchanged — nothing is acknowledged before it is
 durable — and so is failure: a batch whose write fails leaves the database
 read-only, with any prefix that reached the disk replayed on the next start.
 
@@ -112,30 +112,34 @@ End to end, one vector (dim 128, `M=16`, `EfConstruction=200`, ~2 KB WAL record)
 
 | Stage | Cost | Notes |
 |---|---|---|
-| WAL append, `SyncAlways` | 4.04 ms | 0 allocs; the fsync dominates everything |
-| WAL append, `SyncInterval` | 897 ns | 0 allocs |
-| WAL append, `SyncNever` | 692 ns | 0 allocs |
-| WAL batch of 100, `SyncAlways` | 4.5 ms | 0 allocs; one fsync for the batch, ~45 µs/record |
-| WAL append, small (12 B) | 19.0 ns | Per-record framing cost with the payload removed |
-| HNSW insert | **703 µs** | 50.9 KB, 208 allocs |
-| HNSW upsert (replace an id) | 798 µs | A tombstone plus a full insert |
-| HNSW upsert, unchanged vector | **311 ns** | The replay path — an early return, not an insert |
-| Segment rotation, amortized | 0.27 µs | 8.65 ms once per 64 MiB ≈ 32,000 records |
+| WAL append, `SyncAlways` | 4.24 ms | 0 allocs; the fsync dominates everything |
+| WAL append, `SyncInterval` | 1.04 µs | 0 allocs |
+| WAL append, `SyncNever` | 780 ns | 0 allocs |
+| WAL batch of 100, `SyncAlways` | 4.6 ms | 0 allocs; one fsync for the batch, ~46 µs/record |
+| WAL append, small (12 B) | 20.0 ns | Per-record framing cost with the payload removed |
+| HNSW insert | **506 µs** | 1.1 KB, 6 allocs |
+| HNSW upsert (replace an id) | 514 µs | A tombstone plus a full insert |
+| HNSW upsert, unchanged vector | **309 ns** | The replay path — an early return, not an insert |
+| Segment rotation, amortized | 0.29 µs | 9.2 ms once per 64 MiB ≈ 32,000 records |
 
 **Which half is the bottleneck depends entirely on the policy:**
 
 | Policy | WAL | Index | Total | Rate | Bound by |
 |---|---|---|---|---|---|
-| `SyncAlways` | 4.04 ms | 0.70 ms | **4.74 ms** | ~211 writes/s | the **disk** (85%) |
-| `SyncInterval` | 0.90 µs | 0.70 ms | **0.70 ms** | ~1,420 writes/s | the **index** (99.9%) |
-| `SyncNever` | 0.69 µs | 0.70 ms | **0.70 ms** | ~1,420 writes/s | the **index** (99.9%) |
+| `SyncAlways` | 4.24 ms | 0.54 ms | **4.79 ms** | ~209 writes/s | the **disk** (89%) |
+| `SyncInterval` | 1.04 µs | 0.54 ms | **0.54 ms** | ~1,840 writes/s | the **index** (99.8%) |
+| `SyncNever` | 0.78 µs | 0.54 ms | **0.54 ms** | ~1,840 writes/s | the **index** (99.9%) |
 
-So: turning off durability buys **6.7×** on the write path, not the 5,800× the
+The totals are `BenchmarkWritePath`'s 100 single `Add`s divided by 100 — the
+whole stack, log, index and metadata; the index column is what is left after the
+log.
+
+So: turning off durability buys **8.8×** on the write path, not the 5,400× the
 append benchmark alone suggests — because once the fsync is gone, building the
 graph is all that is left. Anyone tempted by `SyncNever` for write throughput
 should know they are trading all durability for less than an order of magnitude.
 
-That `311 ns` row matters more than it looks. Re-inserting an unchanged vector is
+That `309 ns` row matters more than it looks. Re-inserting an unchanged vector is
 the WAL-replay path, and it costs one comparison rather than one insert — which
 is what stops recovery across a snapshot boundary from paying full price for
 changing nothing.
@@ -149,34 +153,34 @@ Reads are served from memory and are **unaffected by the sync policy**. Corpus o
 
 | | Latency | Allocs |
 |---|---|---|
-| `Search`, single-threaded | **105 µs** | **2** |
-| `Search`, 16 threads | 7.9 µs/op wall | 2 |
+| `Search`, single-threaded | **84.7 µs** | **1** |
+| `Search`, 16 threads | 6.8 µs/op wall | 1 |
 
-Parallel search scales ~13× on 16 threads: `Search` holds only a read lock, and
+Parallel search scales ~12.5× on 16 threads: `Search` holds only a read lock, and
 per-traversal scratch comes from a pool, so readers genuinely run concurrently.
-That is ~126,000 queries/s.
+That is ~147,000 queries/s.
 
 **By dimension** (n=2,000) — every hop computes a distance, so dimension
 multiplies the whole traversal rather than just the final comparison:
 
 | Dimension | 32 | 128 | 384 | 768 | 1536 |
 |---|---|---|---|---|---|
-| Latency | 34 µs | 68 µs | 147 µs | 298 µs | 589 µs |
+| Latency | 29 µs | 56 µs | 109 µs | 192 µs | 376 µs |
 
 **By corpus size** (dim 128) — sublinear, which is the entire point of HNSW:
 
 | Vectors | 1,000 | 5,000 | 20,000 |
 |---|---|---|---|
-| Latency | 52 µs | 90 µs | 117 µs |
+| Latency | 42 µs | 71 µs | 88 µs |
 
-20× the data costs 2.3× the time. Note that recall at a *fixed* `ef` falls as
+20× the data costs 2.1× the time. Note that recall at a *fixed* `ef` falls as
 `n` grows — use `SuggestedEf` rather than a hardcoded number.
 
 **By tombstone load** — deleted vectors keep their edges and are still traversed:
 
 | Dead slots | 0% | 25% | 50% | 75% |
 |---|---|---|---|---|
-| Latency | 104 µs | 128 µs | 169 µs | 270 µs |
+| Latency | 83 µs | 101 µs | 139 µs | 225 µs |
 
 **By filter selectivity** (`BenchmarkSearchFilter`, 10,000 × 128, `k=10`,
 `ef=64`) — a metadata filter is applied *during* the traversal, so a search that
@@ -184,7 +188,7 @@ can only accept one vector in fifty has to travel further to find ten of them:
 
 | Admitted | none (unfiltered) | 1 in 2 | 1 in 10 | 1 in 50 |
 |---|---|---|---|---|
-| Latency | 60 µs | 115 µs | 271 µs | 769 µs |
+| Latency | 66 µs | 131 µs | 346 µs | 812 µs |
 | Allocs | 1 | 1 | 1 | 1 |
 
 This is the same curve tombstones produce and for the same reason: a node the
@@ -210,23 +214,23 @@ visiting most of the graph anyway.
 
 | | Latency | Throughput | Allocs |
 |---|---|---|---|
-| `Create`, 1 MiB | 10.1 ms | 104 MB/s | 24 |
-| `Create`, 64 MiB | 34.2 ms | 1.96 GB/s | 24 |
-| `Load`, 1 MiB | 452 µs | 2.3 GB/s | 30 |
-| `Load`, 64 MiB | 14.5 ms | 4.6 GB/s | 30 |
-| — verify pass | 10.5 ms | 6.4 GB/s | 10 |
-| — apply pass | 3.7 ms | 18.2 GB/s | 6 |
+| `Create`, 1 MiB | 12.1 ms | 87 MB/s | 24 |
+| `Create`, 64 MiB | 39.2 ms | 1.71 GB/s | 24 |
+| `Load`, 1 MiB | 454 µs | 2.3 GB/s | 30 |
+| `Load`, 64 MiB | 14.7 ms | 4.6 GB/s | 30 |
+| — verify pass | 10.2 ms | 6.6 GB/s | 10 |
+| — apply pass | 3.9 ms | 17.1 GB/s | 6 |
 
-`Create` carries a **~10 ms floor at any size** — two fsyncs, one for the file
+`Create` carries a **~12 ms floor at any size** — two fsyncs, one for the file
 and one for the directory that names it. It does not shrink with the payload,
 which is why snapshots ride a checkpoint interval measured in **minutes**, not
 the WAL's fsync interval measured in milliseconds.
 
 `Load` reads the file twice on purpose: hash it end to end, *then* hand it to the
 caller. Applying unverified bytes is how corruption on disk becomes corruption in
-memory, and a caller cannot un-ingest half a bad snapshot. The cost is **+38%**
+memory, and a caller cannot un-ingest half a bad snapshot. The cost is **+44%**
 over streaming once, not the 2× an extra pass suggests, because the verify pass
-leaves the file in the page cache and the apply pass then runs at 18.2 GB/s.
+leaves the file in the page cache and the apply pass then runs at 17.1 GB/s.
 
 Two clocks, often confused:
 
@@ -246,10 +250,10 @@ cost:
 
 | Stage | Per record | 1M records |
 |---|---|---|
-| Reading the log (`wal.Replay`) | 368 ns (5.7 GB/s, **0 allocs/record**) | 0.37 s |
-| Applying it (`hnsw.Insert`), one core | 703 µs | **703 s** (11.7 min) |
+| Reading the log (`wal.Replay`) | 390 ns (5.4 GB/s, **0 allocs/record**) | 0.39 s |
+| Applying it (`hnsw.Insert`), one core | 506 µs | **506 s** (8.4 min) |
 
-**Reading the log is 0.05% of recovery.** Rebuilding the index is everything.
+**Reading the log is 0.08% of recovery.** Rebuilding the index is everything.
 
 **Replay now applies runs of PUTs as a parallel batch** (`InsertBatch`, flushed at
 every DELETE so log order holds). The per-vector CPU is unchanged; it is spread
@@ -258,12 +262,12 @@ over `WithInsertWorkers` cores, GOMAXPROCS by default. Measured end to end throu
 
 | Replay | Wall clock |
 |---|---|
-| `WithInsertWorkers(1)` — the old behaviour | 42.2 s |
-| default, 16 cores | **3.7 s** (11.3×) |
+| `WithInsertWorkers(1)` — the old behaviour | 41.7 s |
+| default, 16 cores | **3.8 s** (11.0×) |
 
 That narrows the gap below but does not close it. If the 11× measured at
 dimension 512 carries over to 128 — not measured; less arithmetic per lock may
-parallelize worse — a million × 128 rebuilds in about a minute against 0.37 s to
+parallelize worse — a million × 128 rebuilds in under a minute against 0.36 s to
 load a graph, and a snapshot is still worth over 100×. Nothing in the argument
 that follows changes.
 
@@ -274,10 +278,10 @@ dim 128 at `M=16` encodes to **662 bytes per vector**, so 1M vectors is ~662 MB:
 
 | Snapshot holds | 1M × 128 recovery | Cost |
 |---|---|---|
-| Live vectors | Rebuild every vector at 703 µs | **~703 s** on one core; about a minute on 16, extrapolated |
-| The graph itself | verify 662 MB at 6.4 GB/s, decode at 2.46 GB/s | **~0.37 s** |
+| Live vectors | Rebuild every vector at 506 µs | **~506 s** on one core; under a minute on 16, extrapolated |
+| The graph itself | verify 662 MB at 6.6 GB/s, decode at 2.55 GB/s | **~0.36 s** |
 
-About **1,900×** — three orders of magnitude. A vectors-only snapshot would bound
+About **1,400×** — three orders of magnitude. A vectors-only snapshot would bound
 log *size* while leaving recovery *time* essentially unimproved, which is half a
 snapshot. The price of the choice is that the codec freezes HNSW's internal
 representation on disk, the way `TestLayoutIsFrozen` freezes the WAL's.
@@ -286,8 +290,8 @@ representation on disk, the way `TestLayoutIsFrozen` freezes the WAL's.
 
 | | Latency | Throughput | Allocs |
 |---|---|---|---|
-| `WriteTo`, 10k × 128 | 1.36 ms | 4.9 GB/s | **5** |
-| `Read`, 10k × 128 | 2.69 ms | 2.46 GB/s | 50,676 |
+| `WriteTo`, 10k × 128 | 1.22 ms | 5.4 GB/s | **5** |
+| `Read`, 10k × 128 | 2.59 ms | 2.55 GB/s | 50,676 |
 
 `WriteTo` allocates a **constant** five times regardless of graph size — the
 fixed-field scratch and the payload buffers are reused, so a snapshot of a
@@ -296,7 +300,7 @@ million vectors allocates the same five times as one of ten. `Read` allocates
 neighbour slices, its id.
 
 Reading is slower than writing because it builds a data structure rather than
-copying bytes. It is still ~2,600× faster than rebuilding the index from the
+copying bytes. It is still ~2,000× faster than rebuilding the index from the
 same vectors.
 
 For reference, `Compact()` is the same rebuild operation and confirms the shape —

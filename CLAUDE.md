@@ -55,7 +55,7 @@ change, if it needs one, is far cheaper before v2 ships than after.
 | the index | `internal/hnsw/README.md` — also the reference for code style |
 
 ### The layout
-The root package is the public API — `db.go`, `vector.go`, `filter.go`,
+The root package is the public API — `doc.go`, `db.go`, `vector.go`, `filter.go`,
 `options.go`, `validate.go`, `index.go`, `codec.go`, `recovery.go`,
 `enumerate.go`, `calibrate.go`, `events.go`, `errors.go` — one responsibility per
 file. Under it, `internal/hnsw` (the index), `internal/wal` (the log),
@@ -142,7 +142,7 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 ### Git
 - **Commit and push to `main` directly.** No feature branch, no PR — the repo
   owner asked for this explicitly (2026-08-28), superseding the earlier
-  `v1-restructure` rule. That branch still exists and is level with `main`.
+  `v1-restructure` rule. That branch still exists but is stale — do not use it.
 - **Commit messages must NOT include a `Co-Authored-By` trailer** (repo owner
   preference). Conventional prefixes — `feat(scope):`, `fix:`, `perf(hnsw):`,
   `docs:`, `release: vX.Y.Z` — subject says what changed, body says why.
@@ -173,7 +173,7 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   shows at the 40K grid behind `-results`.
 - `ef` is the **query-time** knob in `Search(query, k, ef)`; must be `>= k`, bigger
   = higher recall + slower. **Recall at a fixed `ef` falls as `N` or dimension
-  grows** — 0.997 at 500 vectors down to 0.652 at 20,000, all at `ef=64`. That is
+  grows** — 1.000 at 500 vectors down to 0.622 at 20,000, all at `ef=64`. That is
   not degradation, it is a fixed-width beam covering less of a bigger space, and
   it means `ef=64` is a starting point rather than a default that holds. Measured
   in `docs/benchmarks/`. Use `SuggestedEf(n, k, target)` / `g.SuggestedEf(k, target)`
@@ -202,8 +202,8 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   search ten times wider than needed. The guard covers k ∈ {10, 100} and
   M ∈ {16, 32}; do not drop those cells.
 - **Raising `M` is worth less than the M-vs-recall chart implies.** Compared at
-  *equal recall* on the M×ef grid, M=32 beats M=16 by only ~10% latency (162µs vs
-  180µs at ~0.96) for 6x the build time and ~2x the graph memory. M=16 is the right
+  *equal recall* on the M×ef grid, M=32 beats M=16 by only ~15–20% latency (119µs vs
+  142µs at ~0.97) for 3x the build time and ~2x the graph memory. M=16 is the right
   default; the two 1-D charts overstate the case because they compare points at
   different recall levels.
 - Empty graph = empty container: no graph memory until the first insert.
@@ -227,7 +227,7 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   pins workers=1 to the serial graph. The serial path (`insertPrepared` →
   `place` + `link`) is bit-identical to before. Parallel builds are not
   deterministic: `WithInsertWorkers(1)` with `WithSeed` for reproducibility.
-  11.5× at 16 workers, 20K × 512.
+  11× at 16 workers, 20K × 512 (41 s → 3.7 s).
 - Insert **copies** the caller's vector (and normalizes it for Cosine), so the graph
   never aliases a reused caller buffer.
 - `Insert` is an **upsert** — there is no `Update`. A second Insert under a live id
@@ -290,7 +290,7 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - **Failure is sticky.** The first write error ends the Writer; every later call
   returns it. Appending over a hole is how a durability bug becomes data loss.
 - Sync policy zero value is **`SyncAlways`** — safe by omission. It costs
-  **4.04 ms/append vs 692 ns** for never: ~5,800×. Append is 0 allocs.
+  **4.24 ms/append vs 780 ns** for never: ~5,400×. Append is 0 allocs.
 - **The fast policies do not survive a process crash either.** Records sit in a
   64 KiB *user-space* bufio buffer, so under `SyncInterval`/`SyncNever` an
   acknowledged write may not have reached the kernel at all. Do not restore the
@@ -300,7 +300,7 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   durable and says nothing about the directory entry naming it, so without this a
   crash can take a freshly created segment away along with `SyncAlways` writes
   already inside it. Do not remove it to make rotation faster: it is why rotation
-  is 8.6 ms rather than 4.8, which amortizes to **0.27 µs/record** at 64 MiB
+  is ~9 ms rather than ~5, which amortizes to **0.29 µs/record** at 64 MiB
   segments — below even `SyncNever`'s per-append cost.
 - **Recovery is `Replay(dir, opts, fn)`, a function — not a method on `WAL`.**
   It runs before a writer exists; a method would mean opening a writer in order
@@ -324,7 +324,7 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   opened without carrying `FirstSeq` forward.
 - **Replayed payloads alias a reused buffer** — valid only during the callback,
   `Record.Clone()` to keep one. That contract is what makes replay 0 allocs/record
-  (358 ns/record, 5.8 GB/s); the ~16 allocs are per *segment*, not per record.
+  (390 ns/record, 5.4 GB/s); the ~16 allocs are per *segment*, not per record.
 - **`Truncate` judges a segment from the *next* one's first sequence**, never by
   scanning for its own last. Sequences increase across the log, so a later
   segment starting at or below the line proves this one ends below it. That first
@@ -360,19 +360,19 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   swallowing it silently downgrades the guarantee.
 - **Nothing unverified reaches the caller.** `Load` hashes end to end *before* the
   callback sees a byte, so the callback runs at most once and never needs to undo.
-  Costs +38% over streaming once (14.5 ms vs 10.5 at 64 MiB) because the apply
-  pass reads the page cache at 18.2 GB/s. Do not "optimize" this into one pass.
+  Costs +44% over streaming once (14.7 ms vs 10.2 at 64 MiB) because the apply
+  pass reads the page cache at 17.1 GB/s. Do not "optimize" this into one pass.
 - **A corrupt snapshot falls back to an older one; a callback error does not.**
   The first is disk rot, the second is a decoder bug, and falling back would hide
   it behind a slow startup.
-- `Create` has a **~10 ms floor at any size** — two fsyncs. That is why snapshots
+- `Create` has a **~12 ms floor at any size** — two fsyncs. That is why snapshots
   ride a checkpoint interval in minutes, not the WAL's fsync interval in ms.
 - **WAL truncation follows the *oldest retained* snapshot, never the newest**, and
   runs after `Prune` — otherwise the fallback copy is unusable but still stored.
 - Payload is **opaque** to this package; `hnsw.(*Graph).WriteTo` produces it.
   The graph-vs-live-vectors question was settled by measurement and the answer is
-  **serialize the graph**: for 1M × 128 that is ~0.37 s to verify and decode
-  against ~703 s to rebuild, about 1,900×. See `docs/DURABILITY.md` §6.
+  **serialize the graph**: for 1M × 128 that is ~0.36 s to verify and decode
+  against ~506 s to rebuild on one core, about 1,400×. See `docs/DURABILITY.md` §6.
 - **No `Snapshotter` interface yet** — an implementation without a consumer. The
   WAL's `Replay` is the precedent: it sat on the interface as a promise until
   writing it showed it did not belong.
@@ -400,7 +400,7 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   runs once per candidate node, and `Get`'s per-call map copy would become the
   dominant cost of a search. `TestMatchDoesNotAllocate` pins it at 0 allocs, and
   the search's **1 alloc/op baseline holds under filtering** — the cost of a
-  filter is travel (60 µs → 769 µs from unfiltered to one-in-fifty), not garbage.
+  filter is travel (66 µs → 812 µs from unfiltered to one-in-fifty), not garbage.
 - **Insert passes `nil`.** A build must never see a query's filter, or the graph's
   shape would depend on whichever query ran first.
 - **A predicate on an absent key is false — `Ne` included.** One uniform rule;
@@ -432,8 +432,10 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 
 - **No internal type may appear in an exported signature.** `internal/` cannot be
   named from outside the module, so an alias would give callers a type they can
-  use but not write down. `Metric`, `SyncPolicy`, `Match`, `Stats`, `Metadata`,
-  `Filter` are the root package's own, with adapters in `index.go`.
+  use but not write down. `Metric`, `SyncPolicy`, `Match`, `Stats` and `Filter`
+  are the root package's own, with adapters in `index.go`. `Metadata` is the one
+  alias (`= store.Metadata`), allowed only because it resolves to the unnamed
+  `map[string]any` — a caller can still write it down.
 - **`Filter` is declared here, not aliased from `internal/filter`**, so callers can
   implement one. The two interfaces have identical method sets so elements convert
   implicitly; only the *slices* need the retyping loop in `internalFilters`. That
@@ -599,7 +601,9 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 
 ## Locked baselines — do not regress
 
-Any index change must hold these; they are enforced by tests and `-benchmem`:
+Any index change must hold these. The two recall rows are the *measured* values the
+tests log; the tests themselves fail only below 0.90, so read the log, not just the
+pass — a drop from 0.988 to 0.91 is a regression that stays green:
 
 | Baseline | Value | Guarded by |
 |---|---|---|

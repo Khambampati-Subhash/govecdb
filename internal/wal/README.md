@@ -93,9 +93,9 @@ cannot repair.
 
 | Policy | Per append | Throughput | A crashed process loses | Power loss loses |
 |---|---|---|---|---|
-| `SyncAlways` | **4.04 ms** | 248 writes/s | nothing | nothing |
-| `SyncInterval` | 897 ns | ~1.1M writes/s | ≤ one interval | ≤ one interval |
-| `SyncNever` | 692 ns | ~1.4M writes/s | ≤ 64 KiB (the buffer) | everything not written back |
+| `SyncAlways` | **4.24 ms** | 236 writes/s | nothing | nothing |
+| `SyncInterval` | 1.04 µs | ~960K writes/s | ≤ one interval | ≤ one interval |
+| `SyncNever` | 780 ns | ~1.3M writes/s | ≤ 64 KiB (the buffer) | everything not written back |
 
 Note what the fast policies do **not** promise. Records live in a 64 KiB
 user-space buffer until it fills or something flushes it, so under `SyncInterval`
@@ -269,13 +269,13 @@ Apple M4 Max, ~2 KB payloads:
 
 | | ns/op | allocs |
 |---|---|---|
-| Append, `SyncAlways` | 4,036,239 | 0 |
-| Append, `SyncInterval` | 897 | 0 |
-| Append, `SyncNever` | 692 | 0 |
-| Append, small (12 B) | 19.0 | 0 |
-| Checksum, 16 KB | 1,542 (10.6 GB/s) | 0 |
-| Segment rotation | 8,649,214 | 10 |
-| **Replay, per record** | **368** (5.7 GB/s) | **0** |
+| Append, `SyncAlways` | 4,240,468 | 0 |
+| Append, `SyncInterval` | 1,039 | 0 |
+| Append, `SyncNever` | 780 | 0 |
+| Append, small (12 B) | 20.0 | 0 |
+| Checksum, 16 KB | 1,458 (11.2 GB/s) | 0 |
+| Segment rotation | 9,245,809 | 10 |
+| **Replay, per record** | **390** (5.4 GB/s) | **0** |
 
 The append path allocates nothing: the record header is reused across calls and
 the payload is written straight through without a copy.
@@ -286,16 +286,16 @@ The second is what stops a crash from taking a freshly created segment away
 along with the acknowledged writes inside it — `fsync` on a file makes its
 contents durable and says nothing about the directory entry naming it.
 
-It is also why rotation is 8.6 ms rather than 4.8. That sounds expensive until it
+It is also why rotation is ~9 ms rather than ~5. That sounds expensive until it
 is amortized: at the default 64 MiB it happens once per ~32,000 records of 2 KB,
-which is **0.27 µs per record** — below even `SyncNever`'s per-append cost. It is
+which is **0.29 µs per record** — below even `SyncNever`'s per-append cost. It is
 the right place to spend an fsync, and the reason `MaxSegmentBytes` defaults to
 64 MiB rather than something that would make rotation frequent.
 
 Replay allocates nothing per record either; the ~16 allocations it does make are
 **per segment** — a 64 KiB read buffer and the file handle. Recovering a
 1 GB log is therefore a few seconds of streaming, not a few seconds of GC. At
-358 ns/record, replaying a million records costs about 0.36 s.
+390 ns/record, replaying a million records costs about 0.39 s.
 
 ## Not implemented yet (deliberately)
 

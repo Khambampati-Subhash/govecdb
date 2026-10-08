@@ -129,8 +129,9 @@ it, because several of these look independent and are not.
 
 | | Item | Blocked on | |
 |---|---|---|---|
-| 1 | Observability seam | nothing | **done** |
+| 1 | Observability seam | nothing | **done in v1.3.0** |
 | 2 | Online (non-blocking) compaction | 1, for the same reason everything wants 1 | |
+| 3a | Parallel batch build | nothing — one batch, one lock | **done in v1.3.0** |
 | 3 | Fine-grained write locking | 2 | |
 | 4 | Collections / namespaces | nothing, but wants 1 | **done in v1.1.0** |
 | 5 | Filter selectivity estimation | 4 is unrelated; needs store statistics | |
