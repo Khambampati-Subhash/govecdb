@@ -10,6 +10,33 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Nothing yet. See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned
 and in what order.
 
+## [1.3.1] - 2026-10-08
+
+A documentation and measurement release. No library code, exported API or
+on-disk format changed.
+
+### Fixed
+
+- **The README's curl examples failed with 415** — they sent no
+  `Content-Type: application/json`. The docker line had no `-p 8080:8080` and
+  no build step; the `SuggestedEf` example used an internal API that callers
+  cannot import.
+- **The chart regeneration command always exited non-zero.** The sweep floors
+  were tuned for the CI grid; the wide `-results` grid now has its own, set
+  under its own hardest cell. CI's floors are unchanged.
+- The Pareto chart named the slowest of the points at top recall, without a
+  unit; the metric chart claimed a weakness the data does not show.
+
+### Changed
+
+- **Every measured number re-taken** under the current index (`Alpha` 1.0):
+  the sweeps, the charts, and the benchmark tables in the README, CLAUDE.md,
+  `docs/DURABILITY.md`, `docs/SERVICE.md` and each package README. Notable:
+  search is 84.7 µs (Alpha 1.0 does ~8% more work per query at a fixed `ef`,
+  and finds more); `AddBatch` of 100 under `SyncAlways` is 9.3 ms, not 47;
+  raising `M` to 32 buys ~15–20% latency for 3× the build, not ~10% for 6×.
+- New chart: recall at alpha 1.0 against 1.2 on clustered data (0.989 vs 0.938).
+
 ## [1.3.0] - 2026-10-07
 
 A minor release, entirely additive: v2 item 1 (the observability seam) and 3a (a
@@ -354,7 +381,8 @@ Stated here rather than discovered later:
 - **A highly selective filter approaches a full scan.** Past roughly one vector
   in a hundred, a scan over the metadata is the better tool.
 
-[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/khambampati-subhash/govecdb/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/khambampati-subhash/govecdb/compare/v1.1.0...v1.1.1

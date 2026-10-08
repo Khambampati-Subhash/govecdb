@@ -16,7 +16,7 @@ Module path: `github.com/khambampati-subhash/govecdb` · Go 1.24+ (built with 1.
 
 ## Where the project is
 
-**v1.3.0 on `main`.** v1 — a from-scratch rebuild, one subsystem at a time — is
+**v1.3.1 on `main`.** v1 — a from-scratch rebuild, one subsystem at a time — is
 complete: an embeddable library with durability, recovery and filtering. v2 is
 under way, taken partly out of dependency order where an item needed nothing
 from the ones ahead of it.

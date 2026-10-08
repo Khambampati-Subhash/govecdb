@@ -32,7 +32,7 @@ matches, _ := db.Search(govecdb.SearchRequest{Query: query, K: 10})
 
 ## Status
 
-**v1.3.0 — released and usable, as a library or as a server.** `govecdb.Open`
+**v1.3.1 — released and usable, as a library or as a server.** `govecdb.Open`
 gives you add, get, delete, search, filter, enumerate, snapshot and compact over
 one directory, durable through a write-ahead log and recoverable from snapshots.
 Batch writes and recovery build the index on every core, and everything the
