@@ -84,6 +84,15 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "govecdb_http_request_duration_seconds_total %s\n",
 		float(time.Duration(s.metrics.nanos.Load()).Seconds()))
 
+	metric(&b, "govecdb_http_inflight", "gauge", "Requests being served, by pool.")
+	for _, p := range []*pool{s.reads, s.writes} {
+		fmt.Fprintf(&b, "govecdb_http_inflight{pool=%q} %d\n", p.name, p.inflight.Load())
+	}
+	metric(&b, "govecdb_http_rejected_total", "counter", "Requests refused with 503 overloaded, by pool.")
+	for _, p := range []*pool{s.reads, s.writes} {
+		fmt.Fprintf(&b, "govecdb_http_rejected_total{pool=%q} %d\n", p.name, p.rejected.Load())
+	}
+
 	metric(&b, "govecdb_collections", "gauge", "Collections in the root directory.")
 	fmt.Fprintf(&b, "govecdb_collections %d\n", len(infos))
 

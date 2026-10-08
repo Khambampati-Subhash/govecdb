@@ -61,6 +61,14 @@ type Config struct {
 	// MaxFilterValues caps the total number of values across every "in" in
 	// one search filter. Zero means DefaultMaxFilterValues.
 	MaxFilterValues int
+
+	// MaxInFlightReads and MaxInFlightWrites cap how many read and write
+	// requests run at once; one more is refused with 503 "overloaded" rather
+	// than queued. Zero means DefaultMaxInFlightReads/Writes; negative means
+	// no limit, for an embedder whose own server already sheds load. See
+	// limit.go for which requests are which.
+	MaxInFlightReads  int
+	MaxInFlightWrites int
 }
 
 // Server is an http.Handler over a collection manager.
@@ -72,6 +80,8 @@ type Server struct {
 	version string
 	events  *Events
 	filters filterLimits
+	reads   *pool
+	writes  *pool
 
 	handler http.Handler
 	started time.Time
@@ -98,6 +108,8 @@ func New(cfg Config) (*Server, error) {
 		events:  cfg.Events,
 		started: time.Now(),
 		filters: filterLimits{clauses: cfg.MaxFilterClauses, values: cfg.MaxFilterValues},
+		reads:   newPool("read", cfg.MaxInFlightReads, DefaultMaxInFlightReads()),
+		writes:  newPool("write", cfg.MaxInFlightWrites, DefaultMaxInFlightWrites()),
 	}
 	if s.filters.clauses <= 0 {
 		s.filters.clauses = DefaultMaxFilterClauses
@@ -136,9 +148,10 @@ func New(cfg Config) (*Server, error) {
 
 	// Outermost first: a panic in the auth check should still become a 500 rather
 	// than a dropped connection, and a request refused by auth should still be
-	// counted and logged. The shaper is innermost because the only responses it
-	// has to rewrite are the ones the mux itself produces.
-	s.handler = s.recoverer(s.observer(s.authenticator(s.shaper(mux))))
+	// counted and logged. The limiter is inside auth, so an unauthenticated
+	// flood never occupies a slot. The shaper is innermost because the only
+	// responses it has to rewrite are the ones the mux itself produces.
+	s.handler = s.recoverer(s.observer(s.authenticator(s.limiter(s.shaper(mux)))))
 	return s, nil
 }
 
@@ -355,7 +368,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		// the request that produced it.
 		s.log.Error("request failed", "method", r.Method, "path", r.URL.Path, "error", err)
 	}
-	if status == http.StatusServiceUnavailable && code == codeTooManyOpen {
+	if code == codeTooManyOpen || code == codeOverloaded {
 		w.Header().Set("Retry-After", "1")
 	}
 	s.write(w, r, status, errorResponse{Error: errorDetail{

@@ -57,6 +57,12 @@ func decode(w http.ResponseWriter, r *http.Request, maxBody int64, dst any) erro
 	if dec.More() {
 		return fmt.Errorf("%w: unexpected data after the JSON body", govecdb.ErrInvalidRequest)
 	}
+	// A large body takes time to arrive, and the client may have given up while
+	// it did. Every handler with a body decodes before it borrows a collection,
+	// so this is the last point at which the work can be declined.
+	if r.Context().Err() != nil {
+		return errClientGone
+	}
 	return nil
 }
 

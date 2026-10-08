@@ -49,6 +49,8 @@ const (
 	codeReadOnly        = "read_only"
 	codeUnavailable     = "unavailable"
 	codeTooManyOpen     = "too_many_open"
+	codeOverloaded      = "overloaded"
+	codeClientGone      = "client_gone"
 	codeInternal        = "internal"
 )
 
@@ -59,6 +61,10 @@ var (
 	errUnsupportedMediaType = errors.New("httpapi: unsupported media type, want application/json")
 	errUnauthorized         = errors.New("httpapi: missing or invalid credentials")
 )
+
+// statusClientGone is the status recorded for a request whose client left
+// before it was served. Not in net/http; the convention is nginx's.
+const statusClientGone = 499
 
 // Values of errorDetail.Resource.
 const (
@@ -102,6 +108,14 @@ func classify(err error) (status int, code, message string) {
 		return http.StatusUnsupportedMediaType, codeUnsupportedType, err.Error()
 	case errors.Is(err, errUnauthorized):
 		return http.StatusUnauthorized, codeUnauthorized, err.Error()
+	// Load shedding, and the same answer as ErrTooManyOpen for the same
+	// reason: back off and retry, possibly elsewhere.
+	case errors.Is(err, errOverloaded):
+		return http.StatusServiceUnavailable, codeOverloaded, err.Error()
+	// Nginx's 499: never seen by the client, which is gone, but it is what the
+	// request log and the 4xx counter should say about skipped work.
+	case errors.Is(err, errClientGone):
+		return statusClientGone, codeClientGone, err.Error()
 
 	case errors.Is(err, service.ErrInvalidName):
 		return http.StatusBadRequest, codeInvalidName, err.Error()

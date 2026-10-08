@@ -396,6 +396,8 @@ govecdbd -dir <directory> [flags]
 | `-max-body` | `32 MiB` | Largest request body. |
 | `-max-filter-clauses` | `1024` | Most op objects in one search filter, combinators included. |
 | `-max-filter-values` | `1024` | Most values across every `in` in one search filter. |
+| `-max-inflight-reads` | `0` (4 × GOMAXPROCS) | Searches, gets, scans and listings served at once; one more is `503 overloaded`. `-1` for no limit. |
+| `-max-inflight-writes` | `0` (GOMAXPROCS, ≥ 2) | Adds, deletes, lifecycle, snapshot, sync and compact served at once. `-1` for no limit. |
 | `-timeout` | `2m` | Per-request read and write timeout. |
 | `-drain` | `0` | Keep serving this long after `/readyz` starts failing. |
 | `-shutdown-timeout` | `30s` | How long to wait for requests in flight. |
@@ -486,6 +488,7 @@ fast.
 | `govecdb_collection_wal_sequence` − `..._snapshot_sequence` | A widening gap is a slow restart waiting to happen. |
 | `govecdb_http_requests_total{class="5xx"}` | Anything above zero. |
 | `govecdb_collections_loaded` vs `-max-open` | At the cap, with `503 too_many_open` appearing. |
+| `govecdb_http_rejected_total{pool}` | Rising: requests are being shed with `503 overloaded`. `govecdb_http_inflight{pool}` pinned at the `-max-inflight-*` size says which pool is the bottleneck. |
 | `govecdb_events_total{event="durability_failure"}` | Anything above zero: that collection is read-only until a restart. |
 | `govecdb_events_total{event=~"torn_log\|snapshot_rejected\|truncation_skipped"}` | A torn log after a crash is expected; on a clean restart, or repeatedly, it is the disk. A rejected snapshot or skipped truncation should never happen on a healthy machine. |
 | `govecdb_events_total{event="snapshot_failed"}` | Rising: snapshots are not landing, so the next restart replays the whole log. |

@@ -68,6 +68,8 @@ type config struct {
 	maxBody       int64
 	filterClauses int
 	filterValues  int
+	maxReads      int
+	maxWrites     int
 	timeout       time.Duration
 	drain         time.Duration
 	shutdown      time.Duration
@@ -95,6 +97,10 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 		"maximum op objects in one search filter")
 	fs.IntVar(&c.filterValues, "max-filter-values", httpapi.DefaultMaxFilterValues,
 		"maximum values across every \"in\" in one search filter")
+	fs.IntVar(&c.maxReads, "max-inflight-reads", 0,
+		"read requests served at once before 503 overloaded (0 = 4 x GOMAXPROCS, -1 = no limit)")
+	fs.IntVar(&c.maxWrites, "max-inflight-writes", 0,
+		"write requests served at once before 503 overloaded (0 = GOMAXPROCS, at least 2; -1 = no limit)")
 	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "per-request read and write timeout")
 	fs.DurationVar(&c.drain, "drain", 0, "keep serving for this long after /readyz starts failing")
 	fs.DurationVar(&c.shutdown, "shutdown-timeout", 30*time.Second, "how long to wait for requests in flight")
@@ -188,6 +194,9 @@ func run(ctx context.Context, args []string, stderr io.Writer, stop func(), read
 
 		MaxFilterClauses: cfg.filterClauses,
 		MaxFilterValues:  cfg.filterValues,
+
+		MaxInFlightReads:  cfg.maxReads,
+		MaxInFlightWrites: cfg.maxWrites,
 	})
 	if err != nil {
 		return err

@@ -96,6 +96,20 @@ What it does *not* do is invent a second validator. Dimension, `K`, `Ef`, id
 length and metadata size are bounded and tested in the root package; this layer's
 job is to hand it well-formed Go values and translate what comes back.
 
+## Backpressure: two pools that refuse rather than queue
+
+Reads (GET and HEAD, plus `POST .../search` and `POST .../vectors/get`) and
+writes (everything else) each draw from a pool — `MaxInFlightReads`, default
+4 × GOMAXPROCS, and `MaxInFlightWrites`, default GOMAXPROCS and at least 2. A
+full pool answers `503 overloaded` with `Retry-After` at once; it never queues,
+for the reason `too_many_open` does not. Separate pools so an ingest burst
+cannot take every slot from searches. `/healthz`, `/readyz` and `/metrics` are
+exempt, and the limiter sits inside auth so an unauthenticated flood occupies
+nothing. After taking a slot, and again after decoding a body, a request whose
+client has disconnected is skipped (`client_gone`, 499) — the library takes no
+context, so not starting is the only way to not finish. `/metrics` exports
+`govecdb_http_inflight{pool}` and `govecdb_http_rejected_total{pool}`.
+
 ## Two decisions worth knowing
 
 ### How a JSON number becomes a metadata value
@@ -148,7 +162,7 @@ semantics are the library's, unchanged — including the one most likely to be
 | `invalid_request` | 400 | Malformed body, unknown field, bad duration, bad page limit. |
 | `invalid_vector` | 400 | Wrong dimension, empty id, a non-finite value. |
 | `invalid_metadata` | 400 | A value that is not a string, bool or number. |
-| `invalid_filter` | 400 | An unknown op, a missing key, a tree too deep. |
+| `invalid_filter` | 400 | An unknown op, a missing key, a tree too deep or too wide. |
 | `invalid_spec` | 400 | A collection configuration the database refuses. |
 | `invalid_name` | 400 | A collection name outside the allowed set. |
 | `not_found` | 404 | No such collection, vector, or route. `resource` says which: `"collection"` or `"vector"`, absent for a route. |
@@ -158,8 +172,10 @@ semantics are the library's, unchanged — including the one most likely to be
 | `unauthorized` | 401 | Missing or wrong bearer token. |
 | `read_only` | 503 | A durability failure; the database refuses writes until restarted. |
 | `too_many_open` | 503 | Every collection slot is busy. Retry — `Retry-After` is set. |
+| `overloaded` | 503 | The read or write request pool is full. Retry — `Retry-After` is set. |
 | `unavailable` | 503 | Shutting down. |
 | `internal` | 500 | Anything else. The cause is in the log. |
+| `client_gone` | 499 | The client disconnected before the work started, so it was skipped. Only ever seen in the log and the 4xx counter. |
 
 `net/http` answers an unrouted path and a wrong method in plain text, which would
 leave a client parsing two formats and finding the second in production. A
