@@ -81,6 +81,15 @@ type Writer struct {
 // Starting a fresh segment costs one mostly-empty file per restart and makes
 // that impossible. Repairing the torn tail is the reader's job, not a
 // precondition for accepting new writes.
+//
+// # Except over a segment with nothing in it
+//
+// A newest segment that is exactly a valid file header — opened by the last
+// run and never written to — has no tail to be torn, so it is reused rather
+// than followed by another. Without that, a read-mostly database that is
+// opened and closed repeatedly gained an empty file and a directory fsync on
+// every open, forever: truncation cannot remove them, because it judges a
+// segment by its successor's first record and an empty successor has none.
 func Open(dir string, opts Options) (*Writer, error) {
 	opts = opts.withDefaults()
 
@@ -103,8 +112,16 @@ func Open(dir string, opts Options) (*Writer, error) {
 		nextSeq: opts.FirstSeq,
 	}
 	w.lastSeq.Store(opts.FirstSeq - 1)
-	if err := w.openSegment(next); err != nil {
-		return nil, err
+	reused := false
+	if n := len(existing); n > 0 {
+		if reused, err = w.reuseEmptySegment(existing[n-1]); err != nil {
+			return nil, err
+		}
+	}
+	if !reused {
+		if err := w.openSegment(next); err != nil {
+			return nil, err
+		}
 	}
 
 	if opts.SyncPolicy == SyncInterval {
@@ -458,6 +475,40 @@ func (w *Writer) openSegment(index uint32) error {
 	w.segIndex = index
 	w.segBytes = fileHeaderSize
 	return nil
+}
+
+// reuseEmptySegment opens segment index for appending if it holds a valid file
+// header and nothing else, reporting whether it did. Anything else — records,
+// a short or foreign header, a stray byte — is left alone for a new segment to
+// follow, exactly as before.
+//
+// Its entry in the directory was made durable by the openSegment that created
+// it. Its header may not have been, if that run never fsynced the file, but the
+// header is in the file now and the first sync of this run covers it, before
+// any record appended here is acknowledged.
+func (w *Writer) reuseEmptySegment(index uint32) (bool, error) {
+	path := segmentPath(w.dir, index)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0)
+	if err != nil {
+		return false, nil // not ours to reason about; start a new one
+	}
+	// Judged on the open file, so what is checked is what will be written to.
+	var hdr [fileHeaderSize + 1]byte
+	n, _ := f.ReadAt(hdr[:], 0)
+	if n != fileHeaderSize {
+		f.Close()
+		return false, nil
+	}
+	if _, err := decodeFileHeader(hdr[:fileHeaderSize]); err != nil {
+		f.Close()
+		return false, nil
+	}
+
+	w.file = f
+	w.buf = bufio.NewWriterSize(f, 64<<10)
+	w.segIndex = index
+	w.segBytes = fileHeaderSize
+	return true, nil
 }
 
 // syncDir fsyncs a directory, which is what makes a file's creation durable.

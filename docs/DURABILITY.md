@@ -380,7 +380,12 @@ deleted.
 - **A torn tail** in any segment — truncated there, replay continues with the
   next segment. Tolerating it *anywhere* rather than only in the last segment is
   required, not lenient: `Open` always starts a new segment, so a second crash
-  leaves a torn tail in the middle of the directory.
+  leaves a torn tail in the middle of the directory. The one exception is a
+  newest segment holding a valid header and nothing else — it has no tail to
+  tear, so `Open` reuses it rather than piling another empty file behind it on
+  every idle reopen (50 opens without a write left 52 segments; now 2).
+  Segments are listed in numeric order, not by name, so the millionth segment
+  (`wal-1000000.log`, seven digits) does not sort before `wal-999999.log`.
 - **A corrupt record** — the segment is truncated at that point.
 - **A zero-filled block** — rejected by the checksum before the type check;
   record type 0 is invalid precisely so zeroed space never decodes as data.

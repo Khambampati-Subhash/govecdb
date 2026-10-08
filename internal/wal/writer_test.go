@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -651,5 +652,111 @@ func TestFailureOutsideTheLockIsSticky(t *testing.T) {
 	}
 	if err := w.Close(); err == nil {
 		t.Fatal("Close succeeded on a failed writer")
+	}
+}
+
+// TestReopeningWithoutWritesDoesNotGrowTheLog: every Open used to add a
+// segment, and a database opened and closed without writing — a read-mostly
+// collection the service evicts and reopens — piled up empty files that
+// truncation can never remove. A newest segment holding only its header has no
+// tail to tear, so Open reuses it.
+func TestReopeningWithoutWritesDoesNotGrowTheLog(t *testing.T) {
+	dir := t.TempDir()
+	next := uint64(1)
+	reopen := func(write bool) {
+		t.Helper()
+		w, err := Open(dir, Options{SyncPolicy: SyncNever, FirstSeq: next})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if write {
+			if _, err := w.Append(TypePut, []byte("x")); err != nil {
+				t.Fatal(err)
+			}
+			next++
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reopen(true)
+	for range 50 {
+		reopen(false)
+	}
+	segs, err := listSegments(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segs) != 2 {
+		t.Fatalf("50 opens without a write left %d segments, want 2 (one with the record, one reused empty)", len(segs))
+	}
+
+	// The reused segment takes writes like any other, and replay reads them.
+	reopen(true)
+	reopen(false)
+	got := scanAll(t, dir)
+	if len(got) != 2 || got[0].Seq != 1 || got[1].Seq != 2 {
+		t.Fatalf("log after reuse: %+v", got)
+	}
+	if segs, _ := listSegments(dir); len(segs) != 3 {
+		t.Fatalf("%d segments, want 3", len(segs))
+	}
+}
+
+// TestOpenDoesNotReuseASegmentWithAnythingInIt: only a valid header and
+// nothing else is reused. A torn tail, or a byte of anything, still gets a new
+// segment after it, which is the rule that keeps good writes from landing
+// behind a stopping point.
+func TestOpenDoesNotReuseASegmentWithAnythingInIt(t *testing.T) {
+	for name, content := range map[string][]byte{
+		"torn record":    {1, 2, 3},
+		"foreign header": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			var hdr [fileHeaderSize]byte
+			encodeFileHeader(hdr[:])
+			data := append(hdr[:], content...)
+			if content == nil {
+				data = []byte("NOTAWAL!")
+			}
+			if err := os.WriteFile(segmentPath(dir, 1), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			w, err := Open(dir, Options{SyncPolicy: SyncNever})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close()
+			if got := w.Segment(); got != 2 {
+				t.Fatalf("opened into segment %d, want a fresh 2", got)
+			}
+			after, err := os.ReadFile(segmentPath(dir, 1))
+			if err != nil || !bytes.Equal(after, data) {
+				t.Fatalf("Open modified a segment it should have left alone: %v", err)
+			}
+		})
+	}
+}
+
+// TestSegmentsSortNumerically: past segmentDigits the names stop sorting in
+// number order — wal-1000000.log before wal-999999.log — and replay would read
+// them out of order and refuse the log forever.
+func TestSegmentsSortNumerically(t *testing.T) {
+	dir := t.TempDir()
+	for _, idx := range []uint32{1000000, 999999, 2} {
+		w := &Writer{dir: dir, opts: Options{}.withDefaults()}
+		if err := w.openSegment(idx); err != nil {
+			t.Fatal(err)
+		}
+		w.file.Close()
+	}
+	got, err := listSegments(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []uint32{2, 999999, 1000000}; !slices.Equal(got, want) {
+		t.Fatalf("listSegments = %v, want %v", got, want)
 	}
 }

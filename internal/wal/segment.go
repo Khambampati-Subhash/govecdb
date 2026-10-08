@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -17,9 +18,10 @@ import (
 const (
 	segmentPrefix = "wal-"
 	segmentSuffix = ".log"
-	// segmentDigits is wide enough for a million segments, which at the default
-	// 64 MiB each is 64 TiB of log. Fixed width so lexical order matches numeric
-	// order — `ls` and a naive sort both give the replay order for free.
+	// segmentDigits is the zero padding, which keeps `ls` in replay order for
+	// the first million segments. It is not a limit: a larger index simply
+	// renders wider, and listSegments sorts by number rather than trusting the
+	// names to sort.
 	segmentDigits = 6
 )
 
@@ -67,8 +69,12 @@ func listSegments(dir string) ([]uint32, error) {
 			out = append(out, idx)
 		}
 	}
-	// os.ReadDir already sorts by filename, and the fixed-width zero padding
-	// makes that the same as numeric order.
+	// Sorted by number, not by name. The zero padding makes the two agree only
+	// up to segmentDigits: wal-1000000.log sorts before wal-999999.log, and
+	// replay would read segments out of order, refuse the rewound sequence as
+	// ErrOutOfOrder, and the database would never open again. A restart costs
+	// a segment, so a collection reopened often gets there.
+	slices.Sort(out)
 	return out, nil
 }
 

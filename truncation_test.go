@@ -252,3 +252,23 @@ func TestTruncationDoesNotBreakSequenceNumbering(t *testing.T) {
 		t.Fatalf("Len = %d, want 120", db.Len())
 	}
 }
+
+// TestReopeningAnIdleDatabaseDoesNotGrowTheLog: one write, then fifty opens
+// with a snapshot and no writes — a collection the service evicts and reopens —
+// used to leave 52 segments. It now leaves a bounded number.
+func TestReopeningAnIdleDatabaseDoesNotGrowTheLog(t *testing.T) {
+	db, dir := openDB(t)
+	fill(t, db, 10, 130)
+	for range 50 {
+		if err := db.Snapshot(); err != nil {
+			t.Fatal(err)
+		}
+		db = reopen(t, db, dir)
+	}
+	if segs := logSegments(t, dir); len(segs) > 2 {
+		t.Fatalf("50 idle reopens left %d log segments", len(segs))
+	}
+	if db.Len() != 10 {
+		t.Fatalf("Len = %d, want 10", db.Len())
+	}
+}
