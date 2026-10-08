@@ -64,7 +64,9 @@ func (db *DB) loadSnapshot(dir string) error {
 	)
 	res, err := snapshot.Load(dir, func(r io.Reader) error {
 		var err error
-		idx, st, err = readSnapshot(r, db.opts.maxIDBytes)
+		// The hard ceiling, not the configured limit, as for log records
+		// (decodeRecord): lowering WithLimits must not make old data corrupt.
+		idx, st, err = readSnapshot(r, maxIDLimit)
 		return err
 	})
 	// Reported before the error check: a rejection followed by an I/O error on

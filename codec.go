@@ -55,11 +55,11 @@ func encodeDelete(dst []byte, id string) []byte {
 
 // decodeRecord turns a log payload back into an operation.
 //
-// The limits are passed in rather than read from a package constant because they
-// are the *database's* configured limits: a record that could not have been
-// written by this database should not be applied by it either. In particular a
-// dimension is checked against the configured one before any slice is made for
-// it, so a corrupt length cannot become an arbitrary allocation.
+// The options are passed in because the dimension is the *database's*: a record
+// of another shape could not have been written by this database and must not be
+// applied by it. It is checked before any slice is made for it, so a corrupt
+// length cannot become an arbitrary allocation. The id length is checked
+// against the hard ceiling instead — see below.
 //
 // The record's checksum has already been verified by the log, so this is not
 // guarding against random corruption — that is caught upstream. It is guarding
@@ -82,8 +82,13 @@ func decodeRecord(typ wal.RecordType, payload []byte, o *options) (Vector, bool,
 	if err != nil {
 		return Vector{}, false, err
 	}
-	if idLen == 0 || int(idLen) > o.maxIDBytes {
-		return Vector{}, false, fmt.Errorf("%w: id length %d, max %d", ErrCorrupt, idLen, o.maxIDBytes)
+	// Against the hard ceiling, not the configured limit. WithLimits governs
+	// what may be written from now on; a record written under a higher limit
+	// is still this database's data, and refusing it would make lowering the
+	// limit look like disk corruption and stop the database opening. The
+	// ceiling still bounds what a corrupt length could make anything allocate.
+	if idLen == 0 || int(idLen) > maxIDLimit {
+		return Vector{}, false, fmt.Errorf("%w: id length %d, max %d", ErrCorrupt, idLen, maxIDLimit)
 	}
 	idb, err := d.take(int(idLen))
 	if err != nil {

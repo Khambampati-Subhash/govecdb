@@ -2,12 +2,14 @@ package hnsw
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"math/rand"
 	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/khambampati-subhash/govecdb/internal/snapshot"
@@ -620,4 +622,34 @@ func encodedSize(b *testing.B, g *Graph) int64 {
 		b.Fatal(err)
 	}
 	return n
+}
+
+// TestCodecDoesNotAllocateOnAnUnbackedNodeCount: the node count arrives before
+// any node, bounded only by what a slot index addresses. A header claiming four
+// billion nodes over an empty body used to make 32 GB of pointers before the
+// first read failed; the array now grows only as nodes really decode.
+func TestCodecDoesNotAllocateOnAnUnbackedNodeCount(t *testing.T) {
+	g, err := New(DefaultConfig(8, Euclidean))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if _, err := g.WriteTo(&buf); err != nil {
+		t.Fatal(err)
+	}
+	b := buf.Bytes()
+	// header 8 | dim, metric, M, efC, alpha 20 | seed 8 | entry 8 | maxLevel 4
+	const nodeCountAt = 48
+	binary.LittleEndian.PutUint64(b[nodeCountAt:], math.MaxUint32)
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err = Read(bytes.NewReader(b))
+	runtime.ReadMemStats(&after)
+	if err == nil {
+		t.Fatal("Read accepted four billion nodes that are not there")
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 8<<20 {
+		t.Fatalf("Read allocated %d MiB for a header with nothing behind it", grew>>20)
+	}
 }

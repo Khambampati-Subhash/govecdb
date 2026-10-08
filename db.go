@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -858,16 +859,66 @@ func (db *DB) Close() error {
 // ordinary modes, and it is the directory they cannot traverse that protects
 // them.
 func makeDirs(dir string) error {
-	if err := os.MkdirAll(dir, dirPerm); err != nil {
-		return fmt.Errorf("govecdb: create %q: %w", dir, err)
+	if err := mkdirDurable(dir); err != nil {
+		return err
 	}
 	for _, sub := range []string{walSubdir, snapshotSubdir} {
-		p := filepath.Join(dir, sub)
-		if err := os.MkdirAll(p, dirPerm); err != nil {
-			return fmt.Errorf("govecdb: create %q: %w", p, err)
+		if err := mkdirDurable(filepath.Join(dir, sub)); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// mkdirDurable is os.MkdirAll that also makes each directory it creates
+// durable, by fsyncing the parent that names it.
+//
+// The log fsyncs wal/ when it creates a segment, which makes the segment's
+// name durable — and says nothing about wal/'s own name in the database
+// directory, or the database directory's in its parent. A power cut on a fresh
+// database can take either away, and the SyncAlways writes inside with them.
+// ext4 and XFS happen to commit those entries in the same journal transaction;
+// POSIX does not promise it, and other filesystems do not. A directory that
+// already existed is left alone: its entry is not this call's to vouch for.
+func mkdirDurable(path string) error {
+	// Walk up to the first ancestor that exists; everything below it is ours
+	// to create, and each one's parent must be synced once it exists.
+	var created []string
+	for p := path; ; p = filepath.Dir(p) {
+		if _, err := os.Stat(p); err == nil {
+			break
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("govecdb: create %q: %w", path, err)
+		}
+		created = append(created, p)
+		if parent := filepath.Dir(p); parent == p {
+			break
+		}
+	}
+	if len(created) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(path, dirPerm); err != nil {
+		return fmt.Errorf("govecdb: create %q: %w", path, err)
+	}
+	// All of them exist now; make each one's name durable in its parent.
+	for _, p := range created {
+		if err := syncDir(filepath.Dir(p)); err != nil {
+			return fmt.Errorf("govecdb: create %q: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// syncDir fsyncs a directory, making the entries in it durable. The error is
+// returned, not swallowed, for the reason internal/wal gives for its own.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // writable reports whether a write may proceed. Callers hold writeMu.

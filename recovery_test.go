@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -597,4 +598,56 @@ func snapshottedAndTruncated(t *testing.T) string {
 		t.Fatal("no log segments left")
 	}
 	return dir
+}
+
+// TestLoweringTheIDLimitKeepsOldDataReadable: WithLimits governs what may be
+// written. Decoding used to check ids against it too, so lowering the limit
+// made a database holding a longer id refuse to open, reported as corruption.
+// Old records now decode against the hard ceiling; new ones are still refused.
+func TestLoweringTheIDLimitKeepsOldDataReadable(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	for _, snap := range []bool{false, true} {
+		t.Run(fmt.Sprintf("snapshot=%v", snap), func(t *testing.T) {
+			db, dir := openDB(t)
+			v := Vector{ID: long, Values: make([]float32, testDim), Metadata: Metadata{"k": "v"}}
+			v.Values[0] = 1
+			if err := db.Add(v); err != nil {
+				t.Fatal(err)
+			}
+			if snap {
+				if err := db.Snapshot(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			db = reopen(t, db, dir, WithLimits(100, 0, 0, 0, 0))
+			if _, err := db.Get(long); err != nil {
+				t.Fatalf("Get of a vector written under the old limit: %v", err)
+			}
+			v.ID = strings.Repeat("y", 300)
+			if err := db.Add(v); !errors.Is(err, ErrInvalidVector) {
+				t.Fatalf("Add of a new 300-byte id under a 100-byte limit = %v, want ErrInvalidVector", err)
+			}
+		})
+	}
+}
+
+// TestOpenCreatesMissingParents: Open of a path several levels deep creates
+// every level, each at 0700, and syncs the parent naming each one.
+func TestOpenCreatesMissingParents(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "a", "b", "db")
+	db := openDBAt(t, dir)
+	if err := db.Add(Vector{ID: "x", Values: make([]float32, testDim)}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{filepath.Join(root, "a"), filepath.Join(root, "a", "b"), dir,
+		filepath.Join(dir, walSubdir), filepath.Join(dir, snapshotSubdir)} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != dirPerm {
+			t.Errorf("%s has mode %v, want %v", p, fi.Mode().Perm(), dirPerm)
+		}
+	}
 }

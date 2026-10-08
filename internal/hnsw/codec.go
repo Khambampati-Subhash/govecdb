@@ -93,6 +93,10 @@ const (
 	// written as uint32 because they are the bulk of the file and a graph of four
 	// billion vectors does not fit in memory anyway.
 	maxCodecNodes = math.MaxUint32
+
+	// codecNodeChunk is the most of the node array Read allocates before it
+	// has decoded a node to justify more: 512 KiB of pointers.
+	codecNodeChunk = 1 << 16
 )
 
 var (
@@ -241,18 +245,25 @@ func Read(r io.Reader) (*Graph, error) {
 	// Left nil when there is nothing to hold, so a loaded empty graph is the
 	// same object as a fresh one — an empty graph is an empty container, and a
 	// round trip must not be the thing that gives it memory.
+	//
+	// The slice grows as nodes actually decode rather than being made at
+	// nodeCount up front. nodeCount is read before any node and is bounded only
+	// by what a slot index can address, so a crafted header could otherwise
+	// demand 32 GB of pointers before the first short read revealed there was
+	// nothing behind it. Growing costs a few copies of a pointer array; it
+	// lets the bytes that are really there decide what is allocated.
 	if nodeCount > 0 {
-		g.nodes = make([]*node, nodeCount)
+		g.nodes = make([]*node, 0, min(nodeCount, codecNodeChunk))
 	}
 	g.entry = entry
 	g.maxLevel = maxLevel
 
-	for i := range g.nodes {
+	for i := range nodeCount {
 		n, err := d.node(g, uint32(nodeCount))
 		if err != nil {
 			return nil, fmt.Errorf("hnsw: node %d: %w", i, err)
 		}
-		g.nodes[i] = n
+		g.nodes = append(g.nodes, n)
 	}
 	if d.err != nil {
 		return nil, d.err
