@@ -12,7 +12,9 @@ import (
 // A collection the filesystem will not let open is ErrUnavailable — a 503 a
 // client can retry — rather than an anonymous error that became a 500. The
 // shape here is the one that happens in production: a reopen on a disk that
-// refuses the new log segment every open creates.
+// refuses the new log segment a reopen creates. The write matters: a newest
+// segment holding nothing but its header is reused rather than followed, so
+// without a record in it the reopen would create nothing for the disk to refuse.
 func TestAnOpenRefusedByTheFilesystemIsUnavailable(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
@@ -20,6 +22,11 @@ func TestAnOpenRefusedByTheFilesystemIsUnavailable(t *testing.T) {
 	root := t.TempDir()
 	first := newManagerAt(t, root, Options{})
 	mustCreate(t, first, "docs", testSpec())
+	if err := first.Use("docs", func(db *govecdb.DB) error {
+		return db.Add(govecdb.Vector{ID: "a", Values: []float32{1, 0, 0, 0}})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	first.Close()
 
 	walDir := filepath.Join(root, "docs", dataSubdir, "wal")
