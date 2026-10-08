@@ -1,7 +1,11 @@
 // Distance metrics and their kernels. Everything here returns SMALLER MEANS
 // CLOSER, so the graph never has to branch on which metric is in use.
 //
-// Kernels are hand-unrolled with eight independent accumulators. This is not
+// The kernels below are the portable ones. On arm64 Dot and SquaredEuclidean
+// dispatch to NEON assembly instead (distance_arm64.go); see the README for why
+// that is Go assembly and not cgo.
+//
+// The Go kernels are hand-unrolled with eight independent accumulators. This is not
 // cosmetic: a single accumulator serialises the FP-add dependency chain, so the
 // CPU stalls waiting on the previous add. Go emits scalar FMAs, whose ~4-cycle
 // latency against several issue ports means four chains still left the kernel
@@ -80,7 +84,18 @@ func Normalize(v []float32) {
 }
 
 // Dot returns the dot product of a and b.
-func Dot(a, b []float32) float32 {
+//
+// The re-slice is the memory-safety check for the assembly kernels: they read
+// len(a) elements from both, so a short b must panic here rather than be read
+// past its end. Dot is small enough to inline, so it costs no extra call.
+func Dot(a, b []float32) float32 { return dot(a, b[:len(a)]) }
+
+// SquaredEuclidean returns |a-b|^2 (monotonic with the true distance).
+func SquaredEuclidean(a, b []float32) float32 { return squaredEuclidean(a, b[:len(a)]) }
+
+// dotGeneric is the portable kernel, and the reference the assembly is tested
+// against. It is compiled on every platform so that comparison is always possible.
+func dotGeneric(a, b []float32) float32 {
 	b = b[:len(a)]
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	for len(a) >= 8 {
@@ -107,8 +122,8 @@ func oneMinusDot(a, b []float32) float32 { return 1 - Dot(a, b) }
 // NegativeDot makes a larger dot product mean a smaller distance.
 func NegativeDot(a, b []float32) float32 { return -Dot(a, b) }
 
-// SquaredEuclidean returns |a-b|^2 (monotonic with the true distance).
-func SquaredEuclidean(a, b []float32) float32 {
+// squaredEuclideanGeneric is the portable twin of dotGeneric.
+func squaredEuclideanGeneric(a, b []float32) float32 {
 	b = b[:len(a)]
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	for len(a) >= 8 {

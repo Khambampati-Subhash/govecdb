@@ -29,7 +29,8 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `search.go` | `Result`, `Search`, and the primitives it rides on: `greedyClosest`, `searchLayer`. |
 | `neighbors.go` | Edge management: alpha-pruned `selectNeighbors`, `pruneConnections`, `connect`, adjacency lookups. |
 | `node.go` | A single vector: `id`, `vector`, per-layer neighbor lists. |
-| `distance.go` | `Metric` (Cosine / Euclidean / DotProduct) + unrolled kernels. Everything returns **smaller = closer**, so the graph never branches on the metric. |
+| `distance.go` | `Metric` (Cosine / Euclidean / DotProduct) + the portable unrolled kernels. Everything returns **smaller = closer**, so the graph never branches on the metric. |
+| `distance_arm64.go`, `dot_arm64.s`, `l2_arm64.s` | NEON `Dot` / `SquaredEuclidean` on arm64. Every other platform (amd64 included) and `-tags purego` use the Go kernels via `distance_generic.go`. |
 | `pq.go` | Hand-written min/max heaps over `[]candidate` — no `container/heap`, no interface boxing. |
 | `visited.go` | Generation-stamped visited set, reused across searches. |
 | `state.go` | `searchState`: the pooled per-traversal scratch that makes `Search` read-only. |
@@ -39,7 +40,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `delete_test.go` | Tombstone semantics, recall under deletes, entry re-election, stranding. |
 | `upsert_test.go` | Replacement semantics, replay no-ops, recall under updates, atomicity. |
 | `compact_test.go` | Slot reclamation, equality against a fresh build, recall after rebuild. |
-| `distance_test.go` | Kernels vs a float64 reference across 28 dimensions, tail handling, metric wiring. |
+| `distance_test.go` | Kernels vs a float64 reference across 28 dimensions, the platform kernel vs the Go one at every length 0–200 and unaligned offsets, tail handling, metric wiring. |
 | `pq_test.go` | Heap invariants under interleaved push/pop, ties, payload integrity. |
 | `visited_test.go` | Generation stamps, reuse across graph sizes, the 2³²-search wraparound. |
 | `recall_test.go` | The sweep harness: dimension / scale / ef / M / metric / distribution / tombstones, plus the M x ef and N x ef grids. |
@@ -105,10 +106,31 @@ Two changes took search from **795 allocations to 2**:
 - `container/heap` passes values as `any`, boxing every candidate. The heaps here
   operate on `[]candidate` directly.
 
-### 4. Unrolled distance kernels
-Four independent accumulators break the floating-point dependency chain so the
-CPU can overlap additions, and slices are re-sliced to a common length to hoist
+### 4. Unrolled distance kernels, and NEON on arm64
+Independent accumulators break the floating-point dependency chain so the CPU
+can overlap additions, and slices are re-sliced to a common length to hoist
 bounds checks. Euclidean went 74.5 ns → 26.6 ns.
+
+Go does not auto-vectorize, so the Go kernels top out at ~12 GFLOP/s of scalar
+FMAs. On arm64 the kernels are hand-written NEON (Go assembly — no cgo, the
+module stays pure Go): 32 floats per iteration into eight 4-lane FMLA
+accumulators, then a 4-wide loop and a scalar tail. Apple M4 Max, L1-resident:
+
+| dim | Dot, Go → NEON | SquaredEuclidean, Go → NEON |
+|---:|---:|---:|
+| 128 | 19.6 → 9.0 ns | 22.2 → 9.4 ns |
+| 512 | 77.2 → 28.5 ns | 91.0 → 33.2 ns |
+| 768 | 120.6 → 39.4 ns | 129.1 → 41.9 ns |
+| 1536 | 269.1 → 72.3 ns | 276.3 → 74.8 ns |
+
+A search gains less than the kernel, because a traversal is not only arithmetic:
+1.5x at 20K × 512 and 20K × 768 (ef=128, p50 ~500 → ~325 µs and ~720 →
+~470 µs), up to 2x on a cache-resident 2K × 1536 graph; insert 1.44x. What is
+left is the graph walk and the cache misses fetching each candidate's vector,
+which no kernel — in any language — removes. The summation order differs from
+the Go kernels, so results differ by ulps across architectures; every
+graph-vs-graph equality test compares graphs built with the same kernel.
+There is no amd64 assembly because nothing here can test it.
 
 ### 5. Copy on insert
 The graph stores its own copy of every vector. Beyond enabling normalization,
@@ -437,7 +459,8 @@ half-solved twice.
 ## Not implemented yet (deliberately)
 
 Fine-grained write locking, fully **online** compaction — `Compact` no longer
-stops searches, but writers still wait for it — and SIMD assembly. Each is a separate upcoming slice; see
+stops searches, but writers still wait for it — and amd64 SIMD assembly (arm64
+has NEON kernels). Each is a separate upcoming slice; see
 `docs/MIGRATION.md`.
 
 ```bash

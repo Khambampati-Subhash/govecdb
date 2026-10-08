@@ -307,3 +307,45 @@ func TestMetricWiring(t *testing.T) {
 		}
 	}
 }
+
+// TestKernelMatchesGeneric holds the platform kernel (NEON on arm64) to the
+// portable one at every length up to 200 — each side of the 32-wide main loop,
+// the 4-wide loop and the scalar tail — and at several start offsets, since a
+// sub-slice of a reused buffer is rarely 16-byte aligned. On a platform with
+// no assembly kernel this compares the Go code to itself.
+func TestKernelMatchesGeneric(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	buf := signedVector(rng, 220)
+	other := signedVector(rng, 220)
+	for dim := 0; dim <= 200; dim++ {
+		for off := range 4 {
+			a, b := buf[off:off+dim], other[3-off:3-off+dim]
+			if got, want := dot(a, b), dotGeneric(a, b); !closeEnough(got, float64(want)) {
+				t.Fatalf("dim %d off %d: dot = %v, generic %v", dim, off, got, want)
+			}
+			if got, want := squaredEuclidean(a, b), squaredEuclideanGeneric(a, b); !closeEnough(got, float64(want)) {
+				t.Fatalf("dim %d off %d: squaredEuclidean = %v, generic %v", dim, off, got, want)
+			}
+		}
+	}
+}
+
+// TestKernelReadsOnlyLenA pins the wrapper's contract: b may be longer than a
+// (only its prefix counts), and a shorter b panics in Go rather than letting an
+// assembly kernel read past its end.
+func TestKernelReadsOnlyLenA(t *testing.T) {
+	a := []float32{1, 2, 3}
+	b := []float32{1, 1, 1, 1000}
+	if got := Dot(a, b); got != 6 {
+		t.Fatalf("Dot read past len(a): %v", got)
+	}
+	if got := SquaredEuclidean(a, b); got != 5 {
+		t.Fatalf("SquaredEuclidean read past len(a): %v", got)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("a short b did not panic")
+		}
+	}()
+	_ = Dot(b, a)
+}
