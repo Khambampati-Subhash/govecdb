@@ -401,6 +401,7 @@ govecdbd -dir <directory> [flags]
 | `-timeout` | `2m` | Per-request read and write timeout. |
 | `-drain` | `0` | Keep serving this long after `/readyz` starts failing. |
 | `-shutdown-timeout` | `30s` | How long to wait for requests in flight. |
+| `-close-timeout` | `10s` | After the HTTP server stops, how long to wait for collections still in use to close. Idle ones are closed first, at once. |
 | `-tls-cert`, `-tls-key` | — | PEM pair; enables TLS. Both or neither. |
 | `-log-level` | `info` | `debug`, `info`, `warn`, `error`. |
 | `-log-json` | `false` | Structured JSON logs. |
@@ -510,7 +511,14 @@ Warn for anything repaired or declined, Error for going read-only.
    connections are cut.
 3. Requests in flight get `-shutdown-timeout` to finish.
 4. Collections close, never before, so a handler holding one finishes against a
-   live database.
+   live database. Every idle collection is closed — and so flushed — at once;
+   only then does the daemon wait, at most `-close-timeout`, for any still held
+   by a request that overran step 3. Under `sync_policy` `interval` or `never`
+   an idle collection's acknowledged writes are in a user-space buffer until
+   its close, so they must not queue behind one long `compact`.
+
+Set the orchestrator's grace period (Kubernetes `terminationGracePeriodSeconds`)
+above `-drain` + `-shutdown-timeout` + `-close-timeout`.
 
 A second signal terminates outright.
 

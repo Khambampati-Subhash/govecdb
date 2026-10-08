@@ -316,6 +316,7 @@ func TestFlagValidation(t *testing.T) {
 		{"a certificate with no key", []string{"-dir", "x", "-tls-cert", "c.pem"}, "must be given together"},
 		{"a key with no certificate", []string{"-dir", "x", "-tls-key", "k.pem"}, "must be given together"},
 		{"a body limit of zero", []string{"-dir", "x", "-max-body", "0"}, "-max-body must be positive"},
+		{"a close timeout of zero", []string{"-dir", "x", "-close-timeout", "0"}, "-close-timeout must be positive"},
 		{"a filter clause limit of zero", []string{"-dir", "x", "-max-filter-clauses", "0"}, "must be positive"},
 		{"a filter value limit of zero", []string{"-dir", "x", "-max-filter-values", "0"}, "must be positive"},
 	} {

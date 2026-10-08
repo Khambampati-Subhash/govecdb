@@ -73,6 +73,7 @@ type config struct {
 	timeout       time.Duration
 	drain         time.Duration
 	shutdown      time.Duration
+	closeWait     time.Duration
 	tlsCert       string
 	tlsKey        string
 	logLevel      string
@@ -104,6 +105,8 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "per-request read and write timeout")
 	fs.DurationVar(&c.drain, "drain", 0, "keep serving for this long after /readyz starts failing")
 	fs.DurationVar(&c.shutdown, "shutdown-timeout", 30*time.Second, "how long to wait for requests in flight")
+	fs.DurationVar(&c.closeWait, "close-timeout", 10*time.Second,
+		"after the HTTP server stops, how long to wait for collections still in use to close")
 	fs.StringVar(&c.tlsCert, "tls-cert", "", "PEM certificate; enables TLS with -tls-key")
 	fs.StringVar(&c.tlsKey, "tls-key", "", "PEM private key")
 	fs.StringVar(&c.logLevel, "log-level", "info", "debug, info, warn or error")
@@ -136,6 +139,9 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	}
 	if c.maxBody <= 0 {
 		return c, errors.New("-max-body must be positive")
+	}
+	if c.closeWait <= 0 {
+		return c, errors.New("-close-timeout must be positive")
 	}
 	if c.filterClauses <= 0 || c.filterValues <= 0 {
 		return c, errors.New("-max-filter-clauses and -max-filter-values must be positive")
@@ -180,8 +186,14 @@ func run(ctx context.Context, args []string, stderr io.Writer, stop func(), read
 	}
 	// Closed after the HTTP server has stopped, never before: a handler holding a
 	// borrowed collection must finish against a live database rather than
-	// discover a closed one.
-	defer mgr.Close()
+	// discover a closed one. The defer covers the early returns; the shutdown
+	// path below closes it explicitly, with a bound.
+	mgrClosed := false
+	defer func() {
+		if !mgrClosed {
+			mgr.Close()
+		}
+	}()
 
 	token := os.Getenv("GOVECDB_AUTH_TOKEN")
 	api, err := httpapi.New(httpapi.Config{
@@ -290,14 +302,51 @@ func run(ctx context.Context, args []string, stderr io.Writer, stop func(), read
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.shutdown)
 	defer cancel()
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
 		// Requests still in flight when the grace period expired. Reported rather
 		// than swallowed: it is the difference between a clean stop and one that
 		// cut somebody off.
-		log.Error("shutdown did not finish in time", "error", err)
+		log.Error("shutdown did not finish in time", "error", shutdownErr)
+	}
+
+	// After a clean Shutdown no handler is left, so this returns as fast as the
+	// flushes do. After a failed one, handlers still hold collections: Close
+	// flushes every idle collection at once and then waits for the busy ones,
+	// and the wait is what is bounded — an overrunning request must not turn
+	// into a process that never exits, and the idle collections are already
+	// safe by the time the bound bites.
+	mgrClosed = true
+	closeErr := closeWithin(mgr, cfg.closeWait)
+	if closeErr != nil {
+		log.Error("collections did not close in time", "error", closeErr)
+	}
+	if shutdownErr != nil {
+		return shutdownErr
+	}
+	if err := <-serveErr; err != nil {
 		return err
 	}
-	return <-serveErr
+	return closeErr
+}
+
+// errCloseTimeout is closeWithin giving up.
+var errCloseTimeout = errors.New("collections still in use when the close timeout expired")
+
+// closeWithin closes c, waiting at most d. On timeout the Close keeps running
+// in the background — there is no way to abandon it halfway — and the caller
+// is about to exit anyway.
+func closeWithin(c io.Closer, d time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- c.Close() }()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-t.C:
+		return fmt.Errorf("%w (%v)", errCloseTimeout, d)
+	}
 }
 
 func newLogger(w io.Writer, cfg config) (*slog.Logger, error) {
