@@ -646,6 +646,7 @@ func main() {
 	plotMetric(bySweep(all, "metric"))
 	plotDistribution(bySweep(all, "distribution"))
 	plotTombstones(bySweep(all, "tombstones"), bySweep(all, "compacted"))
+	plotAlpha(bySweep(all, "clustered-alpha"))
 }
 
 func plotDimension(ss []sample) {
@@ -776,7 +777,9 @@ func plotPareto(ss []sample) {
 			pts = append(pts, point{x: c.searchMicros(), y: c.Recall, label: "ef=" + strconv.Itoa(c.Ef)})
 			allX = append(allX, c.searchMicros())
 			allY = append(allY, c.Recall)
-			if c.Recall > bestRecall {
+			// Ties go to the faster cell: several reach 1.000, and the slowest
+			// of them is not the one worth naming.
+			if c.Recall > bestRecall || (c.Recall == bestRecall && c.searchMicros() < bestLatencyMicro) {
 				bestRecall, bestLabel, bestLatencyMicro = c.Recall, fmt.Sprintf("M=%d/ef=%d", c.M, c.Ef), c.searchMicros()
 			}
 		}
@@ -794,7 +797,7 @@ func plotPareto(ss []sample) {
 		xAxis:    niceAxis("µs per query", allX, true, fmtMicros),
 		yAxis:    recallAxis("recall@10", allY),
 		series:   series,
-		note: fmt.Sprintf("N=%d · dim=128 · k=10 · best measured: %s at %.0f recall %.3f · M is paid once at build, ef on every query",
+		note: fmt.Sprintf("N=%d · dim=128 · k=10 · best measured: %s at %.0fµs, recall %.3f · M is paid once at build, ef on every query",
 			ss[0].N, bestLabel, bestLatencyMicro, bestRecall),
 	}
 	write("recall-vs-latency-pareto.svg", s.render())
@@ -869,7 +872,7 @@ func plotMetric(ss []sample) {
 	}
 	c := &chart{
 		title:      "Recall by metric",
-		subtitle:   "DotProduct is not a metric — no triangle inequality, and magnitude counts — so a graph is a weaker structure over it.",
+		subtitle:   "At a narrow ef the metrics land within a few points of each other, and a wide search recovers every one of them.",
 		xLabel:     "distance metric",
 		categories: labels(ss),
 		left:       recallAxis("recall@10", recalls(ss)),
@@ -925,4 +928,25 @@ func plotTombstones(dead, compacted []sample) {
 		note: "dim=128 · ef=64 · k=10 · at 50% dead: 0.968 recall for 184µs, 0.949 for 88µs once compacted",
 	}
 	write("tombstones-vs-compaction.svg", c.render())
+}
+
+// plotAlpha is the evidence for the Alpha default: the one sweep run on the
+// clustered data where 1.2 was found to disconnect the graph.
+func plotAlpha(ss []sample) {
+	if len(ss) == 0 {
+		return
+	}
+	c := &chart{
+		title:      "Alpha on clustered data: why the default is 1.0",
+		subtitle:   "A larger alpha keeps more near candidates, and they take the slots the long edges between clusters needed.",
+		xLabel:     "Alpha (neighbour-diversity factor)",
+		categories: labels(ss),
+		left:       recallAxis("recall@10", recalls(ss)),
+		series: []series{
+			{name: "recall@10", colour: colBlue, values: recalls(ss), bar: true},
+		},
+		note: fmt.Sprintf("%s · dim=%d · ef=%d · 1,024 clusters · build %s vs %s",
+			corpusNote(ss), ss[0].Dim, ss[0].Ef, fmtSecs(buildSecs(ss)[0]), fmtSecs(buildSecs(ss)[len(ss)-1])),
+	}
+	write("alpha-on-clustered-data.svg", c.render())
 }
