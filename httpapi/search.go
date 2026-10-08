@@ -9,7 +9,7 @@ import (
 // searchRequest is the body of POST .../search.
 type searchRequest struct {
 	// Query is the vector to search near.
-	Query []float32 `json:"query"`
+	Query float32s `json:"query"`
 
 	// K is how many results to return.
 	K int `json:"k"`
@@ -27,12 +27,6 @@ type searchRequest struct {
 	// rather than to the results, so a filtered search returns K matches rather
 	// than however many of the nearest K happened to match.
 	Filter *filterJSON `json:"filter,omitempty"`
-}
-
-type matchJSON struct {
-	ID       string      `json:"id"`
-	Distance float32     `json:"distance"`
-	Metadata metadataOut `json:"metadata,omitempty"`
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -69,9 +63,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out := make([]matchJSON, len(matches))
-	for i, m := range matches {
-		out[i] = matchJSON{ID: m.ID, Distance: m.Distance, Metadata: metadataOut(m.Metadata)}
-	}
-	s.write(w, r, http.StatusOK, map[string]any{"matches": out})
+	// Written by hand rather than by encoding/json; see encode.go.
+	s.writeEncoded(w, r, http.StatusOK, func(b []byte) ([]byte, error) {
+		return encodeMatches(b, matches)
+	})
 }

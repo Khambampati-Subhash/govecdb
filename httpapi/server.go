@@ -353,8 +353,11 @@ func (s *Server) write(w http.ResponseWriter, r *http.Request, status int, body 
 			http.StatusInternalServerError)
 		return
 	}
-	b = append(b, '\n')
+	s.send(w, r, status, append(b, '\n'))
+}
 
+// send writes an encoded JSON body with the headers every response carries.
+func (s *Server) send(w http.ResponseWriter, r *http.Request, status int, b []byte) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	// Nothing here is cacheable and a stale search result is worse than a slow
 	// one, so intermediaries are told so rather than left to guess.

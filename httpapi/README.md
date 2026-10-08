@@ -32,6 +32,8 @@ build if one appears.
 | `search.go` | Nearest neighbours. |
 | `filter.go` | The filter wire format. |
 | `json.go` | Decoding, and the rules for turning JSON into metadata. |
+| `encode.go` | The hand-written encoder for matches and records, and the reflection-free `float32` array decoder. |
+| `limit.go` | Backpressure: the read and write request pools. |
 | `metrics.go` | Prometheus text exposition. |
 | `events.go` | The database's events, logged at a severity and counted for `/metrics`. |
 | `errors.go` | One error shape, and the mapping onto status codes. |
@@ -109,6 +111,20 @@ nothing. After taking a slot, and again after decoding a body, a request whose
 client has disconnected is skipped (`client_gone`, 499) — the library takes no
 context, so not starting is the only way to not finish. `/metrics` exports
 `govecdb_http_inflight{pool}` and `govecdb_http_rejected_total{pool}`.
+
+## The hot responses are encoded by hand
+
+Search matches and vector records are written with appends (`encode.go`), not
+`encoding/json`: a k=100 response with three metadata keys was 80 µs and 1,707
+allocations against a ~66 µs search, and is now 20 µs and 0 (pooled buffers).
+The bytes are unchanged — the same string escaping as `json.Marshal`
+(`<`, `>`, `&`, U+2028/9, invalid UTF-8), the same float formatting, sorted
+keys, and the metadata number rule — and `TestEncoderMatchesEncodingJSON` plus
+two fuzz targets compare it with `encoding/json` over adversarial input.
+`query` and `values` decode through `float32s`, which parses tokens with
+`strconv.ParseFloat(tok, 32)` (what `encoding/json` calls) instead of
+reflection; it refuses a `null` element, which `encoding/json` silently turned
+into a 0.
 
 ## Long calls lift their own write deadline
 

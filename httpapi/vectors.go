@@ -11,29 +11,12 @@ import (
 // vectorJSON is one record on its way in.
 type vectorJSON struct {
 	ID       string         `json:"id"`
-	Values   []float32      `json:"values"`
+	Values   float32s       `json:"values"`
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
-// vectorOut is one record on its way out. A separate type because metadata is
-// encoded differently in each direction — see metadataOut.
-type vectorOut struct {
-	ID       string      `json:"id"`
-	Values   []float32   `json:"values"`
-	Metadata metadataOut `json:"metadata,omitempty"`
-}
-
-func toOut(v govecdb.Vector) vectorOut {
-	return vectorOut{ID: v.ID, Values: v.Values, Metadata: metadataOut(v.Metadata)}
-}
-
-func toOutAll(vs []govecdb.Vector) []vectorOut {
-	out := make([]vectorOut, len(vs))
-	for i, v := range vs {
-		out[i] = toOut(v)
-	}
-	return out
-}
+// Records on their way out are written by appendVector (encode.go), because
+// metadata is encoded differently in each direction — see appendMetadata.
 
 // addRequest is the body of POST .../vectors.
 //
@@ -98,7 +81,7 @@ func (s *Server) handleGetVector(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.write(w, r, http.StatusOK, toOut(v))
+	s.writeEncoded(w, r, http.StatusOK, func(b []byte) ([]byte, error) { return appendVector(b, v) })
 }
 
 // handleDeleteVector removes a vector.
@@ -160,7 +143,7 @@ func (s *Server) handleGetVectors(w http.ResponseWriter, r *http.Request) {
 		}
 		missing = append(missing, id)
 	}
-	s.write(w, r, http.StatusOK, map[string]any{"vectors": toOutAll(vs), "missing": missing})
+	s.writeEncoded(w, r, http.StatusOK, func(b []byte) ([]byte, error) { return encodeBatch(b, vs, missing) })
 }
 
 // Page sizes for GET .../vectors. The cap is about the response, not the
@@ -202,9 +185,10 @@ func (s *Server) handleListVectors(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	body := map[string]any{"vectors": toOutAll(vs)}
-	if len(vs) == limit {
-		body["next"] = vs[len(vs)-1].ID
+	more := len(vs) == limit
+	next := ""
+	if more {
+		next = vs[len(vs)-1].ID
 	}
-	s.write(w, r, http.StatusOK, body)
+	s.writeEncoded(w, r, http.StatusOK, func(b []byte) ([]byte, error) { return encodePage(b, vs, next, more) })
 }
