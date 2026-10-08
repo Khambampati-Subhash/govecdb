@@ -347,18 +347,19 @@ func (db *DB) AddBatch(vs []Vector) error {
 }
 
 // applyGroup is how many PUTs of a batch are applied under one exclusive hold
-// of applyMu — the bound on how long a batch can keep a reader waiting. Eight
+// of applyMu — the bound on how long a batch can keep a reader waiting. Four
 // per insert worker, which is the chunk HNSW links under one hold of its own
-// write lock, so a group is one chunk: a reader waits for what the index
-// already made it wait for, and every worker still gets enough per group not
-// to idle at its end. At 16 workers that is 128 vectors, ~5 ms at dimension
-// 64, where a whole 10,000-vector batch was a third of a second.
+// write lock (chunkPerWorker in internal/hnsw/batch.go — keep the two equal),
+// so a group is one chunk: a reader waits for what the index already made it
+// wait for, and every worker still gets enough per group not to idle at its
+// end. At 16 workers that is 64 vectors, where a whole 10,000-vector batch
+// was a third of a second.
 func (db *DB) applyGroup() int {
 	workers := db.opts.insertWorkers
 	if workers <= 0 {
 		workers = runtime.GOMAXPROCS(0)
 	}
-	return max(minApplyGroup, 8*workers)
+	return max(minApplyGroup, 4*workers)
 }
 
 // minApplyGroup keeps a batch on few workers from being applied a handful at a
