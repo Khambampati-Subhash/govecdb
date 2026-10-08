@@ -40,7 +40,7 @@ func (db *DB) restore() error {
 		return err
 	}
 	db.emit(Recovered{
-		SnapshotSeq: db.snapSeq,
+		SnapshotSeq: db.snapSeq.Load(),
 		Replayed:    replayed,
 		Segments:    segments,
 		Took:        time.Since(start),
@@ -80,7 +80,8 @@ func (db *DB) loadSnapshot(dir string) error {
 			return fmt.Errorf("govecdb: create index: %w", err)
 		}
 		db.index, db.store = fresh, store.New()
-		db.snapSeq, db.nextSeq = 0, 1
+		db.snapSeq.Store(0)
+		db.nextSeq = 1
 		return nil
 	}
 
@@ -94,7 +95,7 @@ func (db *DB) loadSnapshot(dir string) error {
 	}
 
 	db.index, db.store = idx, st
-	db.snapSeq = res.Snapshot.Seq
+	db.snapSeq.Store(res.Snapshot.Seq)
 	db.nextSeq = res.Snapshot.Seq + 1
 	return nil
 }
@@ -131,8 +132,9 @@ func (db *DB) checkConfig(idx *hnswIndex) error {
 // order and the state is the one record-by-record replay would leave.
 func (db *DB) replayLog(dir string) (applied, segments int, err error) {
 	r := replayer{db: db}
+	snapSeq := db.snapSeq.Load()
 	res, err := wal.Replay(dir, wal.Options{}, func(rec wal.Record) error {
-		if rec.Seq <= db.snapSeq {
+		if rec.Seq <= snapSeq {
 			return nil // already inside the snapshot
 		}
 		applied++
@@ -220,8 +222,7 @@ func (r *replayer) apply(rec wal.Record) error {
 		if err != nil {
 			return fmt.Errorf("seq %d: %w", rec.Seq, err)
 		}
-		db.index.Delete(v.ID)
-		db.store.Delete(v.ID)
+		db.applyDelete(v.ID)
 		return nil
 
 	case wal.TypeCheckpoint:

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,6 +23,11 @@ type Writer struct {
 	segBytes int64
 
 	nextSeq uint64
+
+	// lastSeq mirrors nextSeq-1 for LastSeq, which must not take mu: mu is held
+	// across a SyncAlways fsync, and a caller asking where the log has got to —
+	// a stats endpoint, say — should not wait milliseconds for the answer.
+	lastSeq atomic.Uint64
 
 	// header is reused across appends so the hot path allocates nothing beyond
 	// what bufio already holds.
@@ -80,6 +86,7 @@ func Open(dir string, opts Options) (*Writer, error) {
 		dir:     dir,
 		nextSeq: opts.FirstSeq,
 	}
+	w.lastSeq.Store(opts.FirstSeq - 1)
 	if err := w.openSegment(next); err != nil {
 		return nil, err
 	}
@@ -200,6 +207,7 @@ func (w *Writer) writeLocked(typ RecordType, payload []byte) (uint64, error) {
 
 	w.segBytes += size
 	w.nextSeq++
+	w.lastSeq.Store(seq)
 	return seq, nil
 }
 
@@ -263,10 +271,11 @@ func (w *Writer) Close() error {
 // LastSeq reports the sequence number most recently assigned, or FirstSeq-1 when
 // nothing has been appended. Recovery and the checkpointer both need to know
 // where the log has got to.
+//
+// It takes no lock, so it never waits behind an append's fsync. A record it
+// reports has been framed into the log but is durable only per the sync policy.
 func (w *Writer) LastSeq() uint64 {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.nextSeq - 1
+	return w.lastSeq.Load()
 }
 
 // Segment reports the index of the segment currently being written, which is

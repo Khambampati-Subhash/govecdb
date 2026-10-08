@@ -15,14 +15,14 @@ import (
 // # Weakly consistent, on purpose
 //
 // None of these holds a lock across the whole walk. Enumerating a million ids
-// under the write-excluding lock would stall every writer for the length of the
+// while excluding writers would stall every one of them for the length of the
 // scan, and Range in particular hands control back to the caller between pages,
-// which may be far longer. So each page is read under its own short lock: a
-// vector deleted while a scan is in progress is skipped if the scan had not
-// reached it yet, and one added mid-scan may or may not appear. What a page does
-// promise is that every vector in it existed, with exactly those values and that
-// metadata, at one instant — values and metadata are read under one lock, the
-// same rule Get follows.
+// which may be far longer. So each page is read under its own short hold of
+// applyMu: a vector deleted while a scan is in progress is skipped if the scan
+// had not reached it yet, and one added mid-scan may or may not appear. What a
+// page does promise is that every vector in it existed, with exactly those
+// values and that metadata, at one instant — values and metadata are read under
+// one hold, the same rule Get follows.
 
 // rangePage is how many vectors Range reads per lock acquisition. Large enough
 // to amortize the lock, small enough that a writer waiting behind a page waits
@@ -34,19 +34,19 @@ const rangePage = 256
 // the result is shorter than ids by exactly the number that were missing, and a
 // caller that needs to know which compares ids against the result.
 //
-// The batch is read under one lock, so it is a consistent picture: a concurrent
-// write lands entirely before it or entirely after.
+// The batch is read under one hold of applyMu, so it is a consistent picture: a
+// concurrent Add or Delete lands entirely before it or entirely after. An
+// AddBatch is applied in groups (see applyGroup), so a GetBatch running beside
+// one can see some of its vectors and not others — but never a vector without
+// its own metadata.
 func (db *DB) GetBatch(ids []string) ([]Vector, error) {
 	if len(ids) > db.opts.maxBatch {
 		return nil, fmt.Errorf("%w: batch of %d ids, max %d", ErrInvalidRequest, len(ids), db.opts.maxBatch)
 	}
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	if db.closed {
+	if db.closed.Load() {
 		return nil, ErrClosed
 	}
-	return db.lookupLocked(ids), nil
+	return db.lookup(ids), nil
 }
 
 // Scan returns up to limit vectors whose ids sort strictly after `after`, in
@@ -90,12 +90,10 @@ func (db *DB) Scan(after string, limit int) ([]Vector, error) {
 	ids := []string(*h)
 	slices.Sort(ids)
 
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-	if db.closed {
+	if db.closed.Load() {
 		return nil, ErrClosed
 	}
-	return db.lookupLocked(ids), nil
+	return db.lookup(ids), nil
 }
 
 // Range calls fn for every vector in the database, in ascending byte order of
@@ -121,13 +119,10 @@ func (db *DB) Range(fn func(Vector) bool) error {
 	slices.Sort(ids)
 
 	for page := range slices.Chunk(ids, rangePage) {
-		db.mu.RLock()
-		if db.closed {
-			db.mu.RUnlock()
+		if db.closed.Load() {
 			return ErrClosed
 		}
-		vs := db.lookupLocked(page)
-		db.mu.RUnlock()
+		vs := db.lookup(page)
 
 		for _, v := range vs {
 			if !fn(v) {
@@ -138,21 +133,23 @@ func (db *DB) Range(fn func(Vector) bool) error {
 	return nil
 }
 
-// indexHandle reads the index pointer under the lock, the way Search does, so
-// a walk over it does not hold the database's lock.
+// indexHandle returns the index of an open database. The index is never
+// replaced after Open, so the handle needs no lock; the closed check is what
+// it is for.
 func (db *DB) indexHandle() (Index, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-	if db.closed {
+	if db.closed.Load() {
 		return nil, ErrClosed
 	}
 	return db.index, nil
 }
 
-// lookupLocked reads each id's values and metadata, skipping ids that are no
-// longer live. Callers hold the read lock, which is what makes values and
-// metadata agree.
-func (db *DB) lookupLocked(ids []string) []Vector {
+// lookup reads each id's values and metadata, skipping ids that are no longer
+// live. One shared hold of applyMu covers them all, which is what makes values
+// and metadata agree.
+func (db *DB) lookup(ids []string) []Vector {
+	db.applyMu.RLock()
+	defer db.applyMu.RUnlock()
+
 	out := make([]Vector, 0, len(ids))
 	for _, id := range ids {
 		values, ok := db.index.Lookup(id)

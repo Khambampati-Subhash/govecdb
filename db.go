@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,8 +21,8 @@ import (
 // DB is an embeddable vector database: an index, a write-ahead log, and
 // point-in-time snapshots over one directory.
 //
-// It is safe for concurrent use. Searches run in parallel with each other;
-// writes serialize against each other and against the index.
+// It is safe for concurrent use. Searches run in parallel with each other and
+// with writers; writes serialize against each other.
 //
 // # The ordering rule
 //
@@ -29,6 +30,33 @@ import (
 // Reverse the two and a crash between them acknowledges a write that no longer
 // exists. The index is derived state — it can always be rebuilt from the log,
 // and it is never the source of truth.
+//
+// # Two locks, and what neither is held across
+//
+// writeMu is the writers' lock. It is held across a write's log append *and*
+// its apply, which keeps apply order equal to log order — all the ordering
+// rule needs, and a rule between writers. Snapshot, Compact, Sync and Close
+// take it too, so none of them ever runs beside a half-finished write. No
+// reader ever takes it, because it is held across an fsync: one SyncAlways
+// writer used to hold searches off for its whole fsync, taking search p50 from
+// 40 µs to 4.9 ms.
+//
+// applyMu is held exclusively only while a write is applied to the index and
+// the metadata store, and shared by every reader that pairs a vector with its
+// metadata — Search, Get, GetBatch, Scan, Range. It exists because those are
+// two structures with two locks: a PUT replacing (v1, md1) with (v2, md2)
+// updates one and then the other, and a reader landing between them would see
+// (v2, md1), a pairing that never existed — and for a tenant or ACL filter the
+// one that matters. No order of the two updates avoids it; both orders tear.
+// So a pair is written under one exclusive hold and read under one shared one.
+//
+// What applyMu costs a reader is one apply, never a write. The fsync is over
+// before it is taken, and a large batch is applied in groups (applyGroup),
+// released in between — the same wait the index already imposes, since HNSW
+// holds its own write lock per chunk of a batch. A search issued during a
+// 10,000-vector AddBatch used to wait for all of it, 545 ms.
+//
+// closed and snapSeq are atomics, so reading them takes no lock at all.
 //
 // # No context parameter
 //
@@ -39,26 +67,32 @@ import (
 // promise of cancellation that is never kept, which is worse than not offering
 // one.
 type DB struct {
-	// mu guards the fields below and serializes writes. It is not held during a
-	// search: the index has its own lock and readers run under that, which is
-	// what lets queries scale across cores.
-	mu   sync.RWMutex
+	// writeMu serializes writers across append and apply, and guards failed
+	// and buf. See the note on the type.
+	writeMu sync.Mutex
+
+	// applyMu makes a vector and its metadata change together, as far as any
+	// reader can tell. See the note on the type.
+	applyMu sync.RWMutex
+
 	opts options
 	dir  string
 
+	// index and store are set by restore and never replaced, so readers use
+	// them without a lock; each is safe for concurrent use on its own.
 	index Index
 	store *store.Map
 	log   *wal.Writer
 
 	// snapSeq is the log sequence covered by the newest snapshot this process
-	// has written or loaded.
-	snapSeq uint64
+	// has written or loaded. Written under writeMu, read by Stats without it.
+	snapSeq atomic.Uint64
 
 	// nextSeq is where the log resumes after recovery. Written by restore and
 	// read once by Open; the log owns the sequence from then on.
 	nextSeq uint64
 
-	closed bool
+	closed atomic.Bool
 
 	// lock is the cross-process half of one writer per directory; openDirs is
 	// the in-process half. Held from Open to Close.
@@ -239,13 +273,17 @@ func (db *DB) Add(v Vector) error {
 		return err
 	}
 
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	db.writeMu.Lock()
+	defer db.writeMu.Unlock()
 
 	if err := db.writable(); err != nil {
 		return err
 	}
-	if err := db.putLocked(v); err != nil {
+	db.buf = encodePut(db.buf[:0], v)
+	if _, err := db.log.Append(wal.TypePut, db.buf); err != nil {
+		return db.fail(err)
+	}
+	if err := db.applyPut(v); err != nil {
 		return err
 	}
 	db.kickCalibration(db.index.Len())
@@ -275,8 +313,8 @@ func (db *DB) AddBatch(vs []Vector) error {
 		}
 	}
 
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	db.writeMu.Lock()
+	defer db.writeMu.Unlock()
 
 	if err := db.writable(); err != nil {
 		return err
@@ -295,12 +333,31 @@ func (db *DB) AddBatch(vs []Vector) error {
 	return nil
 }
 
+// applyGroup is how many PUTs of a batch are applied under one exclusive hold
+// of applyMu — the bound on how long a batch can keep a reader waiting. Eight
+// per insert worker, which is the chunk HNSW links under one hold of its own
+// write lock, so a group is one chunk: a reader waits for what the index
+// already made it wait for, and every worker still gets enough per group not
+// to idle at its end. At 16 workers that is 128 vectors, ~5 ms at dimension
+// 64, where a whole 10,000-vector batch was a third of a second.
+func (db *DB) applyGroup() int {
+	workers := db.opts.insertWorkers
+	if workers <= 0 {
+		workers = runtime.GOMAXPROCS(0)
+	}
+	return max(minApplyGroup, 8*workers)
+}
+
+// minApplyGroup keeps a batch on few workers from being applied a handful at a
+// time, which would pay the batch path's setup for almost nothing.
+const minApplyGroup = 64
+
 // applyPuts applies PUTs that are already in the log, in order, so a batch
 // naming one id twice ends as replaying it would: with the last vector and the
-// last metadata. Callers hold the write lock.
+// last metadata. Callers hold writeMu.
 //
-// An index that batches gets them in one call and links them in parallel; one
-// that does not gets them one Insert at a time.
+// An index that batches gets them a group at a time and links each group in
+// parallel; one that does not gets them one Insert at a time.
 func (db *DB) applyPuts(vs []Vector) error {
 	b, ok := db.index.(indexBatcher)
 	if !ok || len(vs) < 2 {
@@ -312,33 +369,60 @@ func (db *DB) applyPuts(vs []Vector) error {
 		return nil
 	}
 
-	ids := make([]string, len(vs))
-	values := make([][]float32, len(vs))
-	for i := range vs {
-		ids[i], values[i] = vs[i].ID, vs[i].Values
-	}
-	if err := b.InsertBatch(ids, values, db.opts.insertWorkers); err != nil {
-		// As in applyPut: the records are durable and the next start replays
-		// them, so failing the call is right and the gap closes on restart.
-		return fmt.Errorf("govecdb: index insert batch: %w", err)
-	}
-	for i := range vs {
-		db.store.Put(vs[i].ID, vs[i].Metadata)
+	// Only the last occurrence of an id is applied. That is the state replay
+	// would leave, and deciding it once for the whole batch keeps a duplicate
+	// that lands in two groups from costing the index a tombstone.
+	keep := lastOccurrences(vs)
+	size := db.applyGroup()
+	ids := make([]string, 0, min(len(keep), size))
+	values := make([][]float32, 0, cap(ids))
+	for lo := 0; lo < len(keep); lo += size {
+		group := keep[lo:min(lo+size, len(keep))]
+		ids, values = ids[:0], values[:0]
+		for _, i := range group {
+			ids, values = append(ids, vs[i].ID), append(values, vs[i].Values)
+		}
+
+		db.applyMu.Lock()
+		err := b.InsertBatch(ids, values, db.opts.insertWorkers)
+		if err == nil {
+			for _, i := range group {
+				db.store.Put(vs[i].ID, vs[i].Metadata)
+			}
+		}
+		db.applyMu.Unlock()
+		if err != nil {
+			// As in applyPut: the records are durable and the next start replays
+			// them, so failing the call is right and the gap closes on restart.
+			return fmt.Errorf("govecdb: index insert batch: %w", err)
+		}
 	}
 	return nil
 }
 
-// putLocked appends a PUT and applies it. Callers hold the write lock.
-func (db *DB) putLocked(v Vector) error {
-	db.buf = encodePut(db.buf[:0], v)
-	if _, err := db.log.Append(wal.TypePut, db.buf); err != nil {
-		return db.fail(err)
+// lastOccurrences returns the indexes of vs whose id does not appear again
+// later in vs, in order. A batch without duplicates — the usual one — comes
+// back as every index.
+func lastOccurrences(vs []Vector) []int {
+	last := make(map[string]int, len(vs))
+	for i := range vs {
+		last[vs[i].ID] = i
 	}
-	return db.applyPut(v)
+	keep := make([]int, 0, len(last))
+	for i := range vs {
+		if last[vs[i].ID] == i {
+			keep = append(keep, i)
+		}
+	}
+	return keep
 }
 
-// applyPut applies a PUT that is already in the log.
+// applyPut applies a PUT that is already in the log, under one exclusive hold
+// of applyMu so no reader sees the vector without its metadata.
 func (db *DB) applyPut(v Vector) error {
+	db.applyMu.Lock()
+	defer db.applyMu.Unlock()
+
 	if err := db.index.Insert(v.ID, v.Values); err != nil {
 		// The record is already durable, so replay will apply it on the next
 		// start. Failing the call rather than pretending otherwise is right, but
@@ -350,6 +434,19 @@ func (db *DB) applyPut(v Vector) error {
 	return nil
 }
 
+// applyDelete applies a DELETE that is already in the log.
+//
+// It takes applyMu for uniformity rather than need — removing the id from the
+// index first already hides the stale metadata from every reader, since each
+// one starts from the index — so that "every apply holds applyMu" stays a rule
+// with no exceptions to remember.
+func (db *DB) applyDelete(id string) {
+	db.applyMu.Lock()
+	defer db.applyMu.Unlock()
+	db.index.Delete(id)
+	db.store.Delete(id)
+}
+
 // Delete removes a vector. Deleting an id that is not there is not an error:
 // replay applies records more than once across a snapshot boundary, and an
 // operation that failed the second time would make recovery order-sensitive.
@@ -358,8 +455,8 @@ func (db *DB) Delete(id string) error {
 		return err
 	}
 
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	db.writeMu.Lock()
+	defer db.writeMu.Unlock()
 
 	if err := db.writable(); err != nil {
 		return err
@@ -369,8 +466,7 @@ func (db *DB) Delete(id string) error {
 	if _, err := db.log.Append(wal.TypeDelete, db.buf); err != nil {
 		return db.fail(err)
 	}
-	db.index.Delete(id)
-	db.store.Delete(id)
+	db.applyDelete(id)
 	db.kickCalibration(db.index.Len())
 	return nil
 }
@@ -382,12 +478,12 @@ func (db *DB) Delete(id string) error {
 // keeping a second copy of every embedding to hand back a number nothing uses
 // would double the memory of the largest thing in the process.
 func (db *DB) Get(id string) (Vector, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	if db.closed {
+	if db.closed.Load() {
 		return Vector{}, ErrClosed
 	}
+	db.applyMu.RLock()
+	defer db.applyMu.RUnlock()
+
 	values, ok := db.index.Lookup(id)
 	if !ok {
 		return Vector{}, fmt.Errorf("%w: %q", ErrNotFound, id)
@@ -398,19 +494,18 @@ func (db *DB) Get(id string) (Vector, error) {
 
 // Search returns the nearest vectors to a query, nearest first.
 //
-// It holds only a read lock here and none at all inside the index's traversal,
-// so searches run in parallel with one another. Writers are excluded for the
-// moment it takes to read the index handle, not for the search.
+// It never waits for a writer's log append or fsync, and runs in parallel with
+// other searches. The traversal and the metadata it reads — the filter, and
+// what is attached to each match — share one hold of applyMu, so a result is
+// never a vector paired with metadata from a different write. The most it
+// waits for is one apply (see the note on DB).
 func (db *DB) Search(req SearchRequest) ([]Match, error) {
-	db.mu.RLock()
-	if db.closed {
-		db.mu.RUnlock()
+	if db.closed.Load() {
 		return nil, ErrClosed
 	}
-	idx, st, opts := db.index, db.store, db.opts
-	db.mu.RUnlock()
+	idx, st := db.index, db.store
 
-	ef, err := opts.validateSearch(req, idx.SuggestedEf)
+	ef, err := db.opts.validateSearch(req, idx.SuggestedEf)
 	if err != nil {
 		return nil, err
 	}
@@ -423,6 +518,9 @@ func (db *DB) Search(req SearchRequest) ([]Match, error) {
 		f := req.Filter
 		allow = func(id string) bool { return st.Match(id, f.Match) }
 	}
+
+	db.applyMu.RLock()
+	defer db.applyMu.RUnlock()
 
 	matches, err := idx.Search(req.Query, req.K, ef, allow)
 	if err != nil {
@@ -449,18 +547,18 @@ func (db *DB) Search(req SearchRequest) ([]Match, error) {
 // start rather than assumed to be inside it. Claiming the other way would skip a
 // record that never made it in.
 func (db *DB) Snapshot() error {
-	db.mu.Lock()
-	if db.closed {
-		db.mu.Unlock()
+	if db.closed.Load() {
 		return ErrClosed
 	}
 	if db.opts.readOnly {
-		db.mu.Unlock()
 		return errOpenedReadOnly
 	}
+	// Read under writeMu so no write is between its append and its apply: the
+	// sequence then covers only writes the index already holds.
+	db.writeMu.Lock()
 	seq := db.log.LastSeq()
+	db.writeMu.Unlock()
 	idx, st := db.index, db.store
-	db.mu.Unlock()
 
 	// Every attempt past this point reports, success or failure, because the
 	// interval timer discards the error and an event is the only way its
@@ -474,9 +572,9 @@ func (db *DB) Snapshot() error {
 	taken.Took = time.Since(start)
 	db.emit(taken)
 
-	db.mu.Lock()
-	db.snapSeq = max(db.snapSeq, seq)
-	db.mu.Unlock()
+	db.writeMu.Lock()
+	db.snapSeq.Store(max(db.snapSeq.Load(), seq))
+	db.writeMu.Unlock()
 	return nil
 }
 
@@ -561,10 +659,10 @@ func (db *DB) truncateLog(snapDir string) (int, error) {
 // only the caller knows which moment can afford the pause — around 0.5 is where
 // it pays, because the pause tracks survivors rather than garbage.
 func (db *DB) Compact() (int, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	db.writeMu.Lock()
+	defer db.writeMu.Unlock()
 
-	if db.closed {
+	if db.closed.Load() {
 		return 0, ErrClosed
 	}
 	return db.index.Compact(), nil
@@ -572,20 +670,19 @@ func (db *DB) Compact() (int, error) {
 
 // Len is how many vectors a search can return.
 func (db *DB) Len() int {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-	if db.closed {
+	if db.closed.Load() {
 		return 0
 	}
 	return db.index.Len()
 }
 
 // Stats reports what the database is holding.
+//
+// It takes no database lock, so it never waits on a writer; the fields are
+// each read atomically but not all at one instant, and a write landing
+// between them can show in one and not yet in another.
 func (db *DB) Stats() Stats {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	if db.closed {
+	if db.closed.Load() {
 		return Stats{}
 	}
 	live, deleted, slots := db.index.Stats()
@@ -594,8 +691,8 @@ func (db *DB) Stats() Stats {
 		Deleted:      deleted,
 		Slots:        slots,
 		WithMetadata: db.store.Len(),
-		LastSeq:      db.lastSeqLocked(),
-		SnapshotSeq:  db.snapSeq,
+		LastSeq:      db.lastSeq(),
+		SnapshotSeq:  db.snapSeq.Load(),
 		EfScale:      efScaleOf(db.index),
 	}
 }
@@ -605,10 +702,10 @@ func (db *DB) Stats() Stats {
 // how a caller draws a line before doing something that must not outlive the
 // data behind it.
 func (db *DB) Sync() error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	db.writeMu.Lock()
+	defer db.writeMu.Unlock()
 
-	if db.closed {
+	if db.closed.Load() {
 		return ErrClosed
 	}
 	if db.failed != nil {
@@ -632,20 +729,17 @@ func (db *DB) Sync() error {
 // disk — where shutting down cleanly matters most. Call Snapshot first if the
 // next start should be fast.
 func (db *DB) Close() error {
-	db.mu.Lock()
-	if db.closed {
-		db.mu.Unlock()
+	// Every operation checks closed first, so from here on nothing new starts.
+	// What is already running is waited for below.
+	if !db.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	db.closed = true
-	stop, done := db.stopSnap, db.doneSnap
-	db.mu.Unlock()
 
-	// Stop the snapshotter before taking the lock back, so a snapshot already in
+	// Stop the snapshotter before taking writeMu, so a snapshot already in
 	// flight finishes instead of deadlocking against us.
-	if stop != nil {
-		close(stop)
-		<-done
+	if db.stopSnap != nil {
+		close(db.stopSnap)
+		<-db.doneSnap
 	}
 	// The calibrator too; a calibration in flight gives up between queries.
 	if db.stopCal != nil {
@@ -653,8 +747,11 @@ func (db *DB) Close() error {
 		<-db.doneCal
 	}
 
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	// Waits out any write — or Snapshot, or Compact — that passed its closed
+	// check before we set it, so the directory is released with nothing still
+	// writing into it.
+	db.writeMu.Lock()
+	defer db.writeMu.Unlock()
 
 	if abs, err := filepath.Abs(db.dir); err == nil {
 		openDirs.Delete(abs)
@@ -709,9 +806,9 @@ func makeDirs(dir string) error {
 	return nil
 }
 
-// writable reports whether a write may proceed. Callers hold the write lock.
+// writable reports whether a write may proceed. Callers hold writeMu.
 func (db *DB) writable() error {
-	if db.closed {
+	if db.closed.Load() {
 		return ErrClosed
 	}
 	if db.opts.readOnly {
@@ -723,9 +820,9 @@ func (db *DB) writable() error {
 	return nil
 }
 
-// lastSeqLocked is the sequence of the newest record in the log. A read-only
+// lastSeq is the sequence of the newest record in the log. A read-only
 // database has no writer to ask, so it reports where replay stopped.
-func (db *DB) lastSeqLocked() uint64 {
+func (db *DB) lastSeq() uint64 {
 	if db.log == nil {
 		return max(db.nextSeq, 1) - 1
 	}
@@ -734,9 +831,11 @@ func (db *DB) lastSeqLocked() uint64 {
 
 // fail records the first durability failure and returns it wrapped in
 // ErrReadOnly, so a caller can match the category and still print the cause.
+// Callers hold writeMu, which is what makes failed safe to set here.
 //
-// The event fires here, under the write lock, which is the reason WithObserver
-// forbids calling back into the DB. Deferring it past the unlock would mean
+// The event fires here, under writeMu, which is the reason WithObserver
+// forbids calling back into the DB: a write from the observer would deadlock
+// on the lock its own caller holds. Deferring it past the unlock would mean
 // threading a pending event through all four callers for an event that fires
 // at most once in a database's life.
 func (db *DB) fail(err error) error {

@@ -214,10 +214,10 @@ func TestDurabilityFailureFiresOnce(t *testing.T) {
 	db, _ := openDB(t, WithObserver(r.observe))
 	cause := errors.New("disk on fire")
 
-	db.mu.Lock()
+	db.writeMu.Lock()
 	db.fail(cause)
 	db.fail(errors.New("a later symptom"))
-	db.mu.Unlock()
+	db.writeMu.Unlock()
 
 	if got := one[DurabilityFailure](t, &r); !errors.Is(got.Cause, cause) {
 		t.Fatalf("DurabilityFailure cause = %v, want the first one", got.Cause)
