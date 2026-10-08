@@ -31,6 +31,7 @@ a promise until writing it showed it did not belong there.
 | `filter.go` | The `Filter` interface, `And` / `Or` / `Not` / `Exists`. |
 | `compare.go` | `Eq` / `Ne` / `Lt` / `Lte` / `Gt` / `Gte` / `In`. |
 | `value.go` | Operand normalization, and the comparison kernel. |
+| `set.go` | The hashed operand set a wide `In` matches through. |
 | `errors.go` | Sentinel errors callers match on. |
 
 ## Absent keys are false, uniformly
@@ -140,6 +141,22 @@ they are what makes a filter accumulated in a loop behave when the loop runs zer
 times. `In(key)` with no values matches nothing for the same reason, which is
 also the direction that fails safe: filtering by a set that turned out to be
 empty returns nothing rather than everything.
+
+## A wide `In` is a set, built once
+
+`In` runs once per node a search visits, so its cost is multiplied by the walk.
+Scanned, a miss against 100,000 operands was 237 µs *per node*, and one request
+of that shape held a collection's read lock for seconds. Above 8 operands `In`
+files them into a `valueSet` at construction — 9 ns a lookup at any width,
+0 allocations — and below that it scans, which is as fast for a handful.
+
+The set keeps `equal`'s semantics exactly, including the cross-type numeric rule:
+`int64` operands and whole-number `float64` operands (inside `[-2^63, 2^63)`)
+go into an `int64`-keyed map, every non-NaN `float64` operand into a
+`float64`-keyed one, and a stored value is looked up in whichever maps it could
+be equal in. `TestValueSetMatchesTheScan` checks it against the scan over the
+values where this could go wrong — 2^53, 2^63, signed zero, NaN, the
+infinities.
 
 ## Where it is applied
 

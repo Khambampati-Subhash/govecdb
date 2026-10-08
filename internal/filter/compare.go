@@ -124,6 +124,10 @@ func (c *compare) Validate() error { return c.err }
 // In() with no values matches nothing, which is the identity for a disjunction
 // and what makes filtering by an empty set of ids return nothing rather than
 // everything — the direction that fails safe.
+//
+// More than a handful of values are filed into a set once, here, so Match is
+// one lookup rather than one comparison per value — see valueSet, which also
+// explains how the int64/float64 equality rule survives hashing.
 func In(key string, vs ...any) Filter {
 	f := &in{key: key, vals: make([]any, 0, len(vs))}
 	for i, v := range vs {
@@ -134,12 +138,16 @@ func In(key string, vs ...any) Filter {
 		}
 		f.vals = append(f.vals, n)
 	}
+	if len(f.vals) > setThreshold {
+		f.set, f.vals = newValueSet(f.vals), nil
+	}
 	return f
 }
 
 type in struct {
 	key  string
 	vals []any
+	set  *valueSet // nil for a short list, which is scanned
 	err  error
 }
 
@@ -148,10 +156,11 @@ func (i *in) Match(md store.Metadata) bool {
 	if !ok {
 		return false
 	}
-	// Linear, because the value set is a handful of literals in every use this
-	// package was built for, and a map keyed by `any` would hash every candidate
-	// value to save comparisons that cost a type switch each. If a caller ever
-	// passes thousands, that is the point to measure rather than to guess.
+	if i.set != nil {
+		return i.set.contains(stored)
+	}
+	// Linear below setThreshold: a type switch and a compare per value beats a
+	// hash per lookup for the handful of literals most filters carry.
 	for _, v := range i.vals {
 		if equal(stored, v) {
 			return true

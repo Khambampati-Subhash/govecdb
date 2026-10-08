@@ -370,6 +370,11 @@ also match vectors that lack the key entirely.
 nothing.** These are the identity elements, and they are what make a filter built
 in a loop behave when the loop runs zero times.
 
+**A filter is bounded in width as well as depth**: at most 1,024 op objects
+(`-max-filter-clauses`, combinators included) and 1,024 values across all its
+`in`s (`-max-filter-values`). Over either is `400 invalid_filter`. A filter is
+evaluated at every node a search visits, so its width multiplies the walk.
+
 Selectivity costs latency, not memory. Unfiltered to one-in-fifty is 85 µs → 965
 µs on the measured corpus, at the same 2 allocations per search. Past roughly one
 vector in a hundred, a scan over your own metadata is the better tool and this
@@ -389,6 +394,8 @@ govecdbd -dir <directory> [flags]
 | `-snapshot-interval` | `10m` | Snapshot interval for new collections that do not set one. 0 for none. Recorded in each collection's spec, so changing it never alters an existing collection. |
 | `-idle-timeout` | `0` | Close a collection nothing has used for this long. 0 never does. |
 | `-max-body` | `32 MiB` | Largest request body. |
+| `-max-filter-clauses` | `1024` | Most op objects in one search filter, combinators included. |
+| `-max-filter-values` | `1024` | Most values across every `in` in one search filter. |
 | `-timeout` | `2m` | Per-request read and write timeout. |
 | `-drain` | `0` | Keep serving this long after `/readyz` starts failing. |
 | `-shutdown-timeout` | `30s` | How long to wait for requests in flight. |
@@ -522,7 +529,7 @@ this does not have.
   ordinary.
 - **Terminate TLS in front, or pass `-tls-cert`/`-tls-key`.** The token is a
   bearer credential and travels in a header.
-- **Everything a client sends is bounded**: body size, filter depth, id length,
+- **Everything a client sends is bounded**: body size, filter depth and width, id length,
   `k`, `ef`, batch size, metadata size. The last five are the library's own
   limits, tested there.
 - **`/metrics` requires the token.** It enumerates collections and their sizes.

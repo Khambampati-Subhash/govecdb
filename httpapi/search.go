@@ -49,7 +49,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		TargetRecall: req.TargetRecall,
 	}
 	if req.Filter != nil {
-		f, err := req.Filter.build(0)
+		lim := s.filters // a copy: the budget is per request
+		f, err := req.Filter.build(0, &lim)
 		if err != nil {
 			s.fail(w, r, err)
 			return

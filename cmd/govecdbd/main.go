@@ -66,6 +66,8 @@ type config struct {
 	idle          time.Duration
 	snapshotEvery time.Duration
 	maxBody       int64
+	filterClauses int
+	filterValues  int
 	timeout       time.Duration
 	drain         time.Duration
 	shutdown      time.Duration
@@ -89,6 +91,10 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs.DurationVar(&c.snapshotEvery, "snapshot-interval", 10*time.Minute,
 		"snapshot interval for new collections that do not set one (0 = none)")
 	fs.Int64Var(&c.maxBody, "max-body", httpapi.DefaultMaxBodyBytes, "maximum request body in bytes")
+	fs.IntVar(&c.filterClauses, "max-filter-clauses", httpapi.DefaultMaxFilterClauses,
+		"maximum op objects in one search filter")
+	fs.IntVar(&c.filterValues, "max-filter-values", httpapi.DefaultMaxFilterValues,
+		"maximum values across every \"in\" in one search filter")
 	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "per-request read and write timeout")
 	fs.DurationVar(&c.drain, "drain", 0, "keep serving for this long after /readyz starts failing")
 	fs.DurationVar(&c.shutdown, "shutdown-timeout", 30*time.Second, "how long to wait for requests in flight")
@@ -124,6 +130,9 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	}
 	if c.maxBody <= 0 {
 		return c, errors.New("-max-body must be positive")
+	}
+	if c.filterClauses <= 0 || c.filterValues <= 0 {
+		return c, errors.New("-max-filter-clauses and -max-filter-values must be positive")
 	}
 	return c, nil
 }
@@ -176,6 +185,9 @@ func run(ctx context.Context, args []string, stderr io.Writer, stop func(), read
 		AuthToken:    token,
 		Version:      buildVersion(),
 		Events:       events,
+
+		MaxFilterClauses: cfg.filterClauses,
+		MaxFilterValues:  cfg.filterValues,
 	})
 	if err != nil {
 		return err

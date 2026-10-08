@@ -14,6 +14,28 @@ import (
 // far short of anything that hurts.
 const maxFilterDepth = 32
 
+// Default bounds on a filter's width, used when Config leaves them zero.
+//
+// Depth was bounded and width was not, and width is what costs: the filter runs
+// once per node the search visits, holding the collection's read lock, so a
+// filter that is wide and matches nothing is a full graph walk multiplied by its
+// width. Measured at 20,000 vectors, an `in` of 100,000 values — a 592 KB body —
+// took 4.8 s, and every later search on that collection queued behind it as
+// soon as one write did. A thousand clauses and a thousand `in` values are far
+// past what a person writes and a small multiple of what a generated id list
+// needs; a caller with a bigger list raises the limit knowingly.
+const (
+	DefaultMaxFilterClauses = 1024
+	DefaultMaxFilterValues  = 1024
+)
+
+// filterLimits is a request's remaining budget while its filter is built.
+// Clauses counts every op object, combinators included: an `and` of a thousand
+// empty `and`s costs a thousand calls per node just the same.
+type filterLimits struct {
+	clauses, values int
+}
+
 // filterJSON is the wire form of a metadata filter.
 //
 // # Why the format lives here
@@ -49,12 +71,15 @@ type filterJSON struct {
 // Errors are wrapped in govecdb.ErrInvalidFilter so that a filter refused here
 // and a filter refused by the database's own Validate reach the client as the
 // same code. The two failures are the same thing to whoever wrote the query.
-func (f *filterJSON) build(depth int) (govecdb.Filter, error) {
+func (f *filterJSON) build(depth int, lim *filterLimits) (govecdb.Filter, error) {
 	if f == nil {
 		return nil, fmt.Errorf("%w: a filter is null", govecdb.ErrInvalidFilter)
 	}
 	if depth > maxFilterDepth {
 		return nil, fmt.Errorf("%w: nested deeper than %d", govecdb.ErrInvalidFilter, maxFilterDepth)
+	}
+	if lim.clauses--; lim.clauses < 0 {
+		return nil, fmt.Errorf("%w: more clauses than the server allows", govecdb.ErrInvalidFilter)
 	}
 
 	switch f.Op {
@@ -82,6 +107,11 @@ func (f *filterJSON) build(depth int) (govecdb.Filter, error) {
 		if err := f.requireKey(); err != nil {
 			return nil, err
 		}
+		// Checked before anything is converted: the list is already decoded, but
+		// building a filter from it is the work being refused.
+		if lim.values -= len(f.Values); lim.values < 0 {
+			return nil, fmt.Errorf("%w: more \"in\" values than the server allows", govecdb.ErrInvalidFilter)
+		}
 		vs := make([]any, len(f.Values))
 		for i, raw := range f.Values {
 			v, err := scalar(raw)
@@ -104,7 +134,7 @@ func (f *filterJSON) build(depth int) (govecdb.Filter, error) {
 	case "and", "or":
 		subs := make([]govecdb.Filter, len(f.Filters))
 		for i := range f.Filters {
-			sub, err := f.Filters[i].build(depth + 1)
+			sub, err := f.Filters[i].build(depth+1, lim)
 			if err != nil {
 				return nil, err
 			}
@@ -116,7 +146,7 @@ func (f *filterJSON) build(depth int) (govecdb.Filter, error) {
 		return govecdb.Or(subs...), nil
 
 	case "not":
-		sub, err := f.Filter.build(depth + 1)
+		sub, err := f.Filter.build(depth+1, lim)
 		if err != nil {
 			return nil, err
 		}

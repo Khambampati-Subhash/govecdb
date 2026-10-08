@@ -78,6 +78,14 @@ they are *network* bytes, which is the same problem with a shorter fuse.
   at the wrong width, succeed, and be found weeks later with data in it.
 - **Filter trees are depth-limited.** A filter is recursion driven by a request
   body, and a stack overflow in Go is not a recovered panic — it is the process.
+- **Filter trees are width-limited too**: at most `MaxFilterClauses` op objects
+  (default 1,024, combinators included) and `MaxFilterValues` values across
+  every `in` (default 1,024). The filter runs once per node the search visits,
+  holding the collection's read lock, so width multiplies the whole walk: an
+  `in` of 100,000 values that matched nothing took 4.8 s at 20,000 vectors,
+  from a 592 KB body. The library also matches a wide `in` through a hashed
+  set now, but the bound belongs here, like the depth one: it is a property of
+  what one request may ask for.
 - **`Content-Type` must be `application/json`** when there is a body. Refusing
   the types a browser can send from a plain form is what keeps a cross-site
   request from reaching a write endpoint without a preflight.

@@ -53,6 +53,14 @@ type Config struct {
 	// the same Events the Manager was given as its Observer, or the counters
 	// count nothing; see Events for why the two are wired separately.
 	Events *Events
+
+	// MaxFilterClauses caps how many op objects one search filter may hold,
+	// combinators included. Zero means DefaultMaxFilterClauses.
+	MaxFilterClauses int
+
+	// MaxFilterValues caps the total number of values across every "in" in
+	// one search filter. Zero means DefaultMaxFilterValues.
+	MaxFilterValues int
 }
 
 // Server is an http.Handler over a collection manager.
@@ -63,6 +71,7 @@ type Server struct {
 	token   []byte
 	version string
 	events  *Events
+	filters filterLimits
 
 	handler http.Handler
 	started time.Time
@@ -88,6 +97,13 @@ func New(cfg Config) (*Server, error) {
 		version: cfg.Version,
 		events:  cfg.Events,
 		started: time.Now(),
+		filters: filterLimits{clauses: cfg.MaxFilterClauses, values: cfg.MaxFilterValues},
+	}
+	if s.filters.clauses <= 0 {
+		s.filters.clauses = DefaultMaxFilterClauses
+	}
+	if s.filters.values <= 0 {
+		s.filters.values = DefaultMaxFilterValues
 	}
 	if s.log == nil {
 		s.log = slog.New(slog.DiscardHandler)
