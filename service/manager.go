@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1027,10 +1028,16 @@ func (m *Manager) dir(name string) string { return filepath.Join(m.root, name) }
 
 // wrapOpen translates the database's configuration error into this package's, so
 // a caller matches one sentinel whether the spec was rejected before it reached
-// the disk or after. Everything else passes through with the collection named.
+// the disk or after. A filesystem failure becomes ErrUnavailable. Everything
+// else passes through with the collection named.
 func wrapOpen(name string, err error) error {
 	if errors.Is(err, govecdb.ErrInvalidConfig) {
 		return fmt.Errorf("%w: %q: %w", ErrInvalidSpec, name, err)
+	}
+	var pathErr *fs.PathError
+	var sysErr *os.SyscallError
+	if errors.As(err, &pathErr) || errors.As(err, &sysErr) {
+		return fmt.Errorf("%w: %q: %w", ErrUnavailable, name, err)
 	}
 	return fmt.Errorf("service: open %q: %w", name, err)
 }

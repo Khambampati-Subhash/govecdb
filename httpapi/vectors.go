@@ -121,6 +121,13 @@ func (s *Server) handleGetVectors(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// The page limit, not the database's batch limit: like a page, this is a
+	// response built in memory, and 10,000 ids at 1,536 dimensions is ~170 MB
+	// of JSON. Duplicates count, because they are encoded twice.
+	if len(req.IDs) > maxPageLimit {
+		s.fail(w, r, fmt.Errorf("%w: %d ids, at most %d per request", govecdb.ErrInvalidRequest, len(req.IDs), maxPageLimit))
+		return
+	}
 	var vs []govecdb.Vector
 	err := s.mgr.Use(r.PathValue("name"), func(db *govecdb.DB) error {
 		var err error

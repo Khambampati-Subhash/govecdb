@@ -52,4 +52,13 @@ var (
 	// investigate. Reporting both as "bad config" would send an operator looking
 	// in the wrong place.
 	ErrCorruptSpec = errors.New("service: corrupt collection spec")
+
+	// ErrUnavailable means a collection exists but could not be opened because
+	// of the filesystem — a full disk, a permission, an I/O error — rather than
+	// anything about the request. Kept apart from the catch-all because it is
+	// a different answer to the client: the collection is fine and the machine
+	// is not, so retrying later, or elsewhere, can work. The typical case is a
+	// collection evicted after a durability failure and reopened on a disk
+	// that is still full: the open creates a log segment, and that fails.
+	ErrUnavailable = errors.New("service: collection is unavailable")
 )

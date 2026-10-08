@@ -260,7 +260,9 @@ the process.
 
 Order is kept and absent ids are listed rather than failing the call. A POST
 because a thousand ids do not fit in a URL. Read under one lock, so the batch is
-one consistent moment. At most the collection's batch limit (10,000) ids.
+one consistent moment. At most 1,000 ids (duplicates count) — the page limit,
+because like a page the response is built in memory; more is `400
+invalid_request`.
 
 ### `GET /v1/collections/{name}/vectors?after=&limit=` — page through
 
@@ -405,7 +407,7 @@ govecdbd -dir <directory> [flags]
 | `-shutdown-timeout` | `30s` | How long to wait for requests in flight. |
 | `-close-timeout` | `10s` | After the HTTP server stops, how long to wait for collections still in use to close. Idle ones are closed first, at once. |
 | `-tls-cert`, `-tls-key` | — | PEM pair; enables TLS. Both or neither. |
-| `-log-level` | `info` | `debug`, `info`, `warn`, `error`. |
+| `-log-level` | `info` | `debug`, `info`, `warn`, `error`. At `info` every request is a log line through one handler; at thousands of requests a second, `warn` removes that contention. |
 | `-log-json` | `false` | Structured JSON logs. |
 | `-version` | | Print the version and exit. |
 
@@ -491,6 +493,7 @@ fast.
 | `govecdb_collection_wal_sequence` − `..._snapshot_sequence` | A widening gap is a slow restart waiting to happen. |
 | `govecdb_http_requests_total{class="5xx"}` | Anything above zero. |
 | `govecdb_collections_loaded` vs `-max-open` | At the cap, with `503 too_many_open` appearing. |
+| `go_memory_total_bytes` vs the container limit | Approaching it. Indexes are the bulk; `go_memory_heap_objects_bytes` is the live part. `go_goroutines` climbing with flat traffic is a pile-up. |
 | `govecdb_http_rejected_total{pool}` | Rising: requests are being shed with `503 overloaded`. `govecdb_http_inflight{pool}` pinned at the `-max-inflight-*` size says which pool is the bottleneck. |
 | `govecdb_events_total{event="durability_failure"}` | Anything above zero: that collection is read-only until a restart. |
 | `govecdb_events_total{event=~"torn_log\|snapshot_rejected\|truncation_skipped"}` | A torn log after a crash is expected; on a clean restart, or repeatedly, it is the disk. A rejected snapshot or skipped truncation should never happen on a healthy machine. |

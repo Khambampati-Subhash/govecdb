@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	rtmetrics "runtime/metrics"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -75,7 +76,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "govecdb_uptime_seconds %s\n", float(time.Since(s.started).Seconds()))
 
 	metric(&b, "govecdb_http_requests_total", "counter", "Requests served, by status class.")
-	for class, label := range map[int]string{1: "1xx", 2: "2xx", 3: "3xx", 4: "4xx", 5: "5xx", 0: "other"} {
+	// A fixed order, so two scrapes of an idle server are byte-identical.
+	for class, label := range [...]string{"other", "1xx", "2xx", "3xx", "4xx", "5xx"} {
 		fmt.Fprintf(&b, "govecdb_http_requests_total{class=%q} %d\n", label, s.metrics.requests[class].Load())
 	}
 
@@ -141,11 +143,45 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.events != nil {
 		s.events.writeMetrics(&b)
 	}
+	writeRuntimeMetrics(&b)
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	w.Write(b.Bytes())
+}
+
+// runtimeMetrics are the Go runtime's own numbers worth a graph: memory is
+// what a vector database runs out of first, and goroutines are what a leak or
+// a pile-up of slow requests looks like. Read through runtime/metrics, which is
+// stdlib and, unlike runtime.ReadMemStats, does not stop the world.
+var runtimeMetrics = []struct {
+	key, name, kind, help string
+}{
+	{"/sched/goroutines:goroutines", "go_goroutines", "gauge", "Live goroutines."},
+	{"/memory/classes/heap/objects:bytes", "go_memory_heap_objects_bytes", "gauge",
+		"Heap memory occupied by live objects and not-yet-swept dead ones."},
+	{"/memory/classes/total:bytes", "go_memory_total_bytes", "gauge",
+		"All memory mapped by the Go runtime: the number to compare with the container limit."},
+	{"/gc/heap/goal:bytes", "go_gc_heap_goal_bytes", "gauge", "Heap size at which the next GC cycle starts."},
+	{"/gc/cycles/total:gc-cycles", "go_gc_cycles_total", "counter", "Completed GC cycles."},
+}
+
+func writeRuntimeMetrics(b *bytes.Buffer) {
+	samples := make([]rtmetrics.Sample, len(runtimeMetrics))
+	for i, m := range runtimeMetrics {
+		samples[i].Name = m.key
+	}
+	rtmetrics.Read(samples)
+	for i, m := range runtimeMetrics {
+		// A key this toolchain does not know reads as KindBad; skipping it
+		// keeps the scrape valid on an older or newer Go.
+		if samples[i].Value.Kind() != rtmetrics.KindUint64 {
+			continue
+		}
+		metric(b, m.name, m.kind, m.help)
+		fmt.Fprintf(b, "%s %d\n", m.name, samples[i].Value.Uint64())
+	}
 }
 
 // infoLike flattens the fields the gauge table reads, so the table stays a table

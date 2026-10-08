@@ -156,6 +156,12 @@ func classify(err error) (status int, code, message string) {
 	case errors.Is(err, service.ErrClosed), errors.Is(err, govecdb.ErrClosed):
 		return http.StatusServiceUnavailable, codeUnavailable, "the server is shutting down"
 
+	// The collection exists and the filesystem refused to open it. The cause
+	// names paths, so it goes to the log; the client learns only that a retry
+	// can work.
+	case errors.Is(err, service.ErrUnavailable):
+		return http.StatusServiceUnavailable, codeUnavailable, "the collection cannot be opened right now; retry later"
+
 	default:
 		return http.StatusInternalServerError, codeInternal, "internal error"
 	}

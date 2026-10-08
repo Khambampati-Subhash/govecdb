@@ -199,7 +199,7 @@ semantics are the library's, unchanged — including the one most likely to be
 | `read_only` | 503 | A durability failure; the database refuses writes until restarted. |
 | `too_many_open` | 503 | Every collection slot is busy. Retry — `Retry-After` is set. |
 | `overloaded` | 503 | The read or write request pool is full. Retry — `Retry-After` is set. |
-| `unavailable` | 503 | Shutting down. |
+| `unavailable` | 503 | Shutting down, or the filesystem refused to open the collection (a full disk, a permission). Retry later. |
 | `internal` | 500 | Anything else. The cause is in the log. |
 | `client_gone` | 499 | The client disconnected before the work started, so it was skipped. Only ever seen in the log and the 4xx counter. |
 
