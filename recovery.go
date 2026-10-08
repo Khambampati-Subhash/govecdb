@@ -54,7 +54,9 @@ func (db *DB) restore() error {
 // A corrupt newest snapshot is not fatal: internal/snapshot falls back to an
 // older one, and if every one of them fails the result is simply no snapshot and
 // a longer replay. Refusing to start over a bad *cache* would be the wrong call
-// — the log is the source of truth and it is still there.
+// — the log is the source of truth — as long as the log is still all there.
+// Once truncation has run it is not, and replayLog refuses then (see
+// checkLogReachesBack).
 func (db *DB) loadSnapshot(dir string) error {
 	var (
 		idx *hnswIndex
@@ -133,7 +135,14 @@ func (db *DB) checkConfig(idx *hnswIndex) error {
 func (db *DB) replayLog(dir string) (applied, segments int, err error) {
 	r := replayer{db: db}
 	snapSeq := db.snapSeq.Load()
+	first := true
 	res, err := wal.Replay(dir, wal.Options{}, func(rec wal.Record) error {
+		if first {
+			first = false
+			if err := checkLogReachesBack(rec.Seq, snapSeq); err != nil {
+				return err
+			}
+		}
 		if rec.Seq <= snapSeq {
 			return nil // already inside the snapshot
 		}
@@ -161,6 +170,43 @@ func (db *DB) replayLog(dir string) (applied, segments int, err error) {
 	// start: a torn tail is a write that was never acknowledged. They are
 	// reported as events above rather than returned.
 	return applied, res.Segments, nil
+}
+
+// checkLogReachesBack refuses a log whose first record leaves a gap after the
+// snapshot that was loaded — snapSeq 0 when none was.
+//
+// # Why this is an error and not a slower start
+//
+// Truncation deletes the segments a retained snapshot stands in for. If every
+// snapshot is then unusable — rotted, or a snapshots directory deleted as "just
+// a cache" — the log no longer reaches back to the start, and replaying what is
+// left onto an empty index opens a database with most of its data missing and
+// nothing saying so. Measured: 551 of 2,000 vectors, opened writable, and the
+// next snapshot made the loss permanent by pruning the damaged files and
+// truncating the rest of the log. A database that cannot be opened is
+// recoverable — restore the snapshots and reopen; one that opens with its data
+// silently gone is not.
+//
+// It cannot misfire on a healthy database. A log never truncated starts at 1.
+// Truncation keeps every record above the oldest retained snapshot, and the
+// snapshot loaded is at least that new, so the first record is at most one
+// past it. A crash tears the end of a segment, never the start of the log —
+// rot in the very first record would trip it, and should, because those
+// records are gone. And a log *behind* its snapshot — a crash under SyncNever — starts
+// at or below it, which passes.
+func checkLogReachesBack(first, snapSeq uint64) error {
+	if first <= snapSeq+1 {
+		return nil
+	}
+	if snapSeq == 0 {
+		return fmt.Errorf("%w: the log starts at seq %d and no usable snapshot covers seqs 1-%d: "+
+			"they were truncated behind snapshots that are now missing or corrupt; "+
+			"restore the snapshots directory to open this database",
+			ErrCorrupt, first, first-1)
+	}
+	return fmt.Errorf("%w: the log starts at seq %d but the newest usable snapshot covers only through seq %d: "+
+		"seqs %d-%d are missing; restore the newer snapshots to open this database",
+		ErrCorrupt, first, snapSeq, snapSeq+1, first-1)
 }
 
 // replayBatch is how many consecutive PUTs replay gathers before applying

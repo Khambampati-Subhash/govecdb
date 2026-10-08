@@ -476,3 +476,125 @@ func assertMetadata(t *testing.T, db *DB, id string, want Metadata) {
 		}
 	}
 }
+
+// TestRecoveryRefusesALogThatNoLongerReachesBack: every snapshot unusable and
+// the log truncated used to open with most of the data silently missing —
+// 551 of 2,000 — writable, and the next snapshot made it permanent. It is now
+// refused with ErrCorrupt saying what is missing.
+func TestRecoveryRefusesALogThatNoLongerReachesBack(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		damage func(t *testing.T, dir string)
+	}{
+		{"every snapshot corrupt", func(t *testing.T, dir string) {
+			for _, p := range snapshotFiles(t, dir) {
+				corrupt(t, p)
+			}
+		}},
+		{"snapshots directory deleted", func(t *testing.T, dir string) {
+			if err := os.RemoveAll(filepath.Join(dir, snapshotSubdir)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := snapshottedAndTruncated(t)
+			tc.damage(t, dir)
+
+			db, err := Open(dir, WithDimension(testDim), WithSyncPolicy(SyncNever))
+			if err == nil {
+				n := db.Len()
+				db.Close()
+				t.Fatalf("Open succeeded holding %d of 2000 vectors", n)
+			}
+			if !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("Open = %v, want ErrCorrupt", err)
+			}
+			t.Logf("refused: %v", err)
+		})
+	}
+}
+
+// TestRecoveryGapCheckDoesNotMisfire: the healthy shapes around the same
+// directory all still open, with everything in them.
+func TestRecoveryGapCheckDoesNotMisfire(t *testing.T) {
+	t.Run("snapshots intact", func(t *testing.T) {
+		dir := snapshottedAndTruncated(t)
+		db := openDBAt(t, dir)
+		if db.Len() != 2000 {
+			t.Fatalf("Len = %d, want 2000", db.Len())
+		}
+	})
+	t.Run("newest snapshot corrupt", func(t *testing.T) {
+		dir := snapshottedAndTruncated(t)
+		snaps := snapshotFiles(t, dir)
+		corrupt(t, snaps[len(snaps)-1]) // names sort by sequence: the newest
+		db := openDBAt(t, dir)
+		if db.Len() != 2000 {
+			t.Fatalf("Len = %d, want 2000", db.Len())
+		}
+	})
+	t.Run("log never truncated, snapshots gone", func(t *testing.T) {
+		db, dir := openDB(t, WithMaxSegmentBytes(4096))
+		fill(t, db, 300, 121)
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		db = openDBAt(t, dir)
+		if db.Len() != 300 {
+			t.Fatalf("Len = %d, want 300", db.Len())
+		}
+	})
+	t.Run("torn tail mid-log", func(t *testing.T) {
+		db, dir := openDB(t)
+		fill(t, db, 100, 122)
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		segs := logSegments(t, dir)
+		f, err := os.OpenFile(segs[len(segs)-1], os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Write([]byte{1, 2, 3, 4, 5, 6, 7}) // a torn record
+		f.Close()
+		db = openDBAt(t, dir) // a new segment after the tear
+		fill2(t, db, 100, 50, 123)
+		db = reopen(t, db, dir)
+		if db.Len() != 150 {
+			t.Fatalf("Len = %d, want 150", db.Len())
+		}
+	})
+	t.Run("fresh database", func(t *testing.T) {
+		db, dir := openDB(t)
+		db = reopen(t, db, dir)
+		if db.Len() != 0 {
+			t.Fatalf("Len = %d, want 0", db.Len())
+		}
+	})
+}
+
+// snapshottedAndTruncated writes 2,000 vectors through 4 KiB segments with
+// snapshots at 1,000, 1,500 and 2,000, and closes. Truncation has then
+// deleted the start of the log: only the retained snapshots cover it.
+func snapshottedAndTruncated(t *testing.T) string {
+	t.Helper()
+	db, dir := openDB(t, WithMaxSegmentBytes(4096))
+	fill2(t, db, 0, 1000, 124)
+	for _, n := range []int{1000, 1500} {
+		if err := db.Snapshot(); err != nil {
+			t.Fatal(err)
+		}
+		fill2(t, db, n, 500, int64(n))
+	}
+	if err := db.Snapshot(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := logSegments(t, dir); len(got) == 0 {
+		t.Fatal("no log segments left")
+	}
+	return dir
+}

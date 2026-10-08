@@ -387,8 +387,21 @@ deleted.
 - **A missing or empty log** — a database that has never been written to.
 - **A corrupt newest snapshot** — falls back to an older one, at the cost of a
   longer replay. This is why retention keeps more than one.
-- **Every snapshot corrupt** — not an error; replay the whole WAL, which is slow
-  and correct.
+- **Every snapshot corrupt, log intact** — not an error; replay the whole WAL,
+  which is slow and correct.
+
+And what it refuses:
+
+- **Every snapshot corrupt or missing, log truncated** — `Open` fails with
+  `ErrCorrupt` naming the missing range ("the log starts at seq N and no usable
+  snapshot covers seqs 1–N-1"). Truncation deleted the segments the snapshots
+  stood in for, so replaying the remainder onto an empty index would open with
+  most of the data gone: measured, 551 of 2,000 vectors, writable, and the next
+  snapshot made the loss permanent. Restore the snapshots and reopen. The check
+  is that the first surviving record is at most one past the loaded snapshot,
+  which a healthy log always is — `TestRecoveryGapCheckDoesNotMisfire` covers a
+  never-truncated log, intact and partly corrupt snapshots, a torn tail and a
+  fresh database.
 
 ---
 
