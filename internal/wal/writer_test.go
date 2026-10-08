@@ -539,3 +539,117 @@ func TestOptionDefaults(t *testing.T) {
 		t.Fatalf("withDefaults overwrote explicit options: %+v", got)
 	}
 }
+
+// TestSyncOutsideTheLockRacesRotationSafely: Sync and the interval flusher
+// fsync with the writer's lock released, while appends keep rotating segments.
+// An fsync must never find its file closed by a rotation, and every record
+// must replay, in order — what syncMu is for.
+func TestSyncOutsideTheLockRacesRotationSafely(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, Options{
+		SyncPolicy:      SyncInterval,
+		SyncInterval:    time.Millisecond,
+		MaxSegmentBytes: 4 << 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const writers, each = 4, 300
+	var wg sync.WaitGroup
+	for g := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range each {
+				if _, err := w.Append(TypePut, fmt.Appendf(nil, "g%d-%d-%0200d", g, i, 0)); err != nil {
+					t.Error(err)
+					return
+				}
+				if i%10 == 0 {
+					if err := w.Sync(); err != nil {
+						t.Error(err)
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := scanAll(t, dir); len(got) != writers*each {
+		t.Fatalf("log holds %d records, %d were appended", len(got), writers*each)
+	}
+}
+
+// TestSyncReturnsOnlyOnceEarlierRecordsAreDurable: a Sync that waits behind a
+// flush already fsyncing outside the lock must still fsync what it was asked
+// to cover. Whether the fsync happened cannot be seen from a test, but its
+// precondition can: records appended before Sync returned nil are in the
+// file, where a fresh reader finds them without the writer being closed.
+func TestSyncReturnsOnlyOnceEarlierRecordsAreDurable(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(dir, Options{SyncPolicy: SyncInterval, SyncInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	for i := range 50 {
+		if _, err := w.Append(TypePut, fmt.Appendf(nil, "r%d", i)); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		if got := scanAll(t, dir); len(got) != i+1 {
+			t.Fatalf("after Sync, the log holds %d records, want %d", len(got), i+1)
+		}
+	}
+}
+
+// TestFailureOutsideTheLockIsSticky: a flush or fsync that fails on the
+// flusher's tick, with the lock released, still ends the writer — the next
+// Append, Sync and Close all report it.
+func TestFailureOutsideTheLockIsSticky(t *testing.T) {
+	w, err := Open(t.TempDir(), Options{SyncPolicy: SyncInterval, SyncInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Append(TypePut, []byte("before")); err != nil {
+		t.Fatal(err)
+	}
+	// Pull the file out from under the writer, as a failing disk would.
+	w.mu.Lock()
+	w.syncMu.Lock()
+	w.file.Close()
+	w.syncMu.Unlock()
+	w.mu.Unlock()
+	if _, err := w.Append(TypePut, []byte("after")); err != nil {
+		t.Fatal(err) // buffered: nothing has touched the file yet
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		w.mu.Lock()
+		failed := w.failed
+		w.mu.Unlock()
+		if failed != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the flusher never noticed its file was gone")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := w.Append(TypePut, []byte("x")); err == nil {
+		t.Fatal("Append succeeded on a failed writer")
+	}
+	if err := w.Sync(); err == nil {
+		t.Fatal("Sync succeeded on a failed writer")
+	}
+	if err := w.Close(); err == nil {
+		t.Fatal("Close succeeded on a failed writer")
+	}
+}

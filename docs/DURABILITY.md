@@ -74,6 +74,26 @@ Append() ─→ 64 KiB bufio buffer ─→ OS page cache ─→ platter
 `SyncInterval` moves it through all three on a 50 ms tick. `SyncNever` moves it
 out of the first only when it fills.
 
+**The tick's fsync runs outside the writer's lock**, and so does an explicit
+`Sync()`: the buffer is moved into the kernel under the lock, then the lock is
+released for the fsync, so appends keep landing in the buffer meanwhile. A
+second lock (`syncMu`) is held across every fsync and every close of a segment,
+so rotation fsyncs the old segment before creating the next one exactly as
+before, and never closes a file an fsync is still using. The first fsync
+failure is sticky in its own right — every later fsync reports it rather than
+risking a retry that "succeeds" over dropped pages — and fails the writer.
+`Sync()` still returns only once every record appended before it is durable.
+
+What that buys depends on the kernel. Two appenders, 2 KiB records, 20 ms
+interval (`BenchmarkAppendDuringFlush`): on Linux (Docker Desktop VM,
+overlayfs) **1.40 → 0.74 µs per append**, about twice the throughput. On macOS
+it buys nothing — 1.20 µs before and after — because APFS blocks a `write()` to
+a file for as long as `F_FULLFSYNC` runs on it (a probe measured worst-case
+writes of 34 ms against 0.18 ms without a concurrent fsync), so an append that
+no longer waits on the mutex waits in the kernel instead. At a 2 ms interval,
+where the flusher is fsyncing nearly all the time, macOS is worse: 12.8 → 27
+µs per append.
+
 ### What is protected, and against what
 
 | Failure | Protected by | Outcome |

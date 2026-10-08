@@ -46,6 +46,22 @@ type Writer struct {
 
 	closed bool
 
+	// syncMu is held across every fsync of file, and across closing it. It is
+	// what lets Sync and the interval flusher fsync *outside* mu: an fsync is
+	// milliseconds, and holding mu for it stalled every Append behind every
+	// flush tick. Rotation and Close take it before closing the file, so an
+	// fsync in flight never finds its file closed underneath it. Taken after
+	// mu, never before.
+	syncMu sync.Mutex
+
+	// syncErr is the first fsync failure, guarded by syncMu. Every later fsync
+	// reports it rather than trying again: after a failed fsync the kernel may
+	// have dropped the dirty pages, and a second fsync that "succeeds" would
+	// acknowledge records sitting behind a hole. It is mirrored into failed as
+	// soon as mu can be taken, but this copy is what closes the gap between the
+	// two locks.
+	syncErr error
+
 	// Background flusher, only running under SyncInterval.
 	stop chan struct{}
 	done chan struct{}
@@ -214,20 +230,23 @@ func (w *Writer) writeLocked(typ RecordType, payload []byte) (uint64, error) {
 // Sync flushes buffered data and fsyncs the current segment. It is what
 // SyncAlways calls on every append and what a caller reaches for before doing
 // something that must not outlive the log, such as acknowledging a batch.
+//
+// It returns only once every record appended before it is durable: the buffer
+// is moved into the current segment under the lock, every earlier segment was
+// fsynced by the rotation that closed it, and the fsync of the current one
+// runs after. That fsync runs outside the lock, so appends carry on into the
+// buffer while it does.
 func (w *Writer) Sync() error {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	if w.closed {
+		w.mu.Unlock()
 		return ErrClosed
 	}
 	if w.failed != nil {
+		w.mu.Unlock()
 		return w.failed
 	}
-	if err := w.syncLocked(); err != nil {
-		return w.fail(err)
-	}
-	return nil
+	return w.syncUnlocking()
 }
 
 // Close flushes, fsyncs, and releases the current segment. It is idempotent —
@@ -257,11 +276,16 @@ func (w *Writer) Close() error {
 	// flushing on top of a hole would write good bytes after missing ones. Shut
 	// the file and report the original cause.
 	if w.failed != nil {
+		w.syncMu.Lock()
 		w.file.Close()
+		w.syncMu.Unlock()
 		return w.failed
 	}
 	syncErr := w.syncLocked()
+	// A Sync still fsyncing outside mu holds syncMu; wait it out.
+	w.syncMu.Lock()
 	closeErr := w.file.Close()
+	w.syncMu.Unlock()
 	if syncErr != nil {
 		return syncErr
 	}
@@ -291,12 +315,53 @@ func (w *Writer) Segment() uint32 {
 // Both halves matter and they are different things: Flush moves bytes from this
 // process into the kernel, Sync moves them from the kernel onto stable storage.
 // Doing only the first is what makes people believe they have durability.
+//
+// Callers hold mu, and it stays held across the fsync: this is the path for
+// SyncAlways, where the append is not acknowledged until the fsync returns
+// anyway, and for rotation and Close.
 func (w *Writer) syncLocked() error {
 	if err := w.buf.Flush(); err != nil {
 		return fmt.Errorf("wal: flush: %w", err)
 	}
-	if err := w.file.Sync(); err != nil {
-		return fmt.Errorf("wal: fsync: %w", err)
+	w.syncMu.Lock()
+	defer w.syncMu.Unlock()
+	return w.fsyncHeld(w.file)
+}
+
+// syncUnlocking flushes the buffer under mu, then fsyncs with mu released, so
+// appends into the buffer overlap the disk. Callers hold mu; it is released on
+// return. Any failure fails the writer.
+func (w *Writer) syncUnlocking() error {
+	if err := w.buf.Flush(); err != nil {
+		err = w.fail(fmt.Errorf("wal: flush: %w", err))
+		w.mu.Unlock()
+		return err
+	}
+	// Taken before mu is released, so the file cannot be rotated away between
+	// reading it here and fsyncing it below.
+	w.syncMu.Lock()
+	f := w.file
+	w.mu.Unlock()
+
+	err := w.fsyncHeld(f)
+	w.syncMu.Unlock()
+	if err != nil {
+		w.mu.Lock()
+		err = w.fail(err)
+		w.mu.Unlock()
+	}
+	return err
+}
+
+// fsyncHeld fsyncs f, or reports the fsync failure that came before. Callers
+// hold syncMu.
+func (w *Writer) fsyncHeld(f *os.File) error {
+	if w.syncErr != nil {
+		return w.syncErr
+	}
+	if err := f.Sync(); err != nil {
+		w.syncErr = fmt.Errorf("wal: fsync: %w", err)
+		return w.syncErr
 	}
 	return nil
 }
@@ -323,12 +388,26 @@ func (w *Writer) maybeRotate(size int64) error {
 // crash could leave the new segment on disk while the tail of the old one was
 // still only in the page cache — a hole in the middle of the log rather than at
 // its end, which is the one shape recovery cannot repair.
+//
+// The fsync and the close share one hold of syncMu, so a Sync fsyncing outside
+// mu finishes before the file it holds is closed, and none can start on it
+// after: a new one reads the file under mu, which rotation holds throughout.
+// A failed fsync from anywhere stops rotation here, so no segment is ever
+// created behind a hole.
 func (w *Writer) rotate() error {
-	if err := w.syncLocked(); err != nil {
-		return err
+	if err := w.buf.Flush(); err != nil {
+		return fmt.Errorf("wal: flush: %w", err)
 	}
-	if err := w.file.Close(); err != nil {
-		return fmt.Errorf("wal: close segment: %w", err)
+	w.syncMu.Lock()
+	err := w.fsyncHeld(w.file)
+	if err == nil {
+		if cerr := w.file.Close(); cerr != nil {
+			err = fmt.Errorf("wal: close segment: %w", cerr)
+		}
+	}
+	w.syncMu.Unlock()
+	if err != nil {
+		return err
 	}
 	return w.openSegment(w.segIndex + 1)
 }
@@ -424,14 +503,15 @@ func (w *Writer) flushLoop() {
 			return
 		case <-t.C:
 			w.mu.Lock()
-			if !w.closed && w.failed == nil {
-				if err := w.syncLocked(); err != nil {
-					// Nobody is waiting on this tick to report to, so the error
-					// is held for the next Append, Sync or Close to return.
-					w.fail(err)
-				}
+			if w.closed || w.failed != nil {
+				w.mu.Unlock()
+				continue
 			}
-			w.mu.Unlock()
+			// Flushed under the lock, fsynced outside it: appends used to wait
+			// out every tick's fsync, milliseconds each. Nobody is waiting on
+			// this tick to report to, so an error is held — failing the writer —
+			// for the next Append, Sync or Close to return.
+			_ = w.syncUnlocking()
 		}
 	}
 }

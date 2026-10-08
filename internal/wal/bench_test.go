@@ -3,6 +3,7 @@ package wal
 import (
 	"bytes"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -188,4 +189,42 @@ func BenchmarkSegmentRotation(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// BenchmarkAppendDuringFlush is SyncInterval with appenders on several
+// goroutines and a short interval, so a flush is nearly always in progress.
+// It measures what an append waits for while the flusher fsyncs: the flush
+// holds the writer's lock only to move the buffer into the kernel, and the
+// fsync runs outside it, so the max-µs metric is an append's worst wait.
+func BenchmarkAppendDuringFlush(b *testing.B) {
+	payload := bytes.Repeat([]byte("v"), 2048+32)
+	w, err := Open(b.TempDir(), Options{
+		SyncPolicy:      SyncInterval,
+		SyncInterval:    20 * time.Millisecond,
+		MaxSegmentBytes: 1 << 30,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer w.Close()
+
+	var mu sync.Mutex
+	var worst time.Duration
+	b.SetBytes(int64(len(payload) + recordHeaderSize))
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		var mine time.Duration
+		for pb.Next() {
+			start := time.Now()
+			if _, err := w.Append(TypePut, payload); err != nil {
+				b.Error(err)
+				return
+			}
+			mine = max(mine, time.Since(start))
+		}
+		mu.Lock()
+		worst = max(worst, mine)
+		mu.Unlock()
+	})
+	b.ReportMetric(float64(worst.Microseconds()), "max-µs")
 }
