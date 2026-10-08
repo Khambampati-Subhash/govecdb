@@ -247,7 +247,21 @@ func (s *Server) handleDropCollection(w http.ResponseWriter, r *http.Request) {
 	s.write(w, r, http.StatusOK, map[string]any{"dropped": name})
 }
 
+// untilDone lifts the write deadline for a handler whose duration is the size
+// of a collection rather than of a request — snapshot and compact. The
+// server's WriteTimeout is sized for searches and batches, and stretching it
+// to fit a Compact would stretch it for every route. When the deadline fires
+// mid-call the work still runs to completion and the client only sees a reset
+// connection, which is the one outcome worse than waiting.
+//
+// The error is ignored: a writer with no deadline to lift (a test recorder, a
+// caller's own wrapper without Unwrap) is a writer with nothing to extend.
+func untilDone(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+}
+
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
+	untilDone(w)
 	var stats govecdb.Stats
 	err := s.mgr.Use(r.PathValue("name"), func(db *govecdb.DB) error {
 		if err := db.Snapshot(); err != nil {
@@ -292,6 +306,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 // the signal; around 0.5 is where compacting pays, because the pause tracks
 // survivors rather than garbage.
 func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
+	untilDone(w)
 	var reclaimed int
 	err := s.mgr.Use(r.PathValue("name"), func(db *govecdb.DB) error {
 		var err error

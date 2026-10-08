@@ -110,6 +110,16 @@ client has disconnected is skipped (`client_gone`, 499) — the library takes no
 context, so not starting is the only way to not finish. `/metrics` exports
 `govecdb_http_inflight{pool}` and `govecdb_http_rejected_total{pool}`.
 
+## Long calls lift their own write deadline
+
+`POST .../snapshot` and `POST .../compact` take as long as the collection is
+big, so they clear the server's write deadline through
+`http.NewResponseController` rather than making the operator raise
+`WriteTimeout` — and with it the slow-client window — for every route. That
+needs every middleware wrapper to implement `Unwrap() http.ResponseWriter`; a
+new wrapper must too, or the controller silently stops reaching the connection
+(`TestWrappersReachTheConnection`).
+
 ## Two decisions worth knowing
 
 ### How a JSON number becomes a metadata value

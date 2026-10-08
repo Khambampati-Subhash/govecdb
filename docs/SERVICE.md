@@ -398,7 +398,9 @@ govecdbd -dir <directory> [flags]
 | `-max-filter-values` | `1024` | Most values across every `in` in one search filter. |
 | `-max-inflight-reads` | `0` (4 × GOMAXPROCS) | Searches, gets, scans and listings served at once; one more is `503 overloaded`. `-1` for no limit. |
 | `-max-inflight-writes` | `0` (GOMAXPROCS, ≥ 2) | Adds, deletes, lifecycle, snapshot, sync and compact served at once. `-1` for no limit. |
-| `-timeout` | `2m` | Per-request read and write timeout. |
+| `-read-timeout` | `30s` | How long a client may take to send a whole request, body included. Bounds a slow-body client holding a connection. |
+| `-write-timeout` | `2m` | How long a request may take to be answered. `snapshot` and `compact` lift their own deadline, since their duration is a collection's size. |
+| `-timeout` | — | Deprecated: sets both of the above. A specific flag given alongside it wins. |
 | `-drain` | `0` | Keep serving this long after `/readyz` starts failing. |
 | `-shutdown-timeout` | `30s` | How long to wait for requests in flight. |
 | `-close-timeout` | `10s` | After the HTTP server stops, how long to wait for collections still in use to close. Idle ones are closed first, at once. |

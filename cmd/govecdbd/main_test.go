@@ -329,6 +329,31 @@ func TestFlagValidation(t *testing.T) {
 	}
 }
 
+// -timeout was split in two and kept as an alias, so a script that passes it
+// keeps working, and a specific flag given with it wins.
+func TestTimeoutFlags(t *testing.T) {
+	for _, tc := range []struct {
+		args        []string
+		read, write time.Duration
+	}{
+		{nil, 30 * time.Second, 2 * time.Minute},
+		{[]string{"-timeout", "5m"}, 5 * time.Minute, 5 * time.Minute},
+		{[]string{"-timeout", "5m", "-read-timeout", "10s"}, 10 * time.Second, 5 * time.Minute},
+		{[]string{"-write-timeout", "1h"}, 30 * time.Second, time.Hour},
+	} {
+		c, err := parseFlags(append([]string{"-dir", "x"}, tc.args...), io.Discard)
+		if err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		if c.readTimeout != tc.read || c.writeTimeout != tc.write {
+			t.Errorf("%v: read %v write %v, want %v and %v", tc.args, c.readTimeout, c.writeTimeout, tc.read, tc.write)
+		}
+	}
+	if _, err := parseFlags([]string{"-dir", "x", "-read-timeout", "0"}, io.Discard); err == nil {
+		t.Error("a zero -read-timeout was accepted")
+	}
+}
+
 func TestBadLogLevelIsReportedRatherThanIgnored(t *testing.T) {
 	var stderr bytes.Buffer
 	err := run(context.Background(), []string{"-dir", t.TempDir(), "-log-level", "chatty"}, &stderr, nil, nil)

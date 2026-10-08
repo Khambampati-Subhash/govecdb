@@ -70,7 +70,8 @@ type config struct {
 	filterValues  int
 	maxReads      int
 	maxWrites     int
-	timeout       time.Duration
+	readTimeout   time.Duration
+	writeTimeout  time.Duration
 	drain         time.Duration
 	shutdown      time.Duration
 	closeWait     time.Duration
@@ -102,7 +103,12 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 		"read requests served at once before 503 overloaded (0 = 4 x GOMAXPROCS, -1 = no limit)")
 	fs.IntVar(&c.maxWrites, "max-inflight-writes", 0,
 		"write requests served at once before 503 overloaded (0 = GOMAXPROCS, at least 2; -1 = no limit)")
-	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "per-request read and write timeout")
+	fs.DurationVar(&c.readTimeout, "read-timeout", 30*time.Second,
+		"how long a client may take to send a whole request, body included")
+	fs.DurationVar(&c.writeTimeout, "write-timeout", 2*time.Minute,
+		"how long a request may take to be answered; snapshot and compact are exempt")
+	var both time.Duration
+	fs.DurationVar(&both, "timeout", 0, "deprecated: sets -read-timeout and -write-timeout together")
 	fs.DurationVar(&c.drain, "drain", 0, "keep serving for this long after /readyz starts failing")
 	fs.DurationVar(&c.shutdown, "shutdown-timeout", 30*time.Second, "how long to wait for requests in flight")
 	fs.DurationVar(&c.closeWait, "close-timeout", 10*time.Second,
@@ -123,6 +129,21 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 
 	if err := fs.Parse(args); err != nil {
 		return c, err
+	}
+	// -timeout was one flag for two needs. It still works, for every script
+	// that passes it, but a specific flag given alongside it wins.
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if set["timeout"] {
+		if !set["read-timeout"] {
+			c.readTimeout = both
+		}
+		if !set["write-timeout"] {
+			c.writeTimeout = both
+		}
+	}
+	if c.readTimeout <= 0 || c.writeTimeout <= 0 {
+		return c, errors.New("-read-timeout and -write-timeout must be positive")
 	}
 	if c.version {
 		return c, nil
@@ -227,11 +248,14 @@ func run(ctx context.Context, args []string, stderr io.Writer, stop func(), read
 		// reason to be long.
 		ReadHeaderTimeout: 10 * time.Second,
 
-		// These two cover a whole request, so they bound the largest batch and
-		// the longest search. Compaction on a large collection can exceed the
-		// default — it rebuilds the index — which is why it is a flag.
-		ReadTimeout:  cfg.timeout,
-		WriteTimeout: cfg.timeout,
+		// Read covers receiving the whole request, body included, so it is what
+		// bounds a client trickling a body in to hold a connection: 30 s moves
+		// 32 MiB at about 9 Mbit/s. Write covers producing the response, so it
+		// bounds the longest search or batch. They were one flag, which meant
+		// raising the limit for a Compact widened the slow-body window on every
+		// route; snapshot and compact now lift their own write deadline instead.
+		ReadTimeout:  cfg.readTimeout,
+		WriteTimeout: cfg.writeTimeout,
 
 		IdleTimeout:    2 * time.Minute,
 		MaxHeaderBytes: 64 << 10,

@@ -208,6 +208,12 @@ func (sh *shaper) take(status int, code, message string) {
 	sh.ResponseWriter.Write(append(body, '\n'))
 }
 
+// Unwrap lets http.ResponseController reach the connection's own writer, for
+// deadlines and flushing. Without it — and the same method on recorder — every
+// handler sat behind two wrappers that hid both, so a long Compact could not
+// extend its write deadline and the client saw a reset connection instead.
+func (sh *shaper) Unwrap() http.ResponseWriter { return sh.ResponseWriter }
+
 // Write swallows the plain-text body the mux was about to send once take has
 // replaced it. Reporting the full length keeps net/http from treating the
 // difference as a short write.
@@ -324,6 +330,9 @@ func (r *recorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
 }
+
+// Unwrap: see shaper.Unwrap.
+func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 func (r *recorder) Write(b []byte) (int, error) {
 	n, err := r.ResponseWriter.Write(b)
