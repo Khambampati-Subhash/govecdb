@@ -1,9 +1,13 @@
 package govecdb
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -289,4 +293,216 @@ func (s slowInsertIndex) InsertBatch(ids []string, values [][]float32, workers i
 	err := s.hnswIndex.InsertBatch(ids, values, workers)
 	time.Sleep(200 * time.Microsecond)
 	return err
+}
+
+// tempSnapshotAppears waits until a snapshot is being written, which is when
+// its temporary file exists. It reports false if done closes first.
+func tempSnapshotAppears(dir string, done <-chan struct{}) bool {
+	snaps := filepath.Join(dir, snapshotSubdir)
+	for {
+		select {
+		case <-done:
+			return false
+		default:
+		}
+		entries, _ := os.ReadDir(snaps)
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".tmp") {
+				return true
+			}
+		}
+	}
+}
+
+// TestSearchDuringSnapshotIsNotStalledByAQueuedAdd: the snapshot holds the
+// graph's read lock while it serializes. A writer used to wait for that lock
+// while holding the database lock, so every search queued behind the writer
+// for the rest of the snapshot. Writers now wait for a snapshot without holding
+// anything a search needs.
+func TestSearchDuringSnapshotIsNotStalledByAQueuedAdd(t *testing.T) {
+	const dim = 128
+	db, dir := openConcurrent(t, dim)
+	loadRandom(t, db, 10000, dim, 7)
+	rng := rand.New(rand.NewSource(8))
+
+	for attempt := range 5 {
+		// Something must change, or the snapshot is skipped as a no-op.
+		if err := db.Add(Vector{ID: fmt.Sprintf("s%d", attempt), Values: vec(rng, dim)}); err != nil {
+			t.Fatal(err)
+		}
+		snapDone := make(chan struct{})
+		var snapTook time.Duration
+		go func() {
+			start := time.Now()
+			if err := db.Snapshot(); err != nil {
+				t.Error(err)
+			}
+			snapTook = time.Since(start)
+			close(snapDone)
+		}()
+		if !tempSnapshotAppears(dir, snapDone) {
+			continue // finished before it could be observed; try again
+		}
+
+		var added atomic.Bool
+		addDone := make(chan struct{})
+		go func() {
+			if err := db.Add(Vector{ID: fmt.Sprintf("q%d", attempt), Values: vec(rand.New(rand.NewSource(int64(attempt))), dim)}); err != nil {
+				t.Error(err)
+			}
+			added.Store(true)
+			close(addDone)
+		}()
+		time.Sleep(200 * time.Microsecond) // let the Add queue
+
+		during := 0
+		snapFinished := func() bool {
+			select {
+			case <-snapDone:
+				return true
+			default:
+				return false
+			}
+		}
+		for !snapFinished() && !added.Load() {
+			searchOnce(t, db, vec(rng, dim))
+			if !added.Load() && !snapFinished() {
+				during++
+			}
+		}
+		<-snapDone
+		<-addDone
+		if added.Load() && during == 0 && !snapFinished() {
+			continue
+		}
+		t.Logf("snapshot took %v; %d searches completed while an Add was queued behind it", snapTook, during)
+		if during < 3 {
+			t.Fatalf("only %d searches completed while an Add waited on a %v snapshot: searches are queued behind the writer", during, snapTook)
+		}
+		return
+	}
+	t.Skip("snapshot was never observed in progress")
+}
+
+// TestConcurrentSnapshotsAllSucceed: two snapshots overlapping used to make one
+// fail, because the first one's prune deleted the second one's temporary file.
+func TestConcurrentSnapshotsAllSucceed(t *testing.T) {
+	const dim = 64
+	db, dir := openConcurrent(t, dim)
+	loadRandom(t, db, 3000, dim, 9)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 10)
+	for i := range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rng := rand.New(rand.NewSource(int64(100 + i)))
+			if err := db.Add(Vector{ID: fmt.Sprintf("c%d", i), Values: vec(rng, dim)}); err != nil {
+				errs <- err
+				return
+			}
+			errs <- db.Snapshot()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+
+	db = reopen(t, db, dir, WithDimension(dim), WithEfCalibration(false))
+	if got := db.Len(); got != 3010 {
+		t.Fatalf("Len after reopen = %d, want 3010", got)
+	}
+}
+
+// TestCloseWaitsForAManualSnapshot: Close used to wait only for the interval
+// snapshotter, so a Snapshot a caller had started kept pruning snapshots and
+// truncating the log after Close had released the directory to the next Open.
+func TestCloseWaitsForAManualSnapshot(t *testing.T) {
+	const dim = 128
+	var taken atomic.Int32
+	db, dir := openConcurrent(t, dim, WithObserver(func(e Event) {
+		if _, ok := e.(SnapshotTaken); ok {
+			taken.Add(1)
+		}
+	}))
+	loadRandom(t, db, 10000, dim, 10)
+
+	snapErr := make(chan error, 1)
+	snapDone := make(chan struct{})
+	go func() {
+		snapErr <- db.Snapshot()
+		close(snapDone)
+	}()
+	if !tempSnapshotAppears(dir, snapDone) {
+		t.Skip("snapshot finished before it could be observed in progress")
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Close has returned, so the snapshot must be over — complete, not merely
+	// started — and nothing of it may be left in the directory.
+	if taken.Load() != 1 {
+		t.Fatal("Close returned while a Snapshot was still in flight")
+	}
+	if err := <-snapErr; err != nil && !errors.Is(err, ErrClosed) {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, snapshotSubdir))
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("temporary snapshot %s left behind after Close", e.Name())
+		}
+	}
+	db2 := openDBAt(t, dir, WithDimension(dim), WithEfCalibration(false))
+	if s := db2.Stats(); s.SnapshotSeq == 0 || s.Live != 10000 {
+		t.Fatalf("after reopen: %+v", s)
+	}
+}
+
+// TestSnapshotSkipsWhenNothingChanged: an idle database on a timer rewrote
+// and re-verified its whole index every interval. A snapshot with nothing new
+// since the last one now writes nothing — unless a compaction changed the
+// graph, which no log record stands for.
+func TestSnapshotSkipsWhenNothingChanged(t *testing.T) {
+	var taken atomic.Int32
+	observe := func(e Event) {
+		if _, ok := e.(SnapshotTaken); ok {
+			taken.Add(1)
+		}
+	}
+	db, dir := openDB(t, WithObserver(observe))
+	fill(t, db, 50, 13)
+
+	snap := func(want int32) {
+		t.Helper()
+		if err := db.Snapshot(); err != nil {
+			t.Fatal(err)
+		}
+		if got := taken.Load(); got != want {
+			t.Fatalf("%d snapshots taken, want %d", got, want)
+		}
+	}
+	snap(1)
+	snap(1) // nothing changed
+	if err := db.Delete("v3"); err != nil {
+		t.Fatal(err)
+	}
+	snap(2)
+	if n, err := db.Compact(); err != nil || n == 0 {
+		t.Fatalf("Compact = %d, %v", n, err)
+	}
+	snap(3) // compaction changed the graph without a log record
+	snap(3)
+
+	// A reopened database knows what its snapshot covers.
+	db = reopen(t, db, dir, WithObserver(observe))
+	snap(3)
+	if s := db.Stats(); s.SnapshotSeq != s.LastSeq {
+		t.Fatalf("SnapshotSeq %d, LastSeq %d", s.SnapshotSeq, s.LastSeq)
+	}
 }

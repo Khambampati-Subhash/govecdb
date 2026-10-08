@@ -31,7 +31,7 @@ import (
 // exists. The index is derived state — it can always be rebuilt from the log,
 // and it is never the source of truth.
 //
-// # Two locks, and what neither is held across
+// # The locks, and what readers never wait for
 //
 // writeMu is the writers' lock. It is held across a write's log append *and*
 // its apply, which keeps apply order equal to log order — all the ordering
@@ -56,7 +56,9 @@ import (
 // holds its own write lock per chunk of a batch. A search issued during a
 // 10,000-vector AddBatch used to wait for all of it, 545 ms.
 //
-// closed and snapSeq are atomics, so reading them takes no lock at all.
+// A third, snapMu, only serializes snapshots against each other and against
+// Close; it is taken before writeMu and no reader touches it. closed and
+// snapSeq are atomics, so reading them takes no lock at all.
 //
 // # No context parameter
 //
@@ -74,6 +76,16 @@ type DB struct {
 	// applyMu makes a vector and its metadata change together, as far as any
 	// reader can tell. See the note on the type.
 	applyMu sync.RWMutex
+
+	// snapMu serializes snapshots end to end, prune and truncation included,
+	// and is how Close waits for one in flight. Taken before writeMu, never
+	// after it.
+	snapMu sync.Mutex
+
+	// dirty records a change to the index that no log record stands for — a
+	// compaction — so the next snapshot is not skipped as unchanged. Guarded
+	// by writeMu.
+	dirty bool
 
 	opts options
 	dir  string
@@ -534,18 +546,37 @@ func (db *DB) Search(req SearchRequest) ([]Match, error) {
 	return matches, nil
 }
 
-// Snapshot writes the current state to disk and prunes older snapshots.
+// Snapshot writes the current state to disk, prunes older snapshots, and
+// truncates the log behind the oldest one kept.
 //
 // It is what bounds recovery time: without one, starting up replays the whole
 // log and rebuilds the index at roughly 700 µs of CPU per vector, spread across
-// cores; with one, it loads a
-// graph instead. The cost is a read lock held for the write — searches continue,
-// writers wait — plus a fixed ~10 ms of fsync whatever the size.
+// cores; with one, it loads a graph instead. The cost is a fixed ~10 ms of
+// fsync plus the time to write the index out.
 //
-// The sequence it records is read before the state is serialized, so it can only
-// ever under-claim: a write landing during the snapshot is replayed on the next
-// start rather than assumed to be inside it. Claiming the other way would skip a
-// record that never made it in.
+// # Who waits
+//
+// Writers do, and searches do not. The state is captured under writeMu, so no
+// write is applied while the index and the metadata are serialized — which is
+// what makes the two sections of the file describe one instant, and the
+// sequence it records exact: everything at or below it is inside, nothing
+// above it is. Searches take no lock a snapshot holds. They used to: a writer
+// queued on the index's read lock while holding the database lock, so every
+// search stalled behind it for the rest of the snapshot.
+//
+// Pruning and log truncation, which re-read the oldest retained snapshot end
+// to end, run after writeMu is released. Snapshots serialize against each
+// other — overlapping ones used to delete each other's temporary files — and
+// Close waits for one in flight.
+//
+// # Nothing changed, nothing written
+//
+// If nothing has been logged since the last snapshot and the index has not
+// been compacted since, it returns nil and writes nothing. An idle collection
+// on a ten-minute timer would otherwise rewrite, fsync and re-verify its whole
+// index every interval for no change — gigabytes a time at a million vectors.
+// No event fires for the skip: it is not something an operator acts on, and it
+// would fire every interval for every idle database.
 func (db *DB) Snapshot() error {
 	if db.closed.Load() {
 		return ErrClosed
@@ -553,58 +584,78 @@ func (db *DB) Snapshot() error {
 	if db.opts.readOnly {
 		return errOpenedReadOnly
 	}
-	// Read under writeMu so no write is between its append and its apply: the
-	// sequence then covers only writes the index already holds.
-	db.writeMu.Lock()
-	seq := db.log.LastSeq()
-	db.writeMu.Unlock()
-	idx, st := db.index, db.store
+
+	db.snapMu.Lock()
+	defer db.snapMu.Unlock()
+
+	start := time.Now()
+	dir := filepath.Join(db.dir, snapshotSubdir)
+	snap, written, err := db.writeSnapshotFile(dir)
+	if errors.Is(err, ErrClosed) || (err == nil && !written) {
+		return err
+	}
 
 	// Every attempt past this point reports, success or failure, because the
 	// interval timer discards the error and an event is the only way its
 	// failures are seen.
-	start := time.Now()
-	taken, err := db.snapshotAt(seq, idx, st)
+	taken := SnapshotTaken{Seq: snap.Seq, Bytes: snap.Bytes}
+	if err == nil {
+		taken.Pruned, taken.SegmentsRemoved, err = db.pruneBehind(dir)
+	}
 	if err != nil {
 		db.emit(SnapshotFailed{Cause: err})
 		return err
 	}
+	// Recorded only once all of it has succeeded, so a snapshot whose prune or
+	// truncation failed is not mistaken for an unchanged one and retried.
+	db.snapSeq.Store(snap.Seq)
 	taken.Took = time.Since(start)
 	db.emit(taken)
-
-	db.writeMu.Lock()
-	db.snapSeq.Store(max(db.snapSeq.Load(), seq))
-	db.writeMu.Unlock()
 	return nil
 }
 
-// snapshotAt writes a snapshot of idx and st as of seq, prunes, and truncates
-// the log behind it.
-func (db *DB) snapshotAt(seq uint64, idx Index, st *store.Map) (SnapshotTaken, error) {
-	ser, ok := idx.(indexSerializer)
-	if !ok {
-		return SnapshotTaken{}, fmt.Errorf("govecdb: index of type %T cannot be snapshotted", idx)
+// writeSnapshotFile captures the state under writeMu and makes it a durable
+// snapshot, reporting false for written when nothing changed since the last
+// one.
+func (db *DB) writeSnapshotFile(dir string) (snap snapshot.Snapshot, written bool, err error) {
+	db.writeMu.Lock()
+	defer db.writeMu.Unlock()
+
+	// Rechecked under the lock: Close may have run while this waited for it.
+	if db.closed.Load() {
+		return snapshot.Snapshot{}, false, ErrClosed
+	}
+	seq := db.log.LastSeq()
+	if seq == db.snapSeq.Load() && !db.dirty {
+		return snapshot.Snapshot{}, false, nil
 	}
 
-	dir := filepath.Join(db.dir, snapshotSubdir)
-	snap, err := snapshot.Create(dir, seq, func(w io.Writer) error {
-		return writeSnapshot(w, ser, st)
+	ser, ok := db.index.(indexSerializer)
+	if !ok {
+		return snapshot.Snapshot{}, false, fmt.Errorf("govecdb: index of type %T cannot be snapshotted", db.index)
+	}
+	snap, err = snapshot.Create(dir, seq, func(w io.Writer) error {
+		return writeSnapshot(w, ser, db.store)
 	})
 	if err != nil {
-		return SnapshotTaken{}, fmt.Errorf("govecdb: snapshot: %w", err)
+		return snapshot.Snapshot{}, false, fmt.Errorf("govecdb: snapshot: %w", err)
 	}
+	db.dirty = false
+	return snap, true, nil
+}
 
+// pruneBehind removes snapshots beyond retention and the log segments the
+// retained ones make redundant. Callers hold snapMu: Prune deletes every
+// temporary file it finds, which is only safe with no Create in flight.
+func (db *DB) pruneBehind(dir string) (pruned, removed int, err error) {
 	// Pruned only after the new one is durable, so the number of usable copies
 	// never dips below the retention on the way through.
-	pruned, err := snapshot.Prune(dir, db.opts.snapshotsKept)
+	pruned, err = snapshot.Prune(dir, db.opts.snapshotsKept)
 	if err != nil {
-		return SnapshotTaken{}, fmt.Errorf("govecdb: prune snapshots: %w", err)
+		return pruned, 0, fmt.Errorf("govecdb: prune snapshots: %w", err)
 	}
-	removed, err := db.truncateLog(dir)
-	if err != nil {
-		return SnapshotTaken{}, err
-	}
-	return SnapshotTaken{Seq: seq, Bytes: snap.Bytes, Pruned: pruned, SegmentsRemoved: removed}, nil
+	removed, err = db.truncateLog(dir)
+	return pruned, removed, err
 }
 
 // truncateLog deletes log segments that the retained snapshots make redundant.
@@ -665,7 +716,13 @@ func (db *DB) Compact() (int, error) {
 	if db.closed.Load() {
 		return 0, ErrClosed
 	}
-	return db.index.Compact(), nil
+	n := db.index.Compact()
+	if n > 0 {
+		// The graph changed shape with no record in the log, so the snapshot
+		// on disk no longer describes it — the next one must not be skipped.
+		db.dirty = true
+	}
+	return n, nil
 }
 
 // Len is how many vectors a search can return.
@@ -747,9 +804,13 @@ func (db *DB) Close() error {
 		<-db.doneCal
 	}
 
-	// Waits out any write — or Snapshot, or Compact — that passed its closed
-	// check before we set it, so the directory is released with nothing still
-	// writing into it.
+	// Waits out a Snapshot a caller started — including its prune and log
+	// truncation — and any write or Compact that passed its closed check before
+	// we set it, so the directory is released with nothing still writing into
+	// it. Close used to wait only for the interval snapshotter, and a caller's
+	// Snapshot went on deleting files in a directory the next Open now owned.
+	db.snapMu.Lock()
+	defer db.snapMu.Unlock()
 	db.writeMu.Lock()
 	defer db.writeMu.Unlock()
 

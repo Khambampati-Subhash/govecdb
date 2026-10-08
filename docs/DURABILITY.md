@@ -241,6 +241,24 @@ Two clocks, often confused:
 
 50 ms is a reasonable fsync interval and a wildly wrong checkpoint interval.
 
+**Who waits.** `DB.Snapshot` captures the state under the writers' lock, so
+writers wait for the serialization and `Create`'s fsyncs; searches take no lock
+a snapshot holds and are not slowed by one. The index section and the metadata
+section therefore describe one instant, and the sequence a snapshot records is
+exact: every record at or below it is inside, none above it is. (Recovery still
+skips records at or below it rather than trusting that — re-applying a replaced
+vector would tombstone a slot on every start.) Pruning and log truncation run
+after the writers' lock is released. Snapshots serialize against each other, and
+`Close` waits for one in flight. A snapshot with nothing logged since the last
+one, and no `Compact` since, writes nothing.
+
+Before this, a writer that arrived mid-snapshot waited for the graph's read lock
+while holding the database lock, and searches queued behind it: at 10,000 × 128,
+zero searches completed while an `Add` waited on a 28 ms snapshot, against ~150
+now (`TestSearchDuringSnapshotIsNotStalledByAQueuedAdd`). Two overlapping
+snapshots failed 2 times in 10, one's prune deleting the other's temporary file
+(`TestConcurrentSnapshotsAllSucceed`).
+
 ---
 
 ## 6. Recovery

@@ -310,7 +310,8 @@ func WithMaxSegmentBytes(n int64) Option {
 // whole log and rebuilds the index, which costs about 700 µs per vector. With
 // one, it loads a graph instead. Minutes is the right order of magnitude — every
 // snapshot costs a ~10 ms fsync floor plus the time to write the index out, and
-// it takes a read lock for the duration, so writers wait.
+// writers wait for that much; searches do not. A tick with nothing logged since
+// the last snapshot writes nothing.
 func WithSnapshotInterval(d time.Duration) Option {
 	return func(o *options) error {
 		if d <= 0 {
