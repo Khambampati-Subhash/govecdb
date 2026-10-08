@@ -132,6 +132,32 @@ the Go kernels, so results differ by ulps across architectures; every
 graph-vs-graph equality test compares graphs built with the same kernel.
 There is no amd64 assembly because nothing here can test it.
 
+**Those cache misses are most of a large search, and touching first hides
+them.** At 100K × 512 a distance inside a search costs ~290 ns against ~80 ns
+warm: the traversal waits on DRAM, one vector at a time, because a 512-dim
+kernel is longer than the reorder window and the next neighbor's loads never
+start early. `searchLayer` therefore gathers an expansion's unvisited
+neighbors (into `searchState.fresh` — never `nbrBuf`, which a parallel batch's
+`readNeighbors` returns itself), loads one float per 128-byte line of each
+(`touchLines`, `touchStride = 32`), and only then scores them, in the same
+order as before. Measured on top of NEON, interleaved A/B, minimum of 5 rounds:
+
+| graph | ef=128 | ef=512 |
+|---|---:|---:|
+| 100K × 512 | 1,035 → 560 µs (1.85x) | 3,471 → 1,909 µs (1.82x) |
+| 50K × 768 | 1,161 → 678 µs (1.71x) | 3,761 → 2,269 µs (1.66x) |
+| 10K × 128 | 126 → 111 µs | 352 → 341 µs |
+| 2K × 32 | 46.5 → 47.9 µs | 127.0 → 127.6 µs |
+
+One load per vector did nothing (the hardware prefetcher does not stream a 2 KB
+vector from its first line); one per 64 B paid twice per line; one per 256 B
+left half the lines to demand misses. The loads feed `st.sink` so the compiler
+keeps them — a per-state field, because a shared one would be a data race. The
+visited test never depends on a distance, so marking a whole expansion before
+scoring any of it changes nothing: `TestSearchLayerMatchesOnePass` holds the
+loop to the one-pass version bit for bit, with tombstones, a filter and a
+hidden slot.
+
 ### 5. Copy on insert
 The graph stores its own copy of every vector. Beyond enabling normalization,
 this stops the graph from aliasing (and being corrupted by) a caller's reused

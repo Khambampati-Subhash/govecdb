@@ -176,10 +176,32 @@ func (g *Graph) searchLayer(st *searchState, query []float32, entryPoint, ef, lc
 		if len(results) >= ef && c.dist > results[0].dist {
 			break
 		}
+
+		// Gather, touch, then score. Scoring one neighbor at a time waits on
+		// DRAM for each vector in turn — one 512-dim distance is longer than
+		// the reorder window, so the next neighbor's loads never start early.
+		// Touching every gathered vector first puts all their misses in flight
+		// at once. The gather marks visited before any distance exists, which
+		// changes nothing: the visited test never depends on a distance, so
+		// the nodes scored and their order are exactly the one-pass loop's.
+		//
+		// fresh is its own buffer, never nbrBuf: in a parallel batch
+		// readNeighbors returns nbrBuf itself, and gathering into it would
+		// overwrite the list being read.
+		fresh := st.fresh[:0]
 		for _, nb := range g.readNeighbors(st, c.idx, lc) {
-			if st.visited.visit(nb) {
-				continue
+			if !st.visited.visit(nb) {
+				fresh = append(fresh, nb)
 			}
+		}
+		st.fresh = fresh
+		var sink float32
+		for _, nb := range fresh {
+			sink += touchLines(g.nodes[nb].vector)
+		}
+		st.sink += sink
+
+		for _, nb := range fresh {
 			nd := g.dist(g.nodes[nb].vector, query)
 			if len(results) < ef || nd < results[0].dist {
 				cands = minPush(cands, candidate{nb, nd})
@@ -218,4 +240,23 @@ func (g *Graph) searchLayer(st *searchState, query []float32, entryPoint, ef, lc
 	// traversal inherits the capacity.
 	st.cands, st.results = cands, results
 	return out // ascending by distance
+}
+
+// touchStride is one load per 128 bytes, in float32s: the line size of Apple
+// M-series L1/L2, and the pair the adjacent-line prefetcher fetches on x86.
+// Measured on M4 Max at 100K x 512: one load per vector did nothing (the
+// hardware prefetcher does not stream a 2 KB vector from its first line),
+// every 64 B paid twice per line for most of the win, every 256 B left half
+// the lines to demand misses.
+const touchStride = 32
+
+// touchLines loads one float from every 128-byte line of v, so the lines are
+// in flight before the distance kernel asks for them. The sum is meaningless;
+// it exists so the loads have a use the compiler must keep.
+func touchLines(v []float32) float32 {
+	var s float32
+	for i := 0; i < len(v); i += touchStride {
+		s += v[i]
+	}
+	return s
 }

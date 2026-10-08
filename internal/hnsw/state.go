@@ -23,6 +23,12 @@ type searchState struct {
 	selected []int       // insert's chosen neighbors for the current layer
 	queryBuf []float32   // normalized copy of the caller's query
 	nbrBuf   []int       // a neighbor list copied out under its lock
+	fresh    []int       // searchLayer's unvisited neighbors of one expansion
+
+	// sink receives the loads touchLines makes, so the compiler cannot drop
+	// them as dead. A field rather than a package variable because concurrent
+	// searches would race on a shared one; its value is never read.
+	sink float32
 
 	// locks is non-nil only for a worker of a parallel batch (batch.go), and
 	// it is what switches neighbor-list access to locked copies. Nil for every
