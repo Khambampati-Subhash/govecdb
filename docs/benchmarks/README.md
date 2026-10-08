@@ -49,6 +49,7 @@ twenty seconds under `-race`.
 | `metric` | Cosine / Euclidean / DotProduct | Do all three metrics actually work, not just the tested one? |
 | `distribution` | centered / positive / clustered | How much does the shape of the data decide the answer? |
 | `tombstones`, `compacted` | 0 → 75% dead | What deferred deletion costs, and what `Compact()` returns. |
+| `clustered-alpha` | Alpha 1.0 / 1.2, 40k × 256 in 1,024 clusters | Does the `Alpha` default hold where it was decided? 0.989 against 0.938 at `ef=16`. |
 
 Recall is always measured against **brute-force ground truth over the raw
 corpus** — never against the graph's own stored vectors, which would let a
@@ -75,15 +76,15 @@ normalization bug cancel itself out on both sides of the comparison.
   `SuggestedEf`'s anchors carry margin and why single-seed measurements at
   mid-recall should not be trusted to three decimal places.
 - **The M-vs-recall chart overstates the case for raising `M`.** Compared at
-  equal recall on the 2-D grid, M=32 beats M=16 by about 10% latency for 6x the
-  build. Comparing two 1-D charts, each taken at the other knob's default, is the
+  equal recall on the 2-D grid, M=32 beats M=16 by about 15–20% latency for 3x
+  the build. Comparing two 1-D charts, each taken at the other knob's default, is the
   mistake the grid exists to prevent.
 - **Corpus shape moves latency, not recall — the opposite of what was expected.**
   `positive` (components in [0,1)) puts every vector in one orthant, where any two
   are already ~0.75 similar, and the prediction was that recall@10 would suffer
-  from resolving a near-tie. It does not: 0.865 against `centered`'s 0.852. What
+  from resolving a near-tie. It does not: 0.891 against `centered`'s 0.845. What
   the shape does change is speed — `clustered` data, which is what real embeddings
-  look like, searches in 38 µs against 120 µs for uniform noise, because the
+  look like, searches in 25 µs against 77 µs for uniform noise, because the
   greedy descent converges far sooner. The case is kept in the sweep so that
   correction stays visible instead of turning back into folklore.
 
