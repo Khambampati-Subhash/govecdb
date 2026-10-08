@@ -24,7 +24,7 @@ from the ones ahead of it.
 | v2 item | State | Where |
 |---|---|---|
 | 1 Observability seam | **done** (v1.3.0) | `events.go`, `httpapi/events.go` |
-| 2 Online compaction | **next** — unblocked by 1 | — |
+| 2 Online compaction | **partly** — `Compact` no longer stops reads; writers still wait | `internal/hnsw/compact.go` |
 | 3a Parallel batch build | **done** (v1.3.0) | `internal/hnsw/batch.go` |
 | 3 Fine-grained write locking | after 2 | — |
 | 4 Collections | **done** (v1.1.0) | `service/` |
@@ -228,6 +228,24 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   `place` + `link`) is bit-identical to before. Parallel builds are not
   deterministic: `WithInsertWorkers(1)` with `WithSeed` for reproducibility.
   11× at 16 workers, 20K × 512 (41 s → 3.7 s).
+- **Search waits on DRAM, not arithmetic.** At 100K × 512 ~70% of a search was
+  cache-miss stall inside the kernel. `searchLayer` therefore gathers an
+  expansion's unvisited neighbors into `searchState.fresh`, touches one float
+  per 128 B line of each (`touchLines`, into `st.sink` so the loads survive),
+  then scores them in the original order — 1.7–1.9× faster, bit-identical
+  (`TestSearchLayerMatchesOnePass`). `fresh` is **never `nbrBuf`**: in a batch
+  `readNeighbors` returns `nbrBuf` itself. One load per vector, or per other
+  line, measured as no gain.
+- **arm64 kernels are NEON Go assembly** (`dot_arm64.s`, `l2_arm64.s`; Go
+  fallback elsewhere and under `-tags purego`). **Do not move the core to Rust
+  or C:** measured, a cgo call is 19.5 ns before any work, so per-distance FFI
+  loses to Go asm at every dimension (45.9 vs 25.9 ns at 512), C and Rust ran
+  identically, and moving the whole search loop native buys ≤14% for losing
+  CGO-free builds. The harness is on local branch `exp/native-core`. amd64 has
+  no SIMD yet — untestable on the dev machine.
+- `chunkPerWorker` is **4**: a chunk holds the graph's write lock, and readers
+  queue behind it (search p50 under ingest 15.5 → 8.3 ms vs 8). The root's
+  `applyGroup` is `4 × workers` to match — keep the two equal.
 - Insert **copies** the caller's vector (and normalizes it for Cosine), so the graph
   never aliases a reused caller buffer.
 - `Insert` is an **upsert** — there is no `Update`. A second Insert under a live id
@@ -249,8 +267,12 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   indices, so nothing may ever be renumbered in place. It re-inserts *stored*
   vectors via `insertPrepared` (no re-copy, and no re-normalize: that drifts a
   unit vector by an ulp and the rebuild would stop being bit-equal to a fresh
-  build, which `TestCompactMatchesAFreshBuild` asserts). It **stops the world**;
-  the index never self-triggers, callers poll `Stats().DeadRatio()`. Threshold
+  build, which `TestCompactMatchesAFreshBuild` asserts). It **builds the
+  replacement under the read lock and swaps under the write lock**, so searches
+  keep running; a mutation counter re-checked at the swap falls back to a
+  rebuild under the write lock if a standalone caller wrote meanwhile (through
+  the DB it never fires: `DB.Compact` holds the writers' lock, so writers wait).
+  The index never self-triggers, callers poll `Stats().DeadRatio()`. Threshold
   ~0.5, not 0.25: the pause tracks *survivors*, so compacting early costs more
   and reclaims less.
 - Durability model: **write to WAL first, then apply to the in-memory graph**; on
@@ -281,7 +303,12 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - **`Open` always starts a new segment**, even when segments exist. A torn tail
   from power loss stops replay, so appending after it would bury good records
   behind a permanent stopping point. Do not "optimize" this into reopening the
-  last segment.
+  last segment. **One exception:** a newest segment that is *exactly* a valid
+  8-byte header with nothing after it has no tail to tear, so it is reused —
+  otherwise a read-mostly collection reopened by eviction gained an empty
+  segment per open, forever (truncation cannot remove them). Anything else gets
+  a new segment. Segments are sorted **numerically** — `wal-1000000.log` sorts
+  before `wal-999999.log` lexically, and replay would refuse the rewound seq.
 - Rotation **fsyncs the old segment before creating the new one** regardless of
   sync policy — otherwise a crash leaves a hole in the *middle* of the log, which
   is the one shape recovery cannot repair.
@@ -444,6 +471,24 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   index is a different implementation, not a different database. Serialization is
   deliberately *off* it (`indexSerializer`, checked at snapshot time): an index
   that cannot write itself out is still a usable index.
+- **Readers never wait for a writer's I/O.** Three locks, documented above
+  `type DB` in `db.go`: `writeMu` serializes writers across log append *and*
+  apply (`Snapshot`, `Compact`, `Sync`, `Close` take it too) and **no reader
+  ever takes it**; `applyMu` is held exclusively only for the apply itself and
+  shared by readers that pair a vector with its metadata, so no one sees
+  `(v2, md1)`; `snapMu` serializes snapshots against each other and `Close`.
+  `closed` and `snapSeq` are atomics. Why: Go's `RWMutex` blocks new readers once
+  a writer waits — one `SyncAlways` writer took search p50 from 40 µs to 4.9 ms,
+  `AddBatch(10000)` held a search 545 ms, and a snapshot with one queued `Add`
+  froze searches for its whole length. Large batches apply in groups of
+  `applyGroup`, released between. **Snapshot holds `writeMu`**, so no writer
+  ever queues on the graph lock behind `WriteTo` — that is what keeps searches
+  running — and the recorded seq is exact. A snapshot with nothing changed is
+  skipped.
+- **`Open` refuses (`ErrCorrupt`) when the log no longer reaches back to the
+  newest usable snapshot** — every snapshot rejected and the log truncated
+  behind them. It used to open with most of the data gone and the next snapshot
+  made that permanent.
 - **Fail closed** — a WAL failure makes the DB permanently `ErrReadOnly`; reads
   keep working. This is the policy `internal/wal` explicitly deferred upward.
 - **No `context.Context`**, on purpose. Everything is local and bounded, and
@@ -534,6 +579,14 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   leaked by an early return is a collection that is never evicted again. Only a
   collection with no borrowers can be evicted or dropped, which is what stops a
   search being closed underneath. `Drop` **waits** rather than failing.
+- **The manager lock (`m.mu`) is held only to copy state** — never across
+  `Stats`, `Close`, `RemoveAll`, `Open` or a spec read (specs are cached). One
+  collection compacting used to freeze every other one through `/metrics`
+  (5.4 µs → 2.98 s). Closing uses the same placeholder pattern as opening.
+- **Backpressure is two pools that refuse, never queue** (`MaxInFlightReads`,
+  `MaxInFlightWrites`): full ⇒ `503 overloaded` + `Retry-After`. Filters are
+  width-capped (`MaxFilterClauses`, `MaxFilterValues`) because one 100K-value
+  `in` cost seconds of CPU per search; `in` over 8 values matches via a set.
 - **`ErrTooManyOpen` does not queue.** Waiting for a slot turns a capacity problem
   into a timeout somewhere else; the handler answers 503 with `Retry-After`.
   `UseWait(ctx, …)` is the opt-in exception for background work (a rebuild with

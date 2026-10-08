@@ -7,8 +7,86 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-Nothing yet. See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned
-and in what order.
+A production-hardening release, from a review of every layer against a
+millions-of-vectors, continuous-ingest workload. The theme: Go's `RWMutex`
+blocks new readers once a writer waits, so any long write-side hold was a read
+outage. No exported API was removed and the on-disk format is unchanged.
+
+### Fixed
+
+- **Searches no longer wait for writers.** Writers serialize on their own lock
+  across log append and apply; `Search`, `Get`, `GetBatch`, `Scan`, `Range`,
+  `Len` and `Stats` never take it. With one `SyncAlways` writer, search p50 was
+  4.98 ms and is now 30 µs. A search during `AddBatch(10000)` waited 545 ms for
+  the whole batch; it now waits for at most one apply group. Readers never see
+  a vector paired with another write's metadata.
+- **A snapshot no longer stalls searches.** It runs under the writers' lock, so
+  no writer queues on the graph lock behind it. Overlapping `Snapshot` calls no
+  longer fail each other (3 of 10 did), `Close` waits for one a caller started,
+  the index and metadata sections describe the same instant, and the recorded
+  sequence is exact.
+- **`Open` refuses a database whose log was truncated behind snapshots that are
+  now missing or corrupt** (`ErrCorrupt`). It used to open with most of the
+  data gone — 551 of 2,000 vectors in the reproduction — and the next snapshot
+  made the loss permanent.
+- **WAL segments are ordered numerically.** A log past 999,999 segments could
+  never be opened again; reopening without writing no longer adds a segment.
+- Lowering `WithLimits`' id limit no longer makes existing data read as corrupt.
+- `hnsw.Read` no longer allocates according to an unverified node count.
+- Newly created database directories are fsynced into their parents.
+- **service:** the manager-wide lock is no longer held across `Stats`, `Close`,
+  `RemoveAll`, `Open` or spec reads. One busy collection no longer freezes every
+  other collection during a `/metrics` scrape: an unrelated search went from
+  2.98 s to 5.4 µs during a 3 s `Compact`. Specs are cached in memory.
+- **service:** `Close` closes idle collections before waiting for busy ones, so
+  a long request at shutdown no longer leaves other collections' buffered writes
+  unflushed; **govecdbd** bounds that wait with `-close-timeout` (10s).
+- **httpapi:** a collection the filesystem refuses to open is `503 unavailable`,
+  not `500 internal`. `snapshot` and `compact` lift their own write deadline
+  instead of dying as a reset connection. `govecdb_collections_loaded` no longer
+  counts collections still opening.
+
+### Added
+
+- **httpapi:** backpressure — separate read and write request pools
+  (`MaxInFlightReads`/`MaxInFlightWrites`, `-max-inflight-reads`/`-writes`). A
+  full pool answers `503 overloaded` with `Retry-After` and never queues;
+  requests whose client has gone are skipped. `govecdb_http_inflight{pool}`,
+  `govecdb_http_rejected_total{pool}`.
+- **httpapi:** filter width limits (`MaxFilterClauses`, `MaxFilterValues`,
+  default 1,024). One `in` of 100,000 values cost 4.8 s of CPU per search.
+- **httpapi:** Go runtime metrics (`go_goroutines`, `go_memory_*`, `go_gc_*`).
+- **govecdbd:** `-read-timeout` (30s), `-write-timeout` (2m), `-close-timeout`.
+- `docs/CLUSTER.md`: the horizontal-scaling design (v2 item 8).
+
+### Changed
+
+- **Search is 1.7–1.9× faster on large graphs.** Each expansion's neighbor
+  vectors are touched before scoring, so their cache misses overlap: 100K × 512
+  at ef=128 goes from 1,035 to 560 µs. Results are bit-identical.
+- **arm64 distance kernels are NEON assembly**, 2.7–3.7× faster per call, with
+  no cgo; other platforms and `-tags purego` use the Go kernels. Measured
+  against C and Rust through cgo, which lose per call (45.9 vs 25.9 ns at
+  dim 512) — see `docs/MIGRATION.md`.
+- **`Compact` no longer stops searches.** It builds under the graph's read lock
+  and swaps under the write lock; writers wait for it.
+- `InsertBatch` holds the graph's write lock for half as long per chunk: search
+  p50 during ingest drops from 15.5 to 8.3 ms at 100K × 512, for 3–5% of
+  standalone build throughput.
+- A `Snapshot` with no change since the last one writes nothing — an idle
+  1M × 768 collection was rewriting ~3 GB every interval.
+- Under `SyncInterval` and `Sync` the WAL fsyncs outside its lock: ~2× append
+  throughput on Linux; on macOS (APFS serializes writes behind an fsync) no gain.
+- **filter:** `In` with more than 8 values matches through a set built once —
+  9 ns per node at any width, semantics unchanged.
+- **httpapi:** search responses and records are encoded by hand — k=100 went
+  from 78 µs / 1,707 allocs to 20 µs / 0, byte-identical. A `null` inside
+  `query` or `values` is now refused rather than read as 0.
+- **httpapi:** `POST .../vectors/get` accepts at most 1,000 ids.
+
+### Deprecated
+
+- **govecdbd:** `-timeout`; it sets both `-read-timeout` and `-write-timeout`.
 
 ## [1.3.1] - 2026-10-08
 

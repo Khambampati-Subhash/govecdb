@@ -130,7 +130,7 @@ it, because several of these look independent and are not.
 | | Item | Blocked on | |
 |---|---|---|---|
 | 1 | Observability seam | nothing | **done in v1.3.0** |
-| 2 | Online (non-blocking) compaction | 1, for the same reason everything wants 1 | |
+| 2 | Online (non-blocking) compaction | 1, for the same reason everything wants 1 | **reads done** — writers still wait |
 | 3a | Parallel batch build | nothing — one batch, one lock | **done in v1.3.0** |
 | 3 | Fine-grained write locking | 2 | |
 | 4 | Collections / namespaces | nothing, but wants 1 | **done in v1.1.0** |
@@ -138,7 +138,7 @@ it, because several of these look independent and are not.
 | 6 | Quantized index | nothing — the `Index` interface was built for it | |
 | 7 | REST server | 4 | **done in v1.1.0** |
 | 7b | gRPC server | 7, and a second module | |
-| 8 | Clustering and replication | 7 | |
+| 8 | Clustering and replication | 7 | designed — [CLUSTER.md](CLUSTER.md) |
 
 Items 4 and 7 shipped in v1.1.0, out of the order above — they were the two that
 needed nothing from the observability seam and they are the two that turn this
@@ -230,6 +230,15 @@ Items 2 and 3 were blocked on this for the reason stated above — they need to
 report what they do — and are now unblocked.
 
 ### 2. Online compaction
+
+**Half done, by a cheaper route than the sketch below.** `Compact` now builds the
+replacement under the graph's *read* lock and swaps under the write lock, while
+the DB holds the writers' lock for the whole rebuild — so writes wait and reads
+never do: ~7,300 searches completed during a 470 ms compaction that used to
+admit none. No change log or double-buffered swap was needed for that half,
+because a rebuild that no writer can race reads a graph that does not change.
+What remains is letting *writes* land during it, which is what the sketch below
+is about.
 
 `Compact()` stops the world — it holds the write lock for a full index rebuild,
 2.6 s per 5k×128 vectors at a 25% dead ratio. That is acceptable for a library
@@ -382,6 +391,12 @@ Full record in [SERVICE.md](SERVICE.md).
 
 ### 8. Clustering and replication
 
+Designed in [CLUSTER.md](CLUSTER.md): hash-range sharding with exact
+scatter-gather, per-shard leader/follower by WAL shipping, Raft for the control
+plane only, and the ~12 exported primitives this module would add. It also
+argues for an `epoch` in the WAL record header **before v2 ships** — sequence
+numbers are reissued after a torn tail, which a follower cannot detect.
+
 The largest item and the last, for the obvious reason. Raft was in the legacy
 tree and is not stdlib, so item 7's module decision governs this one too.
 
@@ -391,6 +406,29 @@ exactly what a follower needs to apply. Replication should be built on `Replay`
 and the existing record format rather than beside them — and if that turns out to
 require changing the record format, doing it *before* v2 ships is much cheaper
 than after.
+
+### A native (Rust/C) core — measured, and declined
+
+The question came up at the first production-scale planning, so it was answered
+by measurement (branch `exp/native-core`, M4 Max) rather than argued:
+
+| dim 512, warm | ns per Dot |
+|---|---:|
+| pure Go (8-way unrolled scalar) | 77.2 |
+| **NEON Go assembly** | **25.9** |
+| C through cgo | 45.9 |
+| Rust through cgo | 46.0 |
+| an empty cgo call | 19.5 |
+
+Per-distance FFI loses to Go assembly at every dimension; C and Rust are
+indistinguishable, because the instructions are what matter, not the language.
+Moving the whole scan loop native beats Go asm by ~14% (26.4 vs 30.7 ns per
+vector over a 40 MiB scan) — the most a full rewrite could buy, paid for with
+CGO, cross-compilation and race-detector coverage. What remains is DRAM
+latency, which no language fixes: touching neighbor vectors before scoring them
+took search a further 1.7–1.9×, and quantization (item 6) cuts the bytes
+fetched. So: NEON assembly shipped, amd64 AVX2 is the open kernel task, and the
+core stays Go.
 
 ### Out of scope for v2 as well
 
