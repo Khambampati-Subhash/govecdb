@@ -24,7 +24,7 @@ import (
 // The batch runs in chunks, and each chunk holds the write lock throughout, so
 // no search ever sees a node half linked. Readers get the lock back between
 // chunks, which bounds how long a large batch can stall them: a chunk is a few
-// inserts per worker, so tens of milliseconds at high dimension rather than the
+// inserts per worker, so ~8 ms at 100K x 512 rather than the
 // whole batch.
 //
 // Inside a chunk:
@@ -126,8 +126,21 @@ const (
 
 	// chunkPerWorker sizes a chunk: enough inserts per worker that one slow
 	// insert does not leave the rest idle at the chunk's end, few enough that
-	// the write lock is not held for long. Eight is ~30 ms at dimension 512.
-	chunkPerWorker = 8
+	// the write lock is not held for long. The hold is what a concurrent
+	// search waits for — a pending writer queues every new reader — so it is
+	// the p50 of every search during ingest, not a tail.
+	//
+	// Measured at 100K x 512, 8 searchers (ef=128, 0.63 ms alone) against
+	// InsertBatch with 8 workers, per-worker count: search p50 / ingest rate
+	//
+	//	 1: 2.7 ms / 2,860/s    2: 4.7 ms / 3,420/s    4: 8.3 ms / 3,850/s
+	//	 8: 15.5 ms / 4,120/s  16: 29.7 ms / 4,310/s
+	//
+	// and building alone with 16 workers, 4 against 8 costs 3% at 20K x 512
+	// and 5% at 50K x 128, where 2 costs 13% and 15%. Four is the knee: half
+	// the reader stall of eight for a few percent of build. Removing the stall
+	// rather than shortening it is finer-grained write locking, not this knob.
+	chunkPerWorker = 4
 
 	// nodesPerWorker is how much live graph each concurrent linker needs:
 	// below it, nodes in flight are too large a share of the graph for their
