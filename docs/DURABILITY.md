@@ -322,7 +322,10 @@ copying bytes. It is still ~2,000× faster than rebuilding the index from the
 same vectors.
 
 For reference, `Compact()` is the same rebuild operation and confirms the shape —
-its pause tracks *survivors*, not garbage:
+its cost tracks *survivors*, not garbage. Writers wait for it; searches do not:
+the replacement is built under the graph's read lock and only swapped in under
+the write lock (6,000 vectors, half dead: ~7,300 searches complete during a
+470 ms `DB.Compact`, where none did before):
 
 | Dead ratio | 25% | 50% | 75% |
 |---|---|---|---|

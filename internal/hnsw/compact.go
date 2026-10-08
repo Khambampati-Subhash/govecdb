@@ -35,27 +35,61 @@ package hnsw
 // the pruning bound in searchLayer tightens again because results fill at full
 // speed. Recall goes up and search gets faster; only the memory is the headline.
 //
-// # Compact stops the world
+// # Searches keep running; writers wait
 //
-// It holds the write lock for the whole rebuild, which is a full index build:
-// seconds for a large graph, during which no search runs. That is deliberate
-// for v1 — building the replacement outside the lock would mean writes landing
-// in the old graph while the new one is being built, and reconciling them needs
-// a change log and a double-buffered swap that the durability layer should
-// shape first.
+// The replacement is built under the *read* lock, and the write lock is taken
+// only to swap it in. Searches run against the old graph for the whole build —
+// seconds for a large one — where they used to stop for all of it. Writers are
+// held off by the read lock, so the old graph cannot change underneath the
+// build.
+//
+// It can change in one place: between releasing the read lock and taking the
+// write lock, where a writer that was queued gets in first. writes counts every
+// slot placed or tombstoned, and if it moved, the replacement is stale and is
+// rebuilt under the write lock — the old stop-the-world path, kept for
+// correctness rather than speed. A caller that excludes its own writers for
+// the duration, as the database does, never takes it.
 //
 // So the index does not decide *when*. It exposes Stats().DeadRatio() and lets
-// the caller pick a moment that tolerates the pause.
+// the caller pick a moment that tolerates the cost.
 func (g *Graph) Compact() int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
+	g.mu.RLock()
 	// Cheap enough to call on a timer: a clean graph is not worth rebuilding,
 	// and rebuilding it would throw away a perfectly good index for nothing.
 	if g.numDeleted == 0 {
+		g.mu.RUnlock()
 		return 0
 	}
+	fresh, seen := g.rebuild(), g.writes
+	g.mu.RUnlock()
 
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.writes != seen {
+		if g.numDeleted == 0 {
+			return 0 // another Compact got there first
+		}
+		fresh = g.rebuild()
+	}
+
+	reclaimed := g.numDeleted
+	g.nodes, g.ids = fresh.nodes, fresh.ids
+	g.entry, g.maxLevel = fresh.entry, fresh.maxLevel
+	g.numDeleted = 0
+	// The swap is a write too: a Compact that built from the old graph and is
+	// waiting for the lock must see its replacement is now stale.
+	g.writes++
+
+	// g.pool is deliberately not swapped. Its pooled scratch was sized for the
+	// larger graph, which is safe — visitedList.reset re-slices down and its
+	// generation counter only ever increases, so a stale stamp can never match
+	// the current generation — and the extra capacity dies with the graph.
+	return reclaimed
+}
+
+// rebuild builds a new graph over the live vectors, in slot order. It only
+// reads g, so callers hold either lock.
+func (g *Graph) rebuild() *Graph {
 	fresh := newGraph(g.cfg)
 	for _, n := range g.nodes {
 		if n.deleted {
@@ -64,18 +98,8 @@ func (g *Graph) Compact() int {
 		// The vector moves across as-is rather than being re-prepared: it is
 		// already this graph's own normalized copy, and the graph it came from
 		// is about to be garbage. Dead vectors are the memory being reclaimed —
-		// nothing references them once the swap below lands.
+		// nothing references them once the swap lands.
 		fresh.insertPrepared(n.id, n.vector)
 	}
-
-	reclaimed := g.numDeleted
-	g.nodes, g.ids = fresh.nodes, fresh.ids
-	g.entry, g.maxLevel = fresh.entry, fresh.maxLevel
-	g.numDeleted = 0
-
-	// g.pool is deliberately not swapped. Its pooled scratch was sized for the
-	// larger graph, which is safe — visitedList.reset re-slices down and its
-	// generation counter only ever increases, so a stale stamp can never match
-	// the current generation — and the extra capacity dies with the graph.
-	return reclaimed
+	return fresh
 }

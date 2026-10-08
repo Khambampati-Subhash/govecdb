@@ -704,11 +704,14 @@ func (db *DB) truncateLog(snapDir string) (int, error) {
 }
 
 // Compact rebuilds the index over its live vectors and reports how many slots
-// were reclaimed. It stops the world: no search runs while it does.
+// were reclaimed. Writers wait for it; searches do not. It holds writeMu for
+// the rebuild, so nothing changes the graph while the index builds the
+// replacement under its read lock, and the index's write lock is held only for
+// the swap. It used to stop the world: no search ran for the whole rebuild.
 //
 // The database does not schedule this. Stats().DeadRatio() is the signal, and
-// only the caller knows which moment can afford the pause — around 0.5 is where
-// it pays, because the pause tracks survivors rather than garbage.
+// only the caller knows which moment can afford to hold writes — around 0.5 is
+// where it pays, because the rebuild tracks survivors rather than garbage.
 func (db *DB) Compact() (int, error) {
 	db.writeMu.Lock()
 	defer db.writeMu.Unlock()

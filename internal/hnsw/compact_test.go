@@ -3,7 +3,9 @@ package hnsw
 import (
 	"fmt"
 	"math/rand"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -436,5 +438,100 @@ func TestConcurrentCompactAndSearch(t *testing.T) {
 
 	if s := g.Stats(); s != (Stats{Live: live, Deleted: 0, Slots: live}) {
 		t.Fatalf("after compaction: %+v", s)
+	}
+}
+
+// TestCompactDoesNotStopSearches: the replacement is built under the read
+// lock, so searches keep running for the whole rebuild. It used to hold the
+// write lock throughout, and no search ran until it finished.
+func TestCompactDoesNotStopSearches(t *testing.T) {
+	const n, dim = 4000, 32
+	g, _ := buildGraph(t, n, dim, 61)
+	for i := range n {
+		if i%2 == 0 {
+			g.Delete(fmt.Sprintf("v%d", i))
+		}
+	}
+
+	var running atomic.Bool
+	running.Store(true)
+	done := make(chan int)
+	go func() {
+		got := g.Compact()
+		running.Store(false)
+		done <- got
+	}()
+
+	rng := rand.New(rand.NewSource(62))
+	during := 0
+	for running.Load() {
+		if _, err := g.Search(randomVector(rng, dim), 10, 64); err != nil {
+			t.Fatal(err)
+		}
+		if running.Load() {
+			during++
+		}
+	}
+	if got := <-done; got != n/2 {
+		t.Fatalf("Compact reclaimed %d, want %d", got, n/2)
+	}
+	t.Logf("%d searches completed during Compact", during)
+	if during < 3 {
+		t.Fatalf("only %d searches completed during Compact: it is excluding readers", during)
+	}
+}
+
+// TestCompactUnderConcurrentWritesLosesNothing exercises the swap's guard: a
+// write that lands between the build and the swap must not be thrown away
+// with the old graph. A writer hammers the graph while Compact runs in a loop,
+// and every write must survive.
+func TestCompactUnderConcurrentWritesLosesNothing(t *testing.T) {
+	const dim = 16
+	g, _ := buildGraph(t, 200, dim, 63)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				g.Compact()
+			}
+		}
+	}()
+
+	rng := rand.New(rand.NewSource(64))
+	want := make(map[string][]float32)
+	for i := range 400 {
+		id := fmt.Sprintf("w%d", i%150)
+		if i%5 == 4 {
+			g.Delete(id)
+			delete(want, id)
+			continue
+		}
+		v := randomVector(rng, dim)
+		if err := g.Insert(id, v); err != nil {
+			t.Fatal(err)
+		}
+		want[id] = g.prepare(v)
+	}
+	close(stop)
+	wg.Wait()
+
+	for id, v := range want {
+		got, ok := g.Vector(id)
+		if !ok {
+			t.Fatalf("%s was written and is gone after a concurrent Compact", id)
+		}
+		if !slices.Equal(got, v) {
+			t.Fatalf("%s holds a stale vector after a concurrent Compact", id)
+		}
+	}
+	if live := g.Len(); live != 200+len(want) {
+		t.Fatalf("Len = %d, want %d", live, 200+len(want))
 	}
 }

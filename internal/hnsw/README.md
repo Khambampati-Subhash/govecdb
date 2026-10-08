@@ -221,12 +221,15 @@ and hoping. That test is also what guards `insertPrepared`: stored vectors move
 across as-is, because re-normalizing an already-unit vector drifts it by an ulp
 and the compacted graph would quietly stop holding the same numbers.
 
-`Compact` **stops the world** — it holds the write lock for a full index build.
-That is deliberate for v1: building the replacement outside the lock means
-writes landing in the old graph while the new one is built, and reconciling them
-needs a change log and a double-buffered swap that the durability layer should
-shape first. So the index does not decide *when*; `Stats().DeadRatio()` reports
-the ratio and the caller picks a moment that tolerates the pause.
+`Compact` builds the replacement under the **read** lock and takes the write
+lock only to swap it in, so searches keep running for the whole build; writers
+wait. A write can only slip in between the two locks, and `writes` — bumped by
+every `place` and `tombstone` — catches it: if it moved, the stale replacement
+is discarded and the graph rebuilt under the write lock, the old stop-the-world
+path, kept for correctness. A caller that excludes its own writers for the
+duration (the database holds its writers' lock) never takes it. The index still
+does not decide *when*; `Stats().DeadRatio()` reports the ratio and the caller
+picks a moment that tolerates the cost.
 
 ## Measured results
 
@@ -380,9 +383,11 @@ entry point if it reached a new top level.
 **Search(query, k, ef):** normalize query → greedily descend upper layers → one
 wide `searchLayer` on layer 0 → return the `k` closest.
 
-**Compact():** nothing to do if no slot is dead → otherwise build a replacement
-graph, re-inserting every live vector in slot order with its stored vector →
-swap `nodes` / `ids` / `entry` / `maxLevel` across and zero the tombstone count.
+**Compact():** nothing to do if no slot is dead → otherwise, under the read
+lock, build a replacement graph, re-inserting every live vector in slot order
+with its stored vector → under the write lock, rebuild again only if `writes`
+moved, then swap `nodes` / `ids` / `entry` / `maxLevel` across and zero the
+tombstone count.
 
 ## Serializing the graph
 
@@ -431,8 +436,8 @@ half-solved twice.
 
 ## Not implemented yet (deliberately)
 
-Fine-grained write locking, **online** compaction — `Compact` exists but stops
-the world — and SIMD assembly. Each is a separate upcoming slice; see
+Fine-grained write locking, fully **online** compaction — `Compact` no longer
+stops searches, but writers still wait for it — and SIMD assembly. Each is a separate upcoming slice; see
 `docs/MIGRATION.md`.
 
 ```bash

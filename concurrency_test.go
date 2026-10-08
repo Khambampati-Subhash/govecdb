@@ -506,3 +506,91 @@ func TestSnapshotSkipsWhenNothingChanged(t *testing.T) {
 		t.Fatalf("SnapshotSeq %d, LastSeq %d", s.SnapshotSeq, s.LastSeq)
 	}
 }
+
+// TestCompactKeepsSearchesRunningWhileWritersWait: DB.Compact holds writeMu,
+// so no write reaches the graph during the rebuild — the index's fast path,
+// building under its read lock, always holds, and searches run throughout.
+// Writers wait for it instead.
+func TestCompactKeepsSearchesRunningWhileWritersWait(t *testing.T) {
+	const dim = 32
+	db, _ := openConcurrent(t, dim)
+	loadRandom(t, db, 6000, dim, 14)
+	for i := 0; i < 6000; i += 2 {
+		if err := db.Delete(fmt.Sprintf("v%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The writer records when each Add returned; owned by its goroutine until
+	// wg.Wait.
+	stop := make(chan struct{})
+	var finished []time.Time
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rng := rand.New(rand.NewSource(15))
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := db.Add(Vector{ID: fmt.Sprintf("n%d", i), Values: vec(rng, dim)}); err != nil {
+				t.Error(err)
+				return
+			}
+			finished = append(finished, time.Now())
+		}
+	}()
+	time.Sleep(5 * time.Millisecond)
+
+	var running atomic.Bool
+	running.Store(true)
+	type result struct {
+		n    int
+		took time.Duration
+		err  error
+	}
+	done := make(chan result)
+	go func() {
+		start := time.Now()
+		n, err := db.Compact()
+		running.Store(false)
+		done <- result{n, time.Since(start), err}
+	}()
+
+	rng := rand.New(rand.NewSource(16))
+	during := 0
+	for running.Load() {
+		searchOnce(t, db, vec(rng, dim))
+		if running.Load() {
+			during++
+		}
+	}
+	r := <-done
+	close(stop)
+	wg.Wait()
+
+	var gap time.Duration
+	for i := 1; i < len(finished); i++ {
+		gap = max(gap, finished[i].Sub(finished[i-1]))
+	}
+	t.Logf("Compact reclaimed %d in %v; %d searches completed during it; longest writer wait %v",
+		r.n, r.took, during, gap)
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	if r.n != 3000 {
+		t.Fatalf("Compact reclaimed %d, want 3000", r.n)
+	}
+	if during < 3 {
+		t.Fatalf("only %d searches completed during Compact: it is excluding readers", during)
+	}
+	// Writers are excluded for the rebuild, so the writer has one wait about
+	// as long as the rebuild itself. Half allows for the time Compact spent
+	// queued for writeMu before it got it.
+	if gap < r.took/2 {
+		t.Fatalf("longest writer wait %v during a %v Compact: writers are not excluded", gap, r.took)
+	}
+}

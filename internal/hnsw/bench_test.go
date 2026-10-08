@@ -188,7 +188,7 @@ func BenchmarkSearchTombstones(b *testing.B) {
 	}
 }
 
-// BenchmarkCompact measures the stop-the-world pause. A compaction is a full
+// BenchmarkCompact measures how long writers wait. A compaction is a full
 // index build over the *surviving* vectors, so its cost tracks how many live —
 // reclaiming more is cheaper, not dearer.
 //

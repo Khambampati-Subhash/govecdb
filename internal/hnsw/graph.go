@@ -46,6 +46,12 @@ type Graph struct {
 	// recomputed, because it is what a compaction policy polls.
 	numDeleted int
 
+	// writes counts every change to nodes or ids — a slot placed, a slot
+	// tombstoned. Compact builds its replacement under the read lock and
+	// compares this at the swap, so a write that slipped in between the two
+	// locks is caught rather than discarded with the old graph.
+	writes uint64
+
 	// locks guards neighbor lists while InsertBatch links in parallel.
 	// Allocated on the first batch that needs it, under mu, and never freed.
 	locks *nodeLocks

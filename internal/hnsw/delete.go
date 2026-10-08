@@ -52,6 +52,7 @@ func (g *Graph) tombstone(id string) bool {
 	delete(g.ids, id)
 	g.nodes[idx].deleted = true
 	g.numDeleted++
+	g.writes++
 
 	if g.entry == idx {
 		g.reelectEntry()

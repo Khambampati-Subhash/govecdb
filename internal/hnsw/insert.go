@@ -104,6 +104,7 @@ func (g *Graph) place(id string, vec []float32, level int) int {
 	idx := len(g.nodes)
 	g.nodes = append(g.nodes, newNode(id, vec, level))
 	g.ids[id] = idx
+	g.writes++
 	return idx
 }
 
