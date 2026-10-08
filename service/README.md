@@ -69,6 +69,36 @@ efficiency question: `govecdb` refuses a second writer on one directory, so two
 goroutines opening the same collection would surface `ErrAlreadyOpen` on an
 ordinary request. `TestConcurrentUseOpensOnce` is the guard.
 
+### Nothing slow under the manager's lock
+
+The placeholder generalises, and the rule it serves is stricter than "don't open
+under the lock": **nothing slow happens under it**, because it is one lock for
+every collection on the server. An entry in the map carries a state —
+`loading`, `closing`, `dropping` — and the slow part runs with the lock
+released:
+
+| Operation | Released for | A caller for *that* collection meanwhile |
+|---|---|---|
+| cold open, `Create` | `govecdb.Open`, mkdir, two fsyncs | waits, then uses it |
+| eviction, idle sweep | `DB.Close` (waits out a snapshot in flight) | waits, then reopens it |
+| `Drop` | `DB.Close`, `RemoveAll` | `ErrNotFound` at once |
+| `List`, `Get` | `ReadDir`, `Stats` | unaffected |
+
+`Stats` is the one that was easy to miss: it takes the database's read lock,
+which a `Compact` or a large `AddBatch` holds for seconds. Calling it under the
+manager's lock — which every `/metrics` scrape did — froze every collection on
+the server behind one busy one: a 6 µs search on an unrelated collection took
+3 s during a 3 s Compact. A listing now reports a collection as loaded only if
+it was never marked closing while its `Stats` was read.
+
+Specs are **cached** in memory — immutable after `Create`, filled by `Create`
+and the first read, emptied by `Drop` — so a scrape over thousands of
+collections does not read thousands of files. A spec read with the lock
+released is cached only if no `Drop` completed meanwhile, since a cached spec is
+what a cold open opens from. The `TestSlowStatsDoesNotBlock…`,
+`TestEvictionClosesOutsideTheLock` and `TestDropRemovesOutsideTheLock` tests
+make the slow call slow on demand and show other collections keep serving.
+
 ### Eviction: reference counting
 
 An idle collection should stop costing memory; a collection being used must not
@@ -100,6 +130,11 @@ with no borrowers is a candidate for eviction or for `Drop`.
   request happened to overlap is a race the operator has no way to win. New
   borrowers are refused from the moment the drop is claimed, which is what lets
   the wait terminate.
+- `Close` closes **every idle collection first**, concurrently, and only then
+  waits for borrowed ones. Under `SyncInterval`/`SyncNever` an idle
+  collection's acknowledged writes sit in a user-space buffer until its close;
+  a shutdown that queued them behind one long `Compact` lost them to the
+  SIGKILL ending the grace period.
 
 ## Names are a security boundary
 
