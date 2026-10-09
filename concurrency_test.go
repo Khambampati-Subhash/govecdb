@@ -83,42 +83,68 @@ func pct(sorted []time.Duration, p float64) time.Duration {
 // nearly all of every Add in fsync. When the database lock was held across it,
 // a search queued behind every one — p50 went from 40 µs to 4.9 ms, the fsync
 // time. Searches now wait at most for the index insert, never for the disk.
+//
+// The race-safe check is differential. A reader may still wait for one apply,
+// and under -race an apply costs ~10× (1.5 ms against 0.15 ms here, more on a
+// CI runner) — enough to break any fixed slack while waiting on nothing but
+// the index. So the same searches also run against a SyncNever writer, which
+// applies at least as often and never fsyncs: if searches waited on the disk,
+// the SyncAlways p50 would sit a whole fsync above that one; if they wait only
+// on applies, the two agree on any machine.
 func TestSearchDoesNotWaitForASyncAlwaysWriter(t *testing.T) {
 	const dim = 32
-	db, _ := openConcurrent(t, dim, WithSyncPolicy(SyncAlways))
-	loadRandom(t, db, 2000, dim, 1)
+	measure := func(policy SyncPolicy) (base, under []time.Duration, n int, each time.Duration) {
+		db, _ := openConcurrent(t, dim, WithSyncPolicy(policy))
+		loadRandom(t, db, 2000, dim, 1)
+		base = searchLatencies(t, db, dim, 300, 2)
 
-	base := searchLatencies(t, db, dim, 300, 2)
-
-	stop := make(chan struct{})
-	writes := make(chan int)
-	go func() {
-		rng := rand.New(rand.NewSource(3))
-		n := 0
-		for {
-			select {
-			case <-stop:
-				writes <- n
-				return
-			default:
+		stop := make(chan struct{})
+		writes := make(chan int)
+		go func() {
+			rng := rand.New(rand.NewSource(3))
+			n := 0
+			for {
+				select {
+				case <-stop:
+					writes <- n
+					return
+				default:
+				}
+				if err := db.Add(Vector{ID: fmt.Sprintf("w%d", n), Values: vec(rng, dim)}); err != nil {
+					t.Error(err)
+				}
+				n++
 			}
-			if err := db.Add(Vector{ID: fmt.Sprintf("w%d", n), Values: vec(rng, dim)}); err != nil {
-				t.Error(err)
-			}
-			n++
-		}
-	}()
-	start := time.Now()
-	time.Sleep(20 * time.Millisecond)
-	under := searchFor(t, db, dim, 300*time.Millisecond, 4)
-	close(stop)
-	n := <-writes
-	elapsed := time.Since(start)
+		}()
+		start := time.Now()
+		time.Sleep(20 * time.Millisecond)
+		under = searchFor(t, db, dim, 300*time.Millisecond, 4)
+		close(stop)
+		n = <-writes
+		return base, under, n, time.Since(start) / time.Duration(max(n, 1))
+	}
 
-	t.Logf("no writer: p50 %v p99 %v; SyncAlways writer (%d adds, ~%v each): %d searches, p50 %v p99 %v",
-		pct(base, .5), pct(base, .99), n, elapsed/time.Duration(max(n, 1)), len(under), pct(under, .5), pct(under, .99))
+	base, under, n, each := measure(SyncAlways)
+	_, neverUnder, neverN, neverEach := measure(SyncNever)
+	t.Logf("no writer: p50 %v p99 %v; SyncAlways writer (%d adds, ~%v each): %d searches, p50 %v p99 %v; "+
+		"SyncNever writer (%d adds, ~%v each): p50 %v",
+		pct(base, .5), pct(base, .99), n, each, len(under), pct(under, .5), pct(under, .99),
+		neverN, neverEach, pct(neverUnder, .5))
 	if n == 0 {
 		t.Fatal("the writer never completed an Add")
+	}
+
+	// Waiting on the fsync would put SyncAlways a full fsync above SyncNever.
+	// Twice the SyncNever p50 plus a millisecond is well below that on any disk
+	// where fsync is slow enough to matter, and holds under -race.
+	if limit := 2*pct(neverUnder, .5) + time.Millisecond; pct(under, .5) > limit {
+		t.Fatalf("search p50 under a SyncAlways writer is %v, over %v (twice the SyncNever-writer p50 plus 1ms): "+
+			"searches are waiting on the writer's fsync", pct(under, .5), limit)
+	}
+	// Under -race an insert costs as much as the fsync, so absolute bounds
+	// against the idle baseline say nothing about the log.
+	if raceDetectorEnabled {
+		return
 	}
 	// The stall this guards was the whole fsync on every search. Twice the
 	// baseline plus a millisecond of scheduling slack is far below it on any
@@ -127,11 +153,6 @@ func TestSearchDoesNotWaitForASyncAlwaysWriter(t *testing.T) {
 	if limit := 2*pct(base, .5) + time.Millisecond; pct(under, .5) > limit {
 		t.Fatalf("search p50 under a SyncAlways writer is %v, over %v: searches are waiting on the writer's fsync",
 			pct(under, .5), limit)
-	}
-	// Under -race an insert costs as much as the fsync, so the tail is the
-	// index's write lock and says nothing about the log.
-	if raceDetectorEnabled {
-		return
 	}
 	if limit := 2*pct(base, .99) + time.Millisecond; pct(under, .99) > limit {
 		t.Fatalf("search p99 under a SyncAlways writer is %v, over %v: searches are waiting on the writer's fsync",
