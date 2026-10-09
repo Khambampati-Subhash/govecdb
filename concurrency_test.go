@@ -127,9 +127,9 @@ func TestSearchDoesNotWaitForASyncAlwaysWriter(t *testing.T) {
 	base, under, n, each := measure(SyncAlways)
 	_, neverUnder, neverN, neverEach := measure(SyncNever)
 	t.Logf("no writer: p50 %v p99 %v; SyncAlways writer (%d adds, ~%v each): %d searches, p50 %v p99 %v; "+
-		"SyncNever writer (%d adds, ~%v each): p50 %v",
+		"SyncNever writer (%d adds, ~%v each): p50 %v p99 %v",
 		pct(base, .5), pct(base, .99), n, each, len(under), pct(under, .5), pct(under, .99),
-		neverN, neverEach, pct(neverUnder, .5))
+		neverN, neverEach, pct(neverUnder, .5), pct(neverUnder, .99))
 	if n == 0 {
 		t.Fatal("the writer never completed an Add")
 	}
@@ -141,8 +141,17 @@ func TestSearchDoesNotWaitForASyncAlwaysWriter(t *testing.T) {
 		t.Fatalf("search p50 under a SyncAlways writer is %v, over %v (twice the SyncNever-writer p50 plus 1ms): "+
 			"searches are waiting on the writer's fsync", pct(under, .5), limit)
 	}
-	// Under -race an insert costs as much as the fsync, so absolute bounds
-	// against the idle baseline say nothing about the log.
+	// The tail is differential for the same reason: a search's p99 includes
+	// waiting for one apply, and on a loaded CI runner that apply alone broke
+	// an absolute bound against the idle p99 (1.92 ms over 1.79). The SyncNever
+	// writer applies more often, so its p99 carries the same wait without the
+	// fsync.
+	if limit := 2*pct(neverUnder, .99) + time.Millisecond; pct(under, .99) > limit {
+		t.Fatalf("search p99 under a SyncAlways writer is %v, over %v (twice the SyncNever-writer p99 plus 1ms): "+
+			"searches are waiting on the writer's fsync", pct(under, .99), limit)
+	}
+	// Under -race an insert costs as much as the fsync, so an absolute bound
+	// against the idle baseline says nothing about the log.
 	if raceDetectorEnabled {
 		return
 	}
@@ -153,10 +162,6 @@ func TestSearchDoesNotWaitForASyncAlwaysWriter(t *testing.T) {
 	if limit := 2*pct(base, .5) + time.Millisecond; pct(under, .5) > limit {
 		t.Fatalf("search p50 under a SyncAlways writer is %v, over %v: searches are waiting on the writer's fsync",
 			pct(under, .5), limit)
-	}
-	if limit := 2*pct(base, .99) + time.Millisecond; pct(under, .99) > limit {
-		t.Fatalf("search p99 under a SyncAlways writer is %v, over %v: searches are waiting on the writer's fsync",
-			pct(under, .99), limit)
 	}
 }
 
