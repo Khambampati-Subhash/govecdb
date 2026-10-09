@@ -7,6 +7,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+Nothing yet. See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned
+and in what order.
+
+## [1.4.0] - 2026-10-09
+
 A production-hardening release, from a review of every layer against a
 millions-of-vectors, continuous-ingest workload. The theme: Go's `RWMutex`
 blocks new readers once a writer waits, so any long write-side hold was a read
@@ -459,7 +464,8 @@ Stated here rather than discovered later:
 - **A highly selective filter approaches a full scan.** Past roughly one vector
   in a hundred, a scan over the metadata is the better tool.
 
-[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/khambampati-subhash/govecdb/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.1.1...v1.2.0

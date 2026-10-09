@@ -16,7 +16,7 @@ Module path: `github.com/khambampati-subhash/govecdb` · Go 1.24+ (built with 1.
 
 ## Where the project is
 
-**v1.3.1 on `main`.** v1 — a from-scratch rebuild, one subsystem at a time — is
+**v1.4.0 on `main`.** v1 — a from-scratch rebuild, one subsystem at a time — is
 complete: an embeddable library with durability, recovery and filtering. v2 is
 under way, taken partly out of dependency order where an item needed nothing
 from the ones ahead of it.
@@ -24,20 +24,59 @@ from the ones ahead of it.
 | v2 item | State | Where |
 |---|---|---|
 | 1 Observability seam | **done** (v1.3.0) | `events.go`, `httpapi/events.go` |
-| 2 Online compaction | **partly** — `Compact` no longer stops reads; writers still wait | `internal/hnsw/compact.go` |
+| 2 Online compaction | **reads done** (v1.4.0) — `Compact` no longer stops searches; writes still wait | `internal/hnsw/compact.go` |
 | 3a Parallel batch build | **done** (v1.3.0) | `internal/hnsw/batch.go` |
 | 3 Fine-grained write locking | after 2 | — |
 | 4 Collections | **done** (v1.1.0) | `service/` |
 | 5 Filter selectivity estimation | open | — |
 | 6 Quantized index | open — the `Index` interface was built for it | — |
 | 7 REST / 7b gRPC | REST **done** (v1.1.0); gRPC open, separate module | `httpapi/`, `cmd/govecdbd/` |
-| 8 Clustering / replication | last | — |
+| 8 Clustering / replication | **designed**, not built — separate module | `docs/CLUSTER.md` |
 
 `docs/MIGRATION.md` holds the full scope, what blocks each item, and the record
 of every finished one — including what its original sketch got wrong. **Read the
 item there before starting it**; several look independent and are not. Known
-deferred decision: `Compact` could use the parallel build, but that gives up
-`TestCompactMatchesAFreshBuild`'s bit-equality — the owner's call, not yet made.
+deferred decisions, each the owner's call:
+- `Compact` could use the parallel build, giving up
+  `TestCompactMatchesAFreshBuild`'s bit-equality.
+- **An `epoch` in the WAL record header** (17 → 25 bytes, v1 segments read as
+  epoch 0). Replication needs it: recovery reissues the sequence numbers of a
+  torn tail to different records, which a follower cannot detect. Cheaper
+  before v2 than after. See `docs/CLUSTER.md` §5.
+
+### What the v1.4.0 review found — rules that came out of it
+
+A five-agent review against a millions-of-vectors, continuous-ingest workload
+(reports summarized in CHANGELOG 1.4.0). The findings that generalize:
+
+- **Go's `RWMutex` blocks new readers once a writer waits.** So *any* read lock
+  held for long, and any write lock held across I/O, is a read outage under
+  ingest — not just a slow writer. Every stall found (fsync under `db.mu`, a
+  snapshot's `RLock` with an `Add` queued behind it, a wide `in` filter, the
+  service's `m.mu` across `Stats`) was this one shape. Before adding a lock hold,
+  ask what a *waiting writer* does to readers behind it.
+- **Search is memory-bound past cache size.** ~70% of a 100K × 512 search was
+  DRAM stall; SIMD alone was capped at the ~25% that is arithmetic. Measure
+  cold, not warm, before optimizing a kernel.
+- **Insert at scale is ~56% build-time search and ~37% pruning pairs** (quadratic
+  in M, warm, compute-bound) — which is where SIMD pays. Caching
+  neighbor-neighbor distances doubles memory at dim 512; a Lucene-style
+  incremental diversity check is the real fix and changes the graph.
+- **Not worth touching, measured:** the read lock (search scales 9.3× at 16
+  goroutines with or without it), the `searchState` pool, the heaps (~2%), the
+  visited set (<3.4%).
+- **Open, measured and deferred:** amd64 AVX2 kernels (untestable on the dev
+  Mac); a flat layer-0 layout with `uint32` neighbor ids (−14–16% search,
+  −150 B/vector, no codec change — the codec already writes `uint32`); a
+  sub-quadratic prune; a per-collection read-only gauge (needs a `Stats` field).
+- **The WAL fsync outside its lock is a Linux win, a macOS loss** (APFS blocks
+  writes during an fsync: 12.8 → 27 µs/append at a 2 ms interval). Production
+  is Linux; do not "fix" it from a Mac benchmark.
+- **Multi-agent work here:** reviewers read-only with scratch `zz_*` files;
+  implementers in their own worktrees with disjoint file ownership; integrate by
+  cherry-picking onto one branch. Cross-branch constants (`applyGroup` vs
+  `chunkPerWorker`) and tests resting on old behaviour (a test relying on
+  "every Open creates a segment") were the only integration breaks.
 
 **Two v2 constraints.** gRPC and Raft go in a **separate module** that imports
 this one; never add a `require` block to `go.mod` (CI fails the build).
@@ -53,6 +92,7 @@ change, if it needs one, is far cheaper before v2 ships than after.
 | the service, the daemon, the wire format | `docs/SERVICE.md`, `service/README.md`, `httpapi/README.md` |
 | an internal package | its own `README.md`, and its quick reference below |
 | the index | `internal/hnsw/README.md` — also the reference for code style |
+| replication, sharding, the WAL format | `docs/CLUSTER.md` |
 
 ### The layout
 The root package is the public API — `doc.go`, `db.go`, `vector.go`, `filter.go`,

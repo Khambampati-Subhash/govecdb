@@ -32,12 +32,20 @@ matches, _ := db.Search(govecdb.SearchRequest{Query: query, K: 10})
 
 ## Status
 
-**v1.3.1 — released and usable, as a library or as a server.** `govecdb.Open`
+**v1.4.0 — released and usable, as a library or as a server.** `govecdb.Open`
 gives you add, get, delete, search, filter, enumerate, snapshot and compact over
 one directory, durable through a write-ahead log and recoverable from snapshots.
 Batch writes and recovery build the index on every core, and everything the
 database does on its own is reported through one observer. `cmd/govecdbd` serves
 a directory of collections over HTTP, and adds no dependencies doing it.
+
+v1.4.0 is a production-hardening release, from a review of every layer against
+a millions-of-vectors, continuous-ingest workload: **reads no longer wait for
+writers** (search p50 under a `SyncAlways` writer went from 4.9 ms to 30 µs),
+snapshots and `Compact` no longer stall searches, a truncated-log recovery that
+used to open with most of the data missing now refuses, the server sheds load
+instead of queueing it, and search is 1.7–1.9× faster on large graphs. No
+exported API was removed and the on-disk format is unchanged.
 
 GoVecDB was rewritten from the ground up; the previous ~45,700-line
 implementation remains in git history. See [the record](docs/MIGRATION.md) for
@@ -63,14 +71,16 @@ Worth knowing before you adopt it, rather than after:
 | | |
 |---|---|
 | **Linux and macOS only** | The log and snapshot store fsync the containing *directory*, which is not portable to Windows. Untested there. |
-| **`Compact()` stops the world** | It holds the write lock for a full rebuild. You choose the moment; the database never triggers it. |
-| **Writers serialize** | Reads scale across cores. Separate writes do not; one `AddBatch` links its vectors on every core (`WithInsertWorkers`), and so does log replay. |
+| **`Compact()` pauses writes** | Searches keep running through it; writes wait for the full rebuild. You choose the moment; the database never triggers it. |
+| **Writers serialize** | Reads scale across cores and never wait for a writer's fsync. Separate writes do not run in parallel; one `AddBatch` links its vectors on every core (`WithInsertWorkers`), and so does log replay. |
+| **SIMD on arm64 only** | Distance kernels are NEON assembly on arm64; amd64 still runs the portable Go kernels (~2–3× slower per distance). |
 | **One database is one index** | Many indexes in one process means [running it as a service](docs/SERVICE.md); the library itself is still one directory, one index. |
 | **Selective filters approach a scan** | Past roughly one vector in a hundred, scanning the metadata is the better tool. |
 | **The service is a single process** | No clustering, no replication. [v2 item 8](docs/MIGRATION.md#v2-scope). |
 
 Still out of scope and planned for [v2](docs/MIGRATION.md#v2-scope): clustering,
-gRPC, quantization, and online compaction. See
+gRPC, quantization, and writes during compaction. The clustering design is in
+[CLUSTER.md](docs/CLUSTER.md). See
 [durability and latency](docs/DURABILITY.md) for what is guaranteed today and
 what it costs.
 
@@ -306,7 +316,7 @@ _ = db.Delete("doc1") // tombstone; the slot keeps routing, never answers
 _ = db.Snapshot() // bounds restart time, and truncates the log behind it
 
 if db.Stats().DeadRatio() > 0.5 {
-    _, _ = db.Compact() // rebuild over the live vectors; stop-the-world
+    _, _ = db.Compact() // rebuild over the live vectors; reads continue, writes wait
 }
 
 // Reading many at once. All three are weakly consistent: no lock is held
@@ -472,25 +482,39 @@ Each `internal/` package but the small `dirlock` has its own README explaining t
 
 ## Measured performance
 
-Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64:
+Apple M4 Max, 10k vectors × 128 dim, k=10, ef=64 (v1.4.0; v1.3.1 in brackets):
 
 | Metric | Value |
 |---|---|
-| Search | 84,700 ns/op |
+| Search | 62,100 ns/op (84,700) |
 | Search allocations | **1 alloc/op**, 240 B/op |
-| Cosine distance (normalized) | 19.2 ns, 0 allocs |
-| Euclidean distance | 21.8 ns, 0 allocs |
-| Insert | 506 µs, 6 allocs |
+| Cosine distance (normalized) | 9.4 ns, 0 allocs (19.2) — NEON |
+| Euclidean distance | 9.5 ns, 0 allocs (21.8) — NEON |
+| Insert | 345 µs, 6 allocs (506) |
+| Search p50 with a `SyncAlways` writer running (10K × 64) | **30 µs** (4.9 ms) |
+| Search at 100K × 512, ef=128 (min of interleaved runs) | **560 µs** (1,257) |
 | `AddBatch`, 100 vectors, `SyncAlways` | 9.3 ms — one fsync, not 100, linked on every core |
 | Build 20,000 × 512, batches of 1,000 | 41 s on one core → **3.7 s** on 16 |
 | Reopen 20,000 × 512, no snapshot | 41.7 s → **3.8 s** on 16 |
 | Recall@10 (dim 32) | **0.999** |
 | Recall@10 (dim 768) | **0.988** |
 
-Search and insert are medians of five runs. Search is ~8% slower than the
-73.8 µs measured under `Alpha` 1.2, because 1.0 does more work per query at the
-same `ef` — and finds more for it (recall at `ef=64` rose from 0.787 to 0.808).
-Measured on one fixture, both ways.
+Search and insert are medians of five runs. At 10K × 128 a graph is mostly
+cache-resident, so the gain is the kernel; at 100K × 512 search waits on memory,
+and touching each expansion's neighbor vectors before scoring them is what
+nearly halves it. The charts below were measured on v1.3.1's kernels: their
+shape holds, their absolute latencies are now lower.
+
+**Why not a Rust or C core:** measured, not assumed. A cgo call costs 19.5 ns
+before doing anything, so calling a C or Rust kernel per distance loses to Go
+assembly at every dimension (45.9 vs 25.9 ns at 512), and C and Rust ran
+identically. Moving the entire search loop native would buy at most ~14%, paid
+for with CGO and cross-compilation. What remains is DRAM latency, which no
+language fixes. Details in [the record](docs/MIGRATION.md).
+
+`Alpha` 1.0 does ~8% more work per query than the old 1.2 at the same `ef` —
+and finds more for it (recall at `ef=64` rose from 0.787 to 0.808). Measured on
+one fixture, both ways.
 
 Recall is measured against brute-force ground truth in `graph_test.go`, not estimated.
 A parallel build's recall matches a serial one's within measurement noise, and
@@ -716,8 +740,11 @@ the two need the same `ef`. `TestSweepClusteredAlpha` guards this.
     counted by the daemon
 14. ~~**Parallel batch build**~~ — done; `AddBatch` and log replay link on every
     core, ~11× at 16
+15. ~~**Production hardening**~~ — done in v1.4.0; readers off the writer path,
+    snapshots and `Compact` that no longer stall searches, refusal of a
+    truncated recovery, service lock scope, backpressure, NEON kernels, prefetch
 
-**Next, in [dependency order](docs/MIGRATION.md#v2-scope):** online compaction,
+**Next, in [dependency order](docs/MIGRATION.md#v2-scope):** writes during compaction,
 fine-grained write locking, filter selectivity estimation, a quantized index,
 then gRPC and clustering. Those last two land in a *separate
 module*: neither gRPC nor Raft is stdlib, and this one keeps its guarantee. See
