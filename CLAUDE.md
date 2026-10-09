@@ -16,7 +16,7 @@ Module path: `github.com/khambampati-subhash/govecdb` · Go 1.24+ (built with 1.
 
 ## Where the project is
 
-**v1.4.0 on `main`.** v1 — a from-scratch rebuild, one subsystem at a time — is
+**v1.4.1 on `main`.** v1 — a from-scratch rebuild, one subsystem at a time — is
 complete: an embeddable library with durability, recovery and filtering. v2 is
 under way, taken partly out of dependency order where an item needed nothing
 from the ones ahead of it.
@@ -77,6 +77,13 @@ A five-agent review against a millions-of-vectors, continuous-ingest workload
   cherry-picking onto one branch. Cross-branch constants (`applyGroup` vs
   `chunkPerWorker`) and tests resting on old behaviour (a test relying on
   "every Open creates a segment") were the only integration breaks.
+- **A timing test must hold under `-race` on a slow CI runner.** v1.4.0's
+  release failed on one that compared against a fixed 1 ms slack: the race
+  detector makes an index apply ~10× slower, and a reader may legitimately wait
+  for one. Assert *differentially* — against the same workload without the
+  thing being guarded (e.g. a `SyncNever` writer) — and prove the test still
+  fails by reintroducing the bug. Run `go test -race` locally before tagging;
+  `release.yml` runs it.
 
 **Two v2 constraints.** gRPC and Raft go in a **separate module** that imports
 this one; never add a `require` block to `go.mod` (CI fails the build).

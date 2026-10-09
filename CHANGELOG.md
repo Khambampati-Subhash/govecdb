@@ -10,6 +10,20 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Nothing yet. See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned
 and in what order.
 
+## [1.4.1] - 2026-10-09
+
+A test-only release: v1.4.0's code is unchanged, and v1.4.0 was never
+published, because its release verification failed on the test fixed here.
+
+### Fixed
+
+- **`TestSearchDoesNotWaitForASyncAlwaysWriter` failed under `-race` on CI**,
+  which stopped the v1.4.0 release. Searches were not waiting on the fsync: a
+  reader may wait for one index apply, and the race detector makes an apply
+  ~10× slower, past the test's fixed slack. The check now compares against the
+  same searches under a `SyncNever` writer, so it holds on any machine, and
+  still fails when the stall is reintroduced.
+
 ## [1.4.0] - 2026-10-09
 
 A production-hardening release, from a review of every layer against a
@@ -464,7 +478,8 @@ Stated here rather than discovered later:
 - **A highly selective filter approaches a full scan.** Past roughly one vector
   in a hundred, a scan over the metadata is the better tool.
 
-[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/khambampati-subhash/govecdb/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/khambampati-subhash/govecdb/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.2.0...v1.3.0

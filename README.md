@@ -32,14 +32,14 @@ matches, _ := db.Search(govecdb.SearchRequest{Query: query, K: 10})
 
 ## Status
 
-**v1.4.0 — released and usable, as a library or as a server.** `govecdb.Open`
+**v1.4.1 — released and usable, as a library or as a server.** `govecdb.Open`
 gives you add, get, delete, search, filter, enumerate, snapshot and compact over
 one directory, durable through a write-ahead log and recoverable from snapshots.
 Batch writes and recovery build the index on every core, and everything the
 database does on its own is reported through one observer. `cmd/govecdbd` serves
 a directory of collections over HTTP, and adds no dependencies doing it.
 
-v1.4.0 is a production-hardening release, from a review of every layer against
+v1.4 is a production-hardening release, from a review of every layer against
 a millions-of-vectors, continuous-ingest workload: **reads no longer wait for
 writers** (search p50 under a `SyncAlways` writer went from 4.9 ms to 30 µs),
 snapshots and `Compact` no longer stall searches, a truncated-log recovery that
