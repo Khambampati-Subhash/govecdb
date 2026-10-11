@@ -57,8 +57,10 @@ type Index interface {
 	// Stats reports live and tombstoned occupancy.
 	Stats() (live, deleted, slots int)
 
-	// Compact reclaims tombstoned slots and reports how many were freed. It is
-	// allowed to stop the world.
+	// Compact reclaims tombstoned slots and reports how many were freed. The DB
+	// calls it holding the writers' lock, so it may block writes; it should not
+	// block searches for its whole length, since a compaction runs for seconds
+	// on a large index. The HNSW graph builds under its read lock and swaps.
 	Compact() int
 }
 

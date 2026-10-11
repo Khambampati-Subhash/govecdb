@@ -100,6 +100,7 @@ change, if it needs one, is far cheaper before v2 ships than after.
 | an internal package | its own `README.md`, and its quick reference below |
 | the index | `internal/hnsw/README.md` — also the reference for code style |
 | replication, sharding, the WAL format | `docs/CLUSTER.md` |
+| a lock, a data path, a default, or a locked baseline | `docs/diagrams/` — the `.d2` that draws it; **update and re-render in the same commit** (below) |
 
 ### The layout
 The root package is the public API — `doc.go`, `db.go`, `vector.go`, `filter.go`,
@@ -170,7 +171,44 @@ while costing ~10× and pushing the package past the default 10-minute timeout.
 Race coverage lives in the `TestConcurrent*` tests and the multi-worker
 `TestInsertBatch*` tests. Do not "fix" the skip by raising the timeout.
 
-Scratch measurement files are named `zz_*_test.go` and are never committed.
+Scratch measurement files are named `zz_*_test.go` and are never committed
+(`.gitignore` enforces it).
+
+Architecture diagrams are D2 sources with the rendered SVG beside them:
+
+```bash
+d2 --layout elk docs/diagrams/01-overview.d2 docs/diagrams/01-overview.svg
+```
+
+**They went stale once and nobody noticed for six weeks.** Drawn in August
+before most of v1 existed, by v1.4.1 all five described a payload store and
+disk hydration that were never built, "namespace" routing inside the DB,
+2 allocs/op, recall 0.972 and alpha 1.2. Found only because a knowledge-graph
+pass put the diagrams' claims next to the code's. A diagram is documentation a
+user trusts *more* than prose, so treat it like `docs/DURABILITY.md`: change the
+`.d2` in the commit that changes what it draws. Never edit the `.svg` by hand,
+and never read one into an agent's context — they are ~90 KB of path data.
+
+### Navigating with graphify
+A knowledge graph of the repo (code AST + docs + charts, ~2,150 nodes) can be
+built locally with `/graphify` into `graphify-out/` (gitignored — it is a
+derived, per-machine artifact, never commit it). Use it to *locate* code before
+reading it, instead of grepping blind:
+
+```bash
+/graphify query "how does a search reach the metadata store"   # BFS context
+/graphify path "searchLayer" "admits"                          # shortest path
+/graphify explain "applyGroup"                                 # one node + neighbours
+/graphify . --update                                           # re-extract changed files only
+python3 -c "import json;d=json.load(open('graphify-out/graph.json'));[print(n['label'],n.get('source_file'),n.get('source_location')) for n in d['nodes'] if 'Compact' in n.get('label','')]"
+```
+
+It is a map, not the territory: doc-derived edges are tagged `INFERRED` and
+can be wrong, and the graph is as stale as its last build. Verify against the
+source before relying on an edge. For multi-agent work, point each agent at
+`graph.json` to find its files — it keeps their context small. Its "god nodes"
+are mostly test helpers (`randomVector`, `fill`, `openDB`) and its low-cohesion
+"split this package" suggestions are an artifact of file-level nodes; ignore both.
 
 If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 

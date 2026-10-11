@@ -219,7 +219,7 @@ type Stats struct {
 // DeadRatio is the fraction of slots that are tombstones, in [0,1]. It exists so
 // a compaction policy is a one-liner — `if g.Stats().DeadRatio() > 0.5` — while
 // the policy itself stays outside the index, where the caller can pick a moment
-// that tolerates Compact's stop-the-world pause.
+// that tolerates Compact's pause on writes.
 //
 // 0.5, and not the 0.25 that the search-cost curve alone suggests. Two
 // benchmarks have to be read together:

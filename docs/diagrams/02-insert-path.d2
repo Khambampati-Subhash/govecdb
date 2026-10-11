@@ -1,9 +1,12 @@
-# GoVecDB v1 — insert path, end to end
+# GoVecDB — insert path, end to end (DB.Add / DB.AddBatch)
 #
 # The ordering constraint is the whole point: the WAL append is the COMMIT
 # POINT. Apply-to-graph happens after, and is safe to redo on replay. Reverse
 # these two and a crash between them means you acked a write that no longer
 # exists.
+#
+# This is the root package's DB. Collections (service.Manager) sit a layer
+# above it and add nothing to this path but a borrow, so they are not drawn.
 
 vars: {
   d2-config: {
@@ -52,85 +55,119 @@ classes: {
   }
 }
 
-start: "Insert(ns, id, vec, meta)" {
+start: "Add(Vector) · AddBatch([]Vector)" {
   shape: circle
   style.fill: "#3A2B52"
   style.stroke: "#B39DDB"
 }
 
-s1: 1 · Validate {
+s1: 1 · Validate — no lock held {
   class: step
   body: |md
-    dimension · non-empty · ≤ 4096
-    reject NaN / ±Inf
+    id: non-empty, ≤ 512 B, valid UTF-8
+    values: exactly the dimension fixed at `Open`
+    — every one finite (NaN / ±Inf refused)
+    metadata: ≤ 256 keys, string · bool · int64 · float64
+    AddBatch: ≤ 10,000, **all** checked before any is logged
+    (defaults; `WithLimits` raises them up to hard ceilings)
   |
 }
 
-s2: 2 · Resolve namespace {
+s2: 2 · Take writeMu, check writable() {
   class: step
   body: |md
-    registry lookup; create or
-    load the collection if cold
+    One writer at a time across append **and** apply, so
+    apply order is log order. Closed, `WithReadOnly`, or a
+    past durability failure → refused here.
   |
 }
 
-s3: 3 · Assign sequence number {
-  class: step
-  body: |md
-    monotonic LSN — orders the WAL and
-    marks where a snapshot ends
-  |
-}
-
-wal_block: 4 · WAL APPEND — the commit point {
+# Sequence numbers used to be a separate DB step. They are assigned inside
+# the WAL writer, under its own lock, because only the lock holder knows the
+# order records were written in.
+wal_block: 3 · WAL APPEND — the commit point (under writeMu) {
   class: critical
 
-  encode: Encode record {
+  encode: encodePut + record frame {
     class: wal
     fmt: |md
-      `[crc32][type=INSERT][seq][len][payload]`
-      payload = id + dim + float32s + meta
+      `[crc32c][type=PUT][seq][len]` — 17 B header
+      payload = `[version][idLen][id][dim][float32s][meta]`
+      crc covers type, seq **and** len, not just payload
+      seq assigned by the writer — strictly increasing
     |
   }
 
-  append: Append to buffer {
-    class: wal
-  }
-
-  fsync: fsync policy gate {
+  append: Write into 64 KiB bufio buffer {
     class: wal
     body: |md
-      **always** — safe, ~1–10 ms/write on consumer NVMe
-      **interval** — group commit, default ~50 ms
-      **never** — tests and benchmarks only
+      User space, not the kernel. Rotates at
+      `MaxSegmentBytes`, fsyncing the old segment first.
+      AddBatch streams n records through the same buffer.
+    |
+  }
+
+  fsync: SyncPolicy gate {
+    class: wal
+    body: |md
+      **SyncAlways** (zero value) — fsync before return, ~4.24 ms
+      AddBatch: **one** fsync for the whole batch
+      **SyncInterval** — ticker fsyncs every 50 ms (default)
+      **SyncNever** — ~780 ns; flushed when the buffer fills or on Close
+    |
+  }
+
+  fail: "Any write/fsync error → db.fail" {
+    style.fill: "#3B1215"
+    style.stroke: "#FF6B6B"
+    body: |md
+      Sticky: the DB is permanently `ErrReadOnly`,
+      reads keep working. Emits `DurabilityFailure`
+      (under writeMu — the observer must not call back).
     |
   }
 
   encode -> append -> fsync
+  fsync -> fail: "error" {
+    style.stroke-dash: 3
+    style.stroke: "#FF6B6B"
+  }
 }
 
 durable_note: |md
-  **Only after fsync returns is the write durable.**
-  With `interval`, you may lose up to that window on
-  power loss — that is a documented product decision,
-  not an accident. Redis ships the same tradeoff.
+  **Under SyncAlways, "returned nil" means durable** — for every
+  record of a batch. Under SyncInterval / SyncNever an acknowledged
+  write may still sit in the user-space buffer, so a *process* crash
+  loses it too, not just power loss. A documented choice
+  (see docs/DURABILITY.md), never the default.
 | {
   class: note
 }
 
-s5: 5 · Apply to in-memory graph {
+s4: 4 · Apply — under applyMu (exclusive), still under writeMu {
   class: critical
 
-  copy: "prepare(v) — copy + normalize" {
-    class: graph
+  route: "Add → applyPut · AddBatch → applyPuts" {
+    class: step
     body: |md
-      Copies so the graph never aliases a
-      caller buffer. Normalizes for Cosine,
-      collapsing it to `1 - dot(a,b)`.
+      **One** hold of applyMu covers `index.Insert` **and**
+      `store.Put`, so no reader sees (v2, md1).
+      A batch keeps the last occurrence of each id and applies
+      in groups of `applyGroup = max(64, 4 × workers)`,
+      releasing applyMu between groups.
     |
   }
 
-  upsert: "5a · Is this id already live? — the upsert branch" {
+  copy: "prepare(v) — copy + normalize, before g.mu" {
+    class: graph
+    body: |md
+      Copies so the graph never aliases a caller buffer.
+      Normalizes for Cosine. Done outside the graph's
+      lock: it touches only the caller's slice and config.
+    |
+  }
+
+  upsert: "4a · Is this id already live? — the upsert branch (g.mu held)" {
     class: graph
     style.stroke: "#FFD54F"
     style.stroke-width: 2
@@ -143,10 +180,10 @@ s5: 5 · Apply to in-memory graph {
         No tombstone, no slot, no edge touched.
 
         This is the WAL-replay path: recovery re-applies
-        records the graph already holds, and if that cost
-        a slot every restart would inflate the graph with
-        tombstones for vectors that never changed.
-        **332 ns**, against 776 µs for a real replacement.
+        records the graph already holds across a snapshot
+        boundary, and if that cost a slot every restart
+        would inflate the graph with tombstones.
+        **~331 ns**, against 776 µs for a real replacement.
       |
     }
 
@@ -189,20 +226,18 @@ s5: 5 · Apply to in-memory graph {
     scanning the whole graph, **O(N·M) per update**.
 
     A fresh slot is correct by construction. It costs one dead
-    slot — the same debt `Delete` takes on, paid to the same
-    compaction pass.
+    slot — the same debt `Delete` takes on, paid to `Compact`.
   | {
     class: note
   }
 
-  lvl: "randomLevel() — for a brand-new slot" {
+  lvl: "randomLevel() + place() — a brand-new slot" {
     class: graph
     body: |md
       `int(-log(rand) * ml)`, `ml = 1/ln(M)`
-      Seeded → replay reproduces the graph
-
-      A replacement draws a **fresh** level; it does
-      not inherit the height of the slot it replaced.
+      Seeded RNG; a **serial** build is reproducible,
+      a parallel batch is not (`WithInsertWorkers(1)`).
+      A replacement draws a **fresh** level.
     |
   }
 
@@ -211,13 +246,14 @@ s5: 5 · Apply to in-memory graph {
     body: ef=1, just to find a good entry point
   }
 
-  connect: For each layer level → 0 {
+  connect: "link() — for each layer min(level, maxLevel) → 0" {
     class: graph
     body: |md
-      1. `searchLayer(vec, cur, EfConstruction, lc)`
-      2. `selectNeighbors(w, maxConn(lc))` — alpha-pruned
+      1. `searchLayer(vec, cur, EfConstruction, lc, nil)`
+         — a build never filters
+      2. `selectNeighbors(w, maxConn(lc))` — alpha 1.0
       3. `connect(new, nb)` **and** `connect(nb, new)`
-      4. `pruneConnections(nb, lc)` — trim to cap
+      4. `pruneConnections` — trim to cap, demoting tombstones
       5. seed next layer with the closest hit
     |
   }
@@ -227,12 +263,46 @@ s5: 5 · Apply to in-memory graph {
     body: if level > maxLevel
   }
 
+  batch: "InsertBatch — per group, in chunks of 4 × workers" {
+    class: graph
+    style.stroke: "#4FC3F7"
+    body: |md
+      Each chunk holds `g.mu` throughout; readers get it back between.
+      Workers = `min(workers, live / 32)` — a small graph grows serially.
+      1. serial: upsert rule, `randomLevel` in batch order, `place`
+      2. a node above `maxLevel` is linked **alone** → entry fixed
+      3. parallel `link()`: striped `nodeLocks` (4,096 · 32 KiB),
+         never two held; `node.linking` hides in-flight nodes
+         from other workers' traversals
+    |
+  }
+
+  meta: "store.Put(id, metadata)" {
+    class: step
+    body: |md
+      In-RAM `store.Map`, keys and strings interned.
+      Durable only through the WAL record and the
+      snapshot's second section — no payload file.
+    |
+  }
+
+  route -> copy: "Add / small batch"
+  route -> batch: "batch ≥ 2" {
+    style.stroke: "#4FC3F7"
+  }
+  batch -> upsert: "same rule, per node" {
+    style.stroke-dash: 3
+  }
   copy -> upsert.same: "id already live"
   copy -> lvl: "new id — branch skipped" {
     style.stroke-dash: 3
   }
   upsert.kill -> lvl: "append a new slot at len(nodes)"
   lvl -> descend -> connect -> promote
+  promote -> meta
+  batch -> meta: "group linked" {
+    style.stroke: "#4FC3F7"
+  }
 
   upsert -> why_new_slot: {
     style.stroke-dash: 4
@@ -241,13 +311,30 @@ s5: 5 · Apply to in-memory graph {
   }
 }
 
-s6: 6 · Ack client {
+readers_note: |md
+  **Readers never take writeMu**, so they never wait on the fsync.
+  A search waits at most for one apply — one group of a batch —
+  which is what the graph's own write lock already costs it.
+| {
+  class: note
+}
+
+s5: 5 · kickCalibration(Len) {
+  class: step
+  body: |md
+    Non-blocking send on a 1-slot channel, only when
+    the live count has doubled or halved. The
+    calibrator runs in its own goroutine.
+  |
+}
+
+s6: "6 · Ack — return nil, release writeMu" {
   shape: circle
   style.fill: "#1B4D2E"
   style.stroke: "#66BB6A"
 }
 
-wal_disk: WAL segment on disk {
+wal_disk: "WAL segments on disk (wal-NNNNNN.log)" {
   class: disk
   style.multiple: true
 }
@@ -259,34 +346,40 @@ crash: Crash here? {
 }
 
 crash_note: |md
-  **Crash after step 4, before step 6** → the record is on
-  disk. Replay re-applies it. The client never got an ack,
-  so a retry is idempotent: PUT is an upsert, and re-applying
-  a vector the graph already holds changes nothing.
+  **Before the append returns** → no ack was given. A torn
+  tail fails its checksum; replay truncates that segment
+  *logically* at the tear and moves on. The write never happened.
 
-  **Crash before step 4 completes** → torn tail record. CRC
-  fails on recovery, the log truncates there, the write
-  simply never happened. Both outcomes are consistent.
+  **After the append, before step 6** → the record is in the log
+  (under SyncAlways, on disk). Replay re-applies it. A client retry
+  is harmless: PUT is an upsert, and an unchanged vector costs nothing.
+
+  **Index error after a durable append** → the call fails, but the
+  record replays on the next start. Log and index disagree until
+  then — the direction the ordering rule chooses on purpose.
+
+  **AddBatch failing midway** → a durable prefix may exist; the DB is
+  read-only, and the next start replays that prefix.
 | {
   class: note
 }
 
-start -> s1 -> s2 -> s3 -> wal_block.encode
+start -> s1 -> s2 -> wal_block.encode
 
 wal_block.fsync -> wal_disk: durable {
   style.stroke: "#FFB74D"
   style.stroke-width: 3
 }
 
-wal_block.fsync -> s5.copy: "ONLY NOW apply" {
+wal_block.fsync -> s4.route: "ONLY NOW apply" {
   style.stroke: "#FF6B6B"
   style.stroke-width: 3
   style.bold: true
 }
 
-s5.promote -> s6
+s4.meta -> s5 -> s6
 
-s5.upsert.same -> s6: "unchanged → return, graph untouched" {
+s4.upsert.same -> s4.meta: "unchanged → graph untouched, metadata still written" {
   style.stroke: "#FFD54F"
   style.stroke-dash: 3
 }
@@ -302,6 +395,11 @@ crash -> crash_note: {
 
 # --- annotations, drawn faint so they never compete with the flow ---
 wal_block -> durable_note: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}
+s4 -> readers_note: {
   style.stroke-dash: 4
   style.opacity: 0.7
   style.stroke: "#6E6E6E"

@@ -1,12 +1,17 @@
-# GoVecDB v1 — persistence and recovery (phase 2)
+# GoVecDB v1 — persistence and recovery
 #
 # Three independent clocks, differing by orders of magnitude:
-#   WAL append     every write, synchronous, buffered
-#   WAL fsync      ~50 ms (policy) — bounds how much you can lose
-#   Checkpoint     seconds to minutes — bounds recovery time and WAL size
+#   WAL append     every write, under writeMu, into a 64 KiB bufio buffer
+#   WAL fsync      per policy — SyncAlways (default) every append,
+#                  SyncInterval every 50 ms; bounds how much you can lose
+#   Snapshot       minutes (~12 ms floor: two fsyncs) — bounds recovery time
+#                  and log size
 #
-# The WAL is read exactly ONCE in the life of a process: at startup.
+# The WAL is read exactly ONCE in the life of a process: at Open.
 # Snapshots are written FROM RAM. You never re-read the log to persist.
+#
+# Every name, size and number here is checked against internal/wal,
+# internal/snapshot, codec.go, recovery.go, db.go and docs/DURABILITY.md.
 
 vars: {
   d2-config: {
@@ -62,58 +67,60 @@ classes: {
   }
 }
 
-record: WAL record layout {
+# Field widths are the frozen wire layout (TestLayoutIsFrozen in each
+# package), so they are spelled out rather than summarised.
+record: WAL record — 17 B header + payload {
   shape: sql_table
 
-  crc32: "uint32  — checksum of everything after it"
-  type: "uint8   — INSERT | DELETE | CHECKPOINT"
-  seq: "uint64  — monotonic LSN"
-  len: "uint32  — payload byte length"
-  payload: "[]byte  — id, dim, float32s, metadata"
+  crc32c: "uint32  — covers type, seq, len AND payload"
+  type: "uint8   — PUT=1 | DELETE=2 | CHECKPOINT=3 (reserved, never written); 0 invalid"
+  seq: "uint64  — strictly increasing; gaps ok, repeats refused"
+  len: "uint32  — refused vs file size + MaxRecordBytes before any alloc"
+  payload: "[]byte  — opaque to wal; PUT = ver | idLen | id | dim | float32s | metadata"
 }
 
-header: Segment file header {
+header: Segment file header — 8 B {
   shape: sql_table
 
-  magic: "uint32 — 'GVWL', catches a wrong file"
-  version: "uint8  — REQUIRED from commit one"
+  magic: "4 B    — 'GVWL', catches a wrong file"
+  version: "uint16 — present from the first byte written"
+  reserved: "uint16 — zero"
 }
 
 fmt_note: |md
   ### Why `[len][data]` is not enough
 
-  **crc32** — power loss mid-append leaves a partial record.
-  Length-only means you read garbage as valid data. With a
-  checksum, recovery reads until CRC fails and truncates
-  there. A torn tail is *expected*, not an error.
+  **crc32c over the header too** — a corrupt *length* is the
+  dangerous one: it turns a bad read into an arbitrary allocation.
+  Nothing is allocated on a length that has not been bounded.
 
-  **version** — a format without a version byte can never be
-  migrated. Free now, impossible to retrofit.
+  **Type 0 is invalid** — zero-filled space never decodes as a record.
 
-  **type** — deletes are coming; leaving room costs nothing.
+  **version** — a format without one can never be migrated.
 
-  **seq** — tells you where the snapshot ends and the
-  replay tail begins.
+  **seq** — tells replay where the snapshot ends and the tail begins.
 | {
   class: note
 }
 
 runtime: Running system {
   class: group
-  direction: right
 
   ram_state: In-memory state {
     class: ram
-    g: HNSW graph — the live truth
-    m: id → payload offset map
+    g: HNSW graph
+    m: store.Map metadata
   }
 
-  wal_active: Active segment {
+  wal_active: WAL writer {
     class: wal
-    body: wal-000017.log
+    buf: 64 KiB bufio buffer (user space)
+    body: active segment wal-000017.log
   }
 
-  ram_state -> wal_active: "append BEFORE apply" {
+  # writeMu spans append and apply; applyMu is held only for the apply, so a
+  # search never waits on a writer's fsync.
+  wal_active -> ram_state: "append FIRST, then apply (writeMu; applyMu for the apply only)" {
     style.stroke: "#FF6B6B"
     style.stroke-width: 3
   }
@@ -121,178 +128,215 @@ runtime: Running system {
 
 derived_note: |md
   **The graph is derived state, never the source of truth.**
-  It can always be reconstructed from snapshot + WAL. That
-  is what lets recovery be simple and what makes the
-  write ordering non-negotiable.
+  It can always be rebuilt from snapshot + log. That is what
+  makes the write ordering non-negotiable.
+
+  **Fail closed:** the first WAL error makes the DB permanently
+  `ErrReadOnly` (a `DurabilityFailure` event); reads keep working.
+
+  **Under SyncInterval / SyncNever** an acknowledged write may still
+  sit in the user-space buffer — a *process* crash can lose it too.
 | {
   class: note
 }
 
-checkpoint: Checkpoint cycle {
+checkpoint: Snapshot cycle — DB.Snapshot (snapMu) {
   class: group
-  direction: down
 
-  c1: 1 · Freeze a consistent view {
+  c1: 1 · Take writeMu, seq N = log.LastSeq() {
     class: ram
-    body: note the current seq — call it N
+    body: skipped if nothing logged or compacted since the last one
   }
   c2: 2 · Serialize FROM RAM {
     class: ram
     body: |md
-      **not** by re-reading the WAL —
-      the in-memory state is the source
+      payload = `GVDB` header · **graph section** (`hnsw` `WriteTo`)
+      · **metadata section** (`store.Map`) — self-delimiting,
+      sharing one `bufio.Reader` on load
     |
   }
-  c3: 3 · Write to a temp file {
+  c3: 3 · Write snap-*.tmp {
     class: disk
   }
-  c4: 4 · fsync, then atomic rename {
+  c4: 4 · fsync → rename → fsync the directory {
     class: disk
-    body: rename is the commit — a half-written snapshot is never visible
+    body: rename is the commit; the dir fsync makes the name survive. writeMu released.
   }
-  c5: 5 · Truncate WAL below N {
+  c5: 5 · Prune — keep 2 {
+    class: disk
+    body: only after the new one is durable
+  }
+  c6: 6 · Verify the OLDEST retained, then wal.Truncate(oldest.Seq+1) {
     class: wal
-    body: delete whole segments — this is why rotation exists
+    body: verify fails → TruncationSkipped, log kept
   }
 
-  c1 -> c2 -> c3 -> c4 -> c5
+  c1 -> c2 -> c3 -> c4 -> c5 -> c6
 }
 
-snapshot_choice: The decision hiding in the snapshot {
+snapshot_choice: The decision in the snapshot — settled {
   style.fill: "#332B0D"
   style.stroke: "#FFD54F"
   style.stroke-width: 3
 
   body: |md
-    ### Vectors only, or vectors + graph structure?
+    ### Serialize the graph, not just the vectors
 
-    **Vectors only** — small, simple format, but recovery
-    re-inserts everything. Rebuilding 1M × 768 is **minutes**,
-    not seconds.
+    Measured at **1M × 128**: verifying and decoding the
+    graph is **~0.36 s**; re-inserting every vector is
+    **~506 s** on one core — about **1,400×**.
 
-    **Vectors + neighbor lists** — larger and fiddlier, but
-    recovery is deserialization.
-
-    **Start with vectors-only. Then measure recovery time
-    before calling it done.** If it is unacceptable, serialize
-    the graph. Do not discover this in production.
+    The price: the codec freezes `node` on disk, so changing it
+    is a format migration (`TestCodecLayoutIsFrozen`).
   |
+}
+
+snap_fmt: Snapshot file — 16 B header + payload + 12 B trailer {
+  shape: sql_table
+
+  magic: "4 B    — 'GVSS'"
+  version: "uint16 · reserved uint16"
+  seq: "uint64 — checksummed; wins over the file name"
+  payload: "streamed — gigabytes, never held in memory"
+  crc32c: "uint32 — trailer: covers header + payload"
+  length: "uint64 — cross-checked against the file size"
 }
 
 storage: Disk layout {
   class: group
-  direction: right
 
-  seg_old: wal-000015.log\nwal-000016.log {
+  seg_old: wal/wal-000015.log\nwal/wal-000016.log {
     class: disk
     style.multiple: true
     style.opacity: 0.7
   }
-  snap: snap-000016.bin {
+  snap: "snapshots/snap-<20-digit seq>.snap\n(newest + one older)" {
     class: disk
+    style.multiple: true
   }
-  seg_new: wal-000017.log\n(active) {
+  seg_new: wal/wal-000017.log\n(active) {
     class: disk
   }
 }
 
 truncated_note: |md
-  Segments at or below the snapshot's seq are
-  **deletable** — their contents are already
-  captured in `snap-000016.bin`.
+  A segment is deletable once the **next** segment's first seq,
+  read through the checksummed reader, is ≤ the oldest retained
+  snapshot's seq + 1. Never the newest segment. Truncating
+  against the *newest* snapshot would strand the older copy.
 | {
   class: note
 }
 
-recovery: Recovery — the only time the WAL is read {
+recovery: Recovery — Open, the only time the WAL is read {
   class: group
-  direction: down
 
-  r1: 1 · Find newest valid snapshot {
-    class: disk
-  }
-  r2: 2 · Load it — rebuild vectors (and graph, if serialized) {
+  r0: 0 · flock the directory {
     class: ram
+    body: exclusive for a writer, shared for WithReadOnly
   }
-  r3: 3 · Replay WAL records with seq > N {
-    class: wal
-    body: in original order — same order + same seed = identical graph
+  r1: 1 · snapshot.Load — newest that verifies end to end {
+    class: disk
+    body: corrupt → SnapshotRejected, try the older one; none → empty DB. A decode error is fatal, not a fallback.
   }
-  r4: 4 · CRC fails on the tail record? {
+  r2: 2 · Install graph + metadata at seq N {
+    class: ram
+    body: dimension, metric or M differ → refused
+  }
+  r3: 3 · wal.Replay: first seq > N+1? {
     shape: diamond
     class: bad
   }
-  r5: 5 · Truncate there and continue {
+  r3x: ErrCorrupt {
+    class: bad
+    body: the log no longer reaches back — restore the snapshots
+  }
+  r4: 4 · Apply records with seq > N {
+    class: wal
+    body: runs of PUTs via InsertBatch, flushed at every DELETE
+  }
+  r5: 5 · Record fails its CRC? {
+    shape: diamond
+    class: bad
+  }
+  r6: 6 · Tear ends the SEGMENT, not the replay {
     class: wal
     body: |md
-      A torn final record is the **normal**
-      outcome of a power loss, not corruption.
-      Do not fail the whole recovery for it.
+      Logical truncation (bytes stay on disk), a `TornLog`
+      event, then on to the next segment — a twice-crashed
+      log has a tear in the middle, and that is normal.
     |
   }
-  r6: 6 · Open for writes {
+  r7: 7 · wal.Open — always a NEW segment {
     shape: circle
     style.fill: "#1B4D2E"
     style.stroke: "#66BB6A"
   }
 
-  r1 -> r2 -> r3 -> r4
-  r4 -> r5: yes
-  r4 -> r6: no, clean tail
-  r5 -> r6
+  r0 -> r1 -> r2 -> r3
+  r3 -> r3x: yes
+  r3 -> r4: no
+  r4 -> r5
+  r5 -> r6: yes
+  r6 -> r4: next segment
+  r5 -> r7: "no, end of log"
 }
 
-test_note: |md
-  ### Test this by actually killing the process
-
-  A recovery path verified only by unit tests that call
-  `Close()` cleanly is a recovery path that has never been
-  tested. Spawn a child, `SIGKILL` it mid-write, reopen,
-  assert the surviving prefix is exactly consistent.
-
-  This is the single highest-value test in the WAL package.
+open_note: |md
+  **Why a new segment:** appending after a torn tail would bury
+  good records behind a permanent stopping point. The one reuse is
+  a newest segment that is *exactly* an 8 B header. `FirstSeq` =
+  max(N+1, replay's NextSeq).
 | {
   class: note
 }
 
-prereq: Prerequisites — both now cleared {
+test_note: |md
+  ### Tested by actually killing the process
+
+  `TestCrashMidWriteKeepsEveryAcknowledgedRecord` spawns a child,
+  `SIGKILL`s it mid-write, reopens, and asserts every acknowledged
+  record survived. `TestAnotherProcessIsRefused` does the same to
+  prove the kernel drops a dead holder's flock.
+| {
+  class: note
+}
+
+rotation: Segment rotation — at 64 MiB {
   class: good
 
   body: |md
-    **Deletes.** `Graph.Delete` tombstones a slot: it keeps its
-    index and its edges, so searches still route *through* it
-    while it is filtered out of results. The operation set the
-    record format has to cover is therefore settled — `INSERT`
-    and `DELETE`, with `DELETE` idempotent so replaying a
-    record twice is safe.
+    **fsync the old segment before creating the new one**, whatever
+    the sync policy — otherwise a crash leaves a hole in the *middle*
+    of the log, the one shape recovery cannot repair.
 
-    **Concurrency.** Scratch moved into a pooled `searchState`
-    and the graph is guarded by an `RWMutex`, so a WAL writer
-    and readers can coexist without giving up the 2-allocs/op
-    search.
+    **fsync the directory** on every new segment, or a crash can take
+    a fresh segment — and `SyncAlways` writes inside it — away.
 
-    *Still open:* compaction. Tombstones never release memory
-    on their own, and a rebuild changes every slot index — so
-    a checkpoint written before one cannot be replayed onto a
-    graph compacted after it.
+    `MaxSegmentBytes` is a truncation granularity, not a size cap. ~9 ms
+    per rotation amortizes to **0.29 µs/record**. Segments sort
+    **numerically**, never lexically.
   |
 }
 
 header -> record: "file starts with, then N records"
 runtime.wal_active -> storage.seg_new: appends land here
-runtime.ram_state -> checkpoint.c1: periodically {
+runtime.wal_active -> rotation: "segment full" {
+  style.stroke-dash: 3
+}
+runtime.ram_state -> checkpoint.c1: "timer or Snapshot()" {
   style.stroke: "#CE93D8"
   style.stroke-width: 2
 }
 checkpoint.c4 -> storage.snap
-checkpoint.c5 -> storage.seg_old: delete {
+checkpoint.c6 -> storage.seg_old: delete {
   style.stroke-dash: 3
 }
-storage.snap -> recovery.r1: on startup {
+storage.snap -> recovery.r1: on Open {
   style.stroke: "#4FC3F7"
   style.stroke-width: 2
 }
-storage.seg_new -> recovery.r3: tail only {
+storage.seg_new -> recovery.r3: every remaining segment {
   style.stroke: "#4FC3F7"
   style.stroke-width: 2
 }
@@ -313,17 +357,22 @@ checkpoint -> snapshot_choice: {
   style.opacity: 0.7
   style.stroke: "#6E6E6E"
 }
+storage.snap -> snap_fmt: {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+  style.stroke: "#6E6E6E"
+}
 storage -> truncated_note: {
   style.stroke-dash: 4
   style.opacity: 0.7
   style.stroke: "#6E6E6E"
 }
-recovery -> test_note: {
+recovery.r7 -> open_note: {
   style.stroke-dash: 4
   style.opacity: 0.7
   style.stroke: "#6E6E6E"
 }
-recovery -> prereq: {
+recovery -> test_note: {
   style.stroke-dash: 4
   style.opacity: 0.7
   style.stroke: "#6E6E6E"

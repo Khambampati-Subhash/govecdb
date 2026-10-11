@@ -7,8 +7,23 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-Nothing yet. See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned
-and in what order.
+See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned and in what
+order.
+
+### Fixed
+
+- **The architecture diagrams described a database that was never built.**
+  Drawn before most of v1, all five in `docs/diagrams/` showed a disk payload
+  store that search "hydrated" from, namespace routing inside the DB, 2
+  allocs/op, recall 0.972 at dim 768 and an alpha default of 1.2. Rewritten
+  against the code: search does no disk I/O, metadata is in RAM, collections
+  are `service/` above the DB, 1 alloc/op, 0.988, alpha 1.0 — plus the three DB
+  locks, `InsertBatch`, calibration, the in-traversal filter, online `Compact`
+  and the real WAL and snapshot formats.
+- **Compaction was documented as stopping searches** in the HTTP API reference,
+  `DeadRatio`, the package docs and the `Index` interface. Since 1.4.0 only
+  writes wait; the `Index` contract now says an implementation should not block
+  searches for the rebuild's length.
 
 ## [1.4.1] - 2026-10-09
 

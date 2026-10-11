@@ -7,6 +7,9 @@
 # removed vector is not removed: the slot stays, flagged, because slots are
 # addressed by index and because a node is a bridge. Both deletes and updates
 # leave those slots behind — see the lifecycle panel.
+#
+# Field lists mirror graph.go, node.go and state.go exactly; a field added
+# there and missing here is how this diagram went stale the first time.
 
 vars: {
   d2-config: {
@@ -59,21 +62,24 @@ classes: {
 graph_struct: "Graph — internal/hnsw/graph.go" {
   shape: sql_table
 
-  mu: "sync.RWMutex — guards everything below it"
+  mu: "sync.RWMutex — Search reads, Insert/Delete write"
   cfg: Config
   dist: "DistanceFunc — chosen once, never branched on"
+  mMax: "int — neighbor cap, layers > 0 (= M)"
+  mMax0: "int — neighbor cap, layer 0 (= 2·M)"
+  ml: "float64 — 1/ln(M), level decay"
+  alpha: "float32 — pruning relaxation, default 1.0"
+  rng: "*rand.Rand — seeded, reproducible"
+  normalized: "bool — stored vectors are unit length (Cosine)"
   nodes: "[]*node — slots, append-only; indexes never shift"
   ids: "map[string]int — LIVE external id → slot"
   entry: "int — entry point, -1 when empty"
   maxLevel: int
   numDeleted: "int — tombstoned slots; the compaction signal"
-  mMax: "int — neighbor cap, layers > 0"
-  mMax0: "int — neighbor cap, layer 0 (= 2·M)"
-  ml: "float64 — 1/ln(M), level decay"
-  alpha: "float32 — pruning relaxation"
-  normalized: "bool — stored vectors are unit length (Cosine)"
-  rng: "*rand.Rand — seeded, reproducible"
+  writes: "uint64 — mutation count, re-checked at Compact's swap"
+  locks: "*nodeLocks — 4,096 striped mutexes (32 KiB), batches only"
   pool: "sync.Pool — hands out per-traversal searchState"
+  efScale: "atomic.Uint64 — Calibrate's ef factor, not serialized"
 }
 
 # No explicit fill: a sql_table takes its BODY colour from `style.stroke` and
@@ -86,8 +92,16 @@ state_struct: "searchState — internal/hnsw/state.go" {
   visited: "visitedList — generation stamps"
   cands: "[]candidate — min-heap: the frontier"
   results: "[]candidate — max-heap: best ef so far"
+  found: "[]candidate — searchLayer's sorted output"
   rejected: "[]candidate — selectNeighbors' backfill"
+  pruneBuf: "[]candidate — pruneConnections' scratch"
+  selected: "[]int — insert's chosen neighbors, this layer"
   queryBuf: "[]float32 — normalized copy of the query"
+  nbrBuf: "[]int — a neighbor list copied out under its lock"
+  fresh: "[]int — one expansion's unvisited neighbors (prefetch)"
+  sink: "float32 — keeps touchLines' loads alive"
+  locks: "*nodeLocks — non-nil only in a batch worker"
+  hide: "int — 1+slot Calibrate hides, 0 = none"
 }
 
 node_struct: "node — internal/hnsw/node.go" {
@@ -97,11 +111,11 @@ node_struct: "node — internal/hnsw/node.go" {
   vector: "[]float32 — graph-owned copy, normalized for Cosine"
   neighbors: "[][]int — neighbors[l] = slots on layer l"
   deleted: "bool — tombstone: dead as an answer, alive as a route"
+  linking: "atomic.Bool — edges still being built in a batch; others step around it"
 }
 
 hierarchy: The layered graph {
   class: group
-  direction: down
 
   # grid-columns, not `direction: right` — nested direction is a TALA-only
   # feature; dagre and ELK both ignore it. Grids are engine-independent and
@@ -179,9 +193,11 @@ level_note: |md
 
   Exponentially decaying: most nodes stop at layer 0, a few
   reach high. That is what makes the top sparse and the
-  descent cheap. The RNG is **seeded**, so replaying the same
-  inserts in the same order rebuilds an identical graph — which
-  makes recovery-by-replay verifiable in a test.
+  descent cheap. The RNG is **seeded**, so the *serial* path
+  replaying the same inserts in the same order rebuilds an
+  identical graph — which is what makes Compact testable by
+  equality. `InsertBatch` links on several workers and is not
+  deterministic: `WithInsertWorkers(1)` + `WithSeed` for that.
 | {
   class: note
 }
@@ -204,9 +220,12 @@ selection: Neighbor selection — the recall lever {
 
     `alpha * d(c,s) <= d(c,base)  →  reject c`
 
-    **alpha = 1.0** classic HNSW heuristic
-    **alpha > 1.0** prunes harder, keeps more long-range shortcut
-    edges, measurably lifts recall. Default **1.2**.
+    **alpha = 1.0** — classic HNSW heuristic, and the **default**.
+    **alpha > 1.0** rejects *less*: more near candidates survive and,
+    arriving nearest-first, take the slots long-range edges needed.
+    At 62.5K × 512 in 1,024 tight clusters, alpha 1.2 never passed
+    recall 0.954 at any ef; 1.0 reached 0.95 at ef=10. Do not
+    "restore" the DiskANN value.
 
     Rejected candidates are **backfilled** if the list comes up
     short — a node with too few edges is a dead end during search.
@@ -246,7 +265,7 @@ lifecycle: A slot outlives its vector — delete AND update {
     `cands` (the frontier) admits it — a dead node still bridges.
     `results` never does — a dead node is not an answer. So the
     search **widens** instead of returning fewer than `k` hits:
-    1.2× at 25% dead, 2.5× at 75%. `pruneConnections` demotes
+    1.2× at 25% dead, 1.6× at 50%, 2.5× at 75%. `pruneConnections` demotes
     tombstones so they cannot evict a fresh live edge.
 
     ### `Compact()` — the only thing that gives the memory back
@@ -257,13 +276,20 @@ lifecycle: A slot outlives its vector — delete AND update {
     graph at once.
 
     Out comes exactly the graph you would have built if the dead
-    vectors had never existed — same seeded RNG, same order — so
-    it is testable by equality rather than by sampling recall.
+    vectors had never existed — fresh RNG from the same seed, live
+    vectors in slot order — so it is testable by equality rather
+    than by sampling recall.
 
-    Stop-the-world, and the pause tracks **survivors**: 2.6 s at
-    25% dead against 0.8 s at 75%, per 5k x 128. Compacting early
-    costs more and reclaims less, so the index never self-triggers
-    — callers poll `Stats().DeadRatio()` and pick the moment.
+    **Searches keep running; writers wait.** The replacement is
+    built under the *read* lock and swapped under the write lock.
+    If `writes` moved in between, it rebuilds under the write lock
+    instead (through the DB it never does — `DB.Compact` holds
+    the writers' lock).
+
+    The build tracks **survivors**: 2.61 s at 25% dead against
+    0.79 s at 75%, per 5k × 128. Compacting early costs more and
+    reclaims less, so the index never self-triggers — callers poll
+    `Stats().DeadRatio()`; ~0.5 is the threshold.
   |
 }
 
@@ -276,16 +302,18 @@ memory: Memory budget {
     ### Per node
 
     **vector** — `dim × 4 bytes`
-    **neighbors** — up to `2M` ints on L0 + `M` per upper layer
-    at M=16: ≈ 256 B on L0, plus slice headers
+    **neighbors** — up to `2M` 8-byte ints on L0 + `M` per upper
+    layer; at M=16: up to 256 B on L0, plus slice headers
+    (the codec writes them as `uint32`: 662 B/vector on disk
+    at 128 dims)
 
-    ### At the 4096-dim cap
+    ### At 768 dims
 
-    16 KiB/vector → **1M vectors ≈ 16 GiB**, graph overhead is noise
+    3 KiB/vector → **1M vectors ≈ 3 GiB**, graph overhead is minor
 
     ### At 128 dims
 
-    512 B/vector → the **neighbor lists cost more than the data**
+    512 B/vector → the **neighbor lists are the same order as the data**
 
     Know which regime you are in — it decides whether quantization
     or graph compaction is the optimization that matters.

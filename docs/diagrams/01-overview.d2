@@ -1,9 +1,14 @@
-# GoVecDB v1 — end-to-end architecture
+# GoVecDB — end-to-end architecture of one govecdb.DB
 #
 # The load-bearing distinction in this diagram is the RAM / disk boundary.
-# Vectors are RAM-resident because HNSW computes a distance at EVERY hop of
-# traversal; if `.vector` were a disk read, one search would become hundreds
-# of seeks. Disk carries durability (WAL + snapshot) and cold payload only.
+# Vectors, graph and metadata are all RAM-resident because HNSW computes a
+# distance at EVERY hop of traversal and the filter runs once per candidate;
+# a disk read at either would turn one search into hundreds of seeks. Search
+# does no disk I/O at all. Disk carries durability only: the log and the
+# snapshots it is truncated against.
+#
+# The second distinction is the locks. Readers never take writeMu, which is
+# held across the fsync, so a slow disk stalls writers and never searches.
 
 vars: {
   d2-config: {
@@ -41,6 +46,11 @@ classes: {
     style.stroke: "#FFB74D"
     style.stroke-width: 2
   }
+  critical: {
+    style.fill: "#3B1215"
+    style.stroke: "#FF6B6B"
+    style.stroke-width: 2
+  }
   disk: {
     shape: cylinder
     style.fill: "#0E2A16"
@@ -66,148 +76,195 @@ client: Caller supplies embeddings {
 
 embed_note: |md
   **Out of scope: GoVecDB never generates embeddings.**
-  Running a model in-process means ONNX → CGO → the end of
-  "pure Go, embeddable". Callers bring their own vectors.
+  Running a model in-process means CGO and a model
+  runtime — the end of "pure Go, zero dependencies,
+  embeddable". Callers bring their own vectors.
 | {
   class: note
 }
 
-api: Public API — db.go / vector.go / options.go {
-  class: api
+# Drawn faint and dashed because the DB does not know it exists: collections,
+# REST and the daemon import the root package, never the other way round.
+service: "service/ · httpapi/ · cmd/govecdbd — separate packages ABOVE the DB" {
+  class: group
+  style.stroke-dash: 4
+  style.opacity: 0.75
 
-  insert: "Insert(ns, id, vec, meta) — upsert"
-  search: Search(ns, query, k, ef)
-  del: Delete(ns, id)
+  explain: |md
+    `service.Manager`: one DB per collection directory.
+    REST over it, stdlib only. Optional; the root
+    package and `internal/` never import these.
+  |
 }
 
-validate: Validation gate {
+api: Public API — db.go / enumerate.go / options.go {
   class: api
-  style.fill: "#3B1215"
-  style.stroke: "#FF6B6B"
+
+  open: "Open(dir, opts...) — restore, then open the log"
+  add: "Add / AddBatch(Vector{ID, Values, Metadata}) — upsert"
+  del: Delete(id)
+  search: "Search(SearchRequest{Query, K, Ef, Filter})"
+  read: "Get / GetBatch / Scan / Range"
+  admin: "Snapshot / Compact / Sync / Stats / Close"
+}
+
+validate: validate.go — the security boundary {
+  class: critical
 
   checks: |md
-    - `len(vec) != 0` → ErrEmptyVector
-    - `len(vec) == cfg.Dimension` → ErrDimensionMismatch
-    - `cfg.Dimension <= 4096` (policy cap)
-    - reject NaN / ±Inf — one poisons every
-      distance comparison it touches
+    - `len(Values) == Dimension` (≤ 65,536) → ErrInvalidVector
+    - every value finite — one NaN compares false against
+      everything and poisons the ordering; float metadata too
+    - id non-empty UTF-8, ≤ 512 B; metadata a closed set of
+      string / bool / int64 / float64, ≤ 256 keys
+    - `K` ≤ 10,000; `Ef == 0` means "choose it"; Filter
+      validated once, never per node
   |
 }
 
-registry: Collection registry {
-  class: ram
-  explain: |md
-    `map[namespace]*Collection`
+db: govecdb.DB — one directory, in RAM {
+  class: group
 
-    Namespace, **not** user-id — the same
-    mechanism serves prod/staging and
-    docs/images. Load on demand, evict idle.
-  |
-}
+  locks: Three locks (db.go, above type DB) {
+    class: critical
 
-collection: Collection (one per namespace) {
-  class: ram
+    explain: |md
+      - **writeMu** — writers, across append *and* apply, so
+        apply order = log order. Snapshot, Compact, Sync,
+        Close take it. **No reader ever does.**
+      - **applyMu** — exclusive per apply only (batches in
+        groups of `applyGroup` = max(64, 4 × workers));
+        shared by readers so no one sees (v2, md1)
+      - **snapMu** — snapshot vs snapshot and Close
+    |
+  }
 
-  wal_engine: WAL engine {
+  wal_writer: "WAL writer — internal/wal" {
     class: wal
-    buf: Append buffer
-    sync: fsync policy — always / interval / never
-    buf -> sync
+
+    explain: |md
+      Sync policy zero value **SyncAlways** (fsync per append).
+      SyncInterval (50 ms) / SyncNever leave records in a
+      64 KiB user-space buffer. First failure is sticky →
+      DB is permanently `ErrReadOnly`; reads keep working.
+    |
   }
 
-  graph: HNSW graph — internal/hnsw {
+  graph: "HNSW index — internal/hnsw (own RWMutex)" {
     class: ram
-    nodes: "nodes []*node — id, vector, neighbors, deleted"
-    ids: "ids map[string]int — live ids only"
+
+    nodes: "nodes — vector, per-level neighbor slots, tombstone"
+    ids: "ids — id → slot, live only"
     entry: entry point + maxLevel
-    scratch: "pooled searchState — per traversal, 2 allocs/op"
+    scratch: "pooled searchState — 1 alloc/op, filtered too"
   }
 
-  meta: Metadata / payload index {
+  store: "Metadata — internal/store (store.Map)" {
     class: ram
-    explain: id → disk offset
+
+    explain: |md
+      id → metadata, keys and strings interned.
+      Filter evaluated **inside** the traversal,
+      0 allocs per candidate. Persisted only via
+      WAL records and the snapshot's 2nd section.
+    |
   }
 }
 
 # The container is a plain group: a hexagon container puts its own label
 # underneath its children. Only the leaf workers are hexagons.
-background: Background workers {
+background: Background goroutines {
   class: group
 
-  checkpointer: Checkpointer {
+  snapshotter: "snapshotLoop — WithSnapshotInterval\n(library default off; daemon 10m)" {
     class: bg
   }
-  truncator: WAL truncator {
+  truncator: "Prune (keep 2) + truncate the log" {
+    class: bg
+  }
+  calibrator: "calibrationLoop — when live count\ndoubles or halves (≥ 1,000)" {
     class: bg
   }
 }
 
-storage: Disk {
+storage: "Disk — dir is 0700, flock'd (internal/dirlock)" {
   class: group
-  direction: right
 
-  wal_files: WAL segments\nwal-000017.log {
+  wal_files: "wal/wal-000001.log …\n8 B header · 17 B record header\n64 MiB segments" {
     class: disk
     style.multiple: true
   }
-  snap: Snapshot\nsnap-000016.bin {
+  snap: "snapshots/snap-<20-digit seq>.snap\ngraph + metadata, crc32c trailer" {
     class: disk
-  }
-  payload: Payload store\n(text, metadata) {
-    class: disk
+    style.multiple: true
   }
 }
 
 ram_note: |md
-  ### Everything in this band is RAM
+  ### Everything in the DB box is RAM
 
-  At the 4096-dim cap: 4096 × 4B = **16 KiB per vector**,
-  so 1M vectors ≈ **16 GiB** before graph overhead.
-  At high dims vectors dominate; at 128 dims the
-  neighbor lists cost more than the data.
+  Vectors are `float32`: 512 dims × 4 B = **2 KiB per vector**,
+  so 1M vectors ≈ **2 GiB** before graph and metadata.
+  Nothing here is paged from disk; a snapshot is a
+  copy of it, never a cache it reads through.
 | {
   class: note
 }
 
-client -> api.insert: vec + metadata
+client -> api.add: vectors + metadata
 client -> api.search: query vector
-client -> api.del: id
+client -> service: "or over HTTP" {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+}
+service -> api: "uses the public API only" {
+  style.stroke-dash: 4
+  style.opacity: 0.7
+}
 
-api.insert -> validate
-api.search -> validate
+api.add -> validate
 api.del -> validate
-
-validate -> registry: resolve namespace
-registry -> collection
+api.search -> validate
 
 # --- the write ordering that makes durability work ---
-collection.wal_engine -> collection.graph: "2. then apply" {
+validate -> db.locks: "writes: take writeMu"
+db.locks -> db.wal_writer: "1. append"
+db.wal_writer -> storage.wal_files: "fsync per policy\n(SyncAlways: commit point)" {
+  style.stroke: "#FFB74D"
+  style.stroke-width: 3
+}
+db.wal_writer -> db.graph: "2. then apply under applyMu" {
   style.stroke: "#FF6B6B"
   style.stroke-width: 3
   style.bold: true
 }
+db.wal_writer -> db.store: "2. same hold"
 
-collection.wal_engine -> storage.wal_files: "1. append + fsync\n(commit point)" {
-  style.stroke: "#FFB74D"
-  style.stroke-width: 3
+# --- the read path never touches disk ---
+validate -> db.graph: "Search: applyMu shared,\nno disk I/O" {
+  style.stroke: "#4FC3F7"
+  style.stroke-width: 2
 }
-
-# --- read path never touches disk for vectors ---
-collection.graph -> collection.meta: top-k ids
-collection.meta -> storage.payload: "hydrate k payloads only\n(never during traversal)" {
-  style.stroke: "#66BB6A"
-  style.stroke-dash: 4
-}
+db.graph -> db.store: "admits(id) per candidate;\nmetadata for the top k"
 
 # --- background persistence ---
-collection.graph -> background.checkpointer: "snapshot FROM RAM\n(never re-reads the WAL)" {
+background.snapshotter -> db.graph: "serialize under writeMu —\nwriters wait, searches don't" {
   style.stroke: "#CE93D8"
   style.stroke-width: 2
 }
-background.checkpointer -> storage.snap: write + fsync + rename
-background.checkpointer -> background.truncator: snapshot durable at seq N
-background.truncator -> storage.wal_files: drop segments < N {
+background.snapshotter -> storage.snap: "temp → fsync → rename → fsync dir"
+background.snapshotter -> background.truncator: "snapshot durable"
+background.truncator -> storage.wal_files: "Verify OLDEST retained, then drop\nsegments wholly ≤ its seq" {
   style.stroke-dash: 3
+}
+background.calibrator -> db.graph: "efScale for Ef == 0\n(leave-one-out sample)" {
+  style.stroke-dash: 3
+}
+
+# --- recovery: the graph is derived state, the log is the truth ---
+storage.snap -> api.open: "Open: newest snapshot that verifies,\nthen replay the log past its seq;\nErrCorrupt if the log no longer reaches back" {
+  style.stroke: "#66BB6A"
+  style.stroke-dash: 4
 }
 
 # --- annotations, drawn faint so they never compete with the flow ---
@@ -216,7 +273,7 @@ client -> embed_note: {
   style.opacity: 0.7
   style.stroke: "#6E6E6E"
 }
-collection -> ram_note: {
+db -> ram_note: {
   style.stroke-dash: 4
   style.opacity: 0.7
   style.stroke: "#6E6E6E"

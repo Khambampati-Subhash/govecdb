@@ -328,9 +328,9 @@ it](#snapshots-are-what-bound-restart-time).
 
 ### `POST /v1/collections/{name}/compact`
 
-`200` with `{"reclaimed": 41}`. **Stops the world for that collection** — no
-search runs while it does. Poll `stats.dead_ratio` and call it when you can
-afford the pause; around 0.5 is where it pays, because the pause tracks survivors
+`200` with `{"reclaimed": 41}`. **Writes to that collection wait for the whole
+rebuild**; searches keep running (since v1.4.0). Poll `stats.dead_ratio` and
+call it when you can afford the write pause; around 0.5 is where it pays, because the pause tracks survivors
 rather than garbage.
 
 ### `GET /healthz`, `GET /readyz`, `GET /metrics`
@@ -583,7 +583,7 @@ meant.
 |---|---|
 | **Clustering and replication** | v2 item 8. The WAL is already an ordered, checksummed, sequence-numbered record of every state change — which is exactly what a follower needs — so replication should be built on `Replay` rather than beside it. Raft is not stdlib, so it is a separate module. |
 | **gRPC** | Same reason. See [the module decision](#the-module-decision). |
-| **Online compaction** | v2 item 2. `POST .../compact` stops the world, so you choose the moment. |
+| **Online compaction (writes)** | v2 item 2. Since v1.4.0 searches keep running during `POST .../compact`; writes to that collection still wait for the rebuild, so you choose the moment. |
 | **Per-user auth, rate limiting, audit** | A proxy in front does these properly, and this process would do them badly. |
 | **Changing a collection's dimension, metric or M** | Structural. Create a new collection and re-index. |
 | **Paging the collection list** | Collections are few, so the list is not paged. It is an object rather than a bare array so a cursor can be added without breaking clients. Vectors *are* paged — see `GET .../vectors`. |

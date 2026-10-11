@@ -334,9 +334,13 @@ bar as inserts.
 | 50% | 1.6× | 1.69 s | 50% of slots |
 | 75% | 2.5× | 0.79 s | 75% of slots |
 
+The search column is from the compaction run; the tombstone table above (1.7×,
+2.7×) is a separate `BenchmarkSearchTombstones` run. Read the gap as the spread
+between runs, not as a difference to explain.
+
 A compaction is a full index build over the **survivors**, so its pause tracks
 how many vectors live, not how many get reclaimed — which makes compacting early
-the worst of both: a longer stop-the-world pause, more often, handing back less
+the worst of both: a longer write pause, more often, handing back less
 memory.
 
 The search curve on its own argues for a 25% threshold. Both curves together

@@ -12,7 +12,7 @@ package hnsw
 //
 // The state is pooled rather than allocated per call because it is exactly the
 // thing the zero-allocation search path was built to avoid: a 40 KB visited
-// array plus three heaps would dwarf the 2 allocations a search costs today.
+// array plus three heaps would dwarf the 1 allocation a search costs today.
 type searchState struct {
 	visited  visitedList
 	cands    []candidate // min-heap: the frontier still worth expanding

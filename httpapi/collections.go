@@ -301,8 +301,8 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 
 // handleCompact rebuilds the index over its live vectors.
 //
-// It stops the world for that collection — no search runs while it does — which
-// is why it is an explicit call and never a background one. Stats.dead_ratio is
+// Writes to that collection wait for the whole rebuild (searches keep running),
+// which is why it is an explicit call and never a background one. Stats.dead_ratio is
 // the signal; around 0.5 is where compacting pays, because the pause tracks
 // survivors rather than garbage.
 func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
