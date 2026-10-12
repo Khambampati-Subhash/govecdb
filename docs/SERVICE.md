@@ -378,9 +378,10 @@ in a loop behave when the loop runs zero times.
 evaluated at every node a search visits, so its width multiplies the walk.
 
 Selectivity costs latency, not memory. Unfiltered to one-in-fifty is 85 µs → 965
-µs on the measured corpus, at the same 2 allocations per search. Past roughly one
-vector in a hundred, a scan over your own metadata is the better tool and this
-index is the wrong thing to ask.
+µs on the measured corpus, at the same 2 allocations per search. Below about
+48 × `ef` expected matches the database stops walking the graph and scans the
+collection exactly instead — at 100,000 vectors, one in a thousand went from
+25–34 ms to 1.5 ms. Nothing to configure; the filter is the same.
 
 ## Configuration
 

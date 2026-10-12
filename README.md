@@ -75,7 +75,7 @@ Worth knowing before you adopt it, rather than after:
 | **Writes commit in groups** | Reads scale across cores and never wait for a writer's fsync. Concurrent `Add`/`AddBatch` calls queued behind one in progress are written together — one log append, one fsync, linked on every core (`WithInsertWorkers`) — so concurrent writers share the cost instead of queueing for it. Within a group the graph still takes its write lock per chunk, which is what a search during ingest waits for. |
 | **SIMD on arm64 and amd64 only** | Distance kernels are NEON assembly on arm64 and AVX2+FMA on amd64 CPUs that have it (Haswell, 2013, and later; checked at startup). Other platforms, and older x86, run the portable Go kernels. |
 | **One database is one index** | Many indexes in one process means [running it as a service](docs/SERVICE.md); the library itself is still one directory, one index. |
-| **Selective filters approach a scan** | Past roughly one vector in a hundred, scanning the metadata is the better tool. |
+| **Selective filters are scanned** | Each filtered search estimates how much the filter matches, and below about 48 × ef expected matches it scans every vector exactly instead of walking the graph — 25–34 ms → 1.5 ms at one in a thousand of 100K. The scan is O(N): a cheap one, but it grows with the collection. |
 | **The service is a single process** | No clustering, no replication. [v2 item 8](docs/MIGRATION.md#v2-scope). |
 
 Still out of scope and planned for [v2](docs/MIGRATION.md#v2-scope): clustering,
@@ -681,9 +681,13 @@ makes the search explore wider until it has `k`.
 metadata lookup borrows the stored map rather than copying it, so the 1 alloc/op
 search baseline survives filtering intact.
 
-Past roughly one in a hundred the graph stops being the right tool: a scan over
-the metadata, distance-checking only what matches, beats a traversal that is
-visiting most of the graph anyway.
+Below a measured line the graph is not walked at all. A filtered search first
+asks the filter about a spread of stored vectors, and when it expects fewer
+than about 48 × `ef` matches it scans every vector instead — reading slots in
+order at ~15 ns each and computing distances only for matches, where the walk
+pays ~350 ns a visit. At 100,000 × 128, one in a thousand went from 25–34 ms to
+1.5 ms, and a scanned search is exact. See
+[DURABILITY.md §4](docs/DURABILITY.md#4-read-latency).
 
 ### Metric and data shape
 

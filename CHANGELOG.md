@@ -34,6 +34,14 @@ order.
 - The batch size below which the index links serially is 8, down from 32, so
   groups of a dozen or so writers get every core.
 
+- **Selective filters are scanned instead of walked** — v2 item 5. A filtered
+  search probes the filter on a spread of stored vectors and, when it expects
+  fewer than about 48 × ef matches, scans every vector exactly rather than
+  walking the graph. At 100,000 × 128, one in a thousand went from 25–34 ms to
+  1.5 ms and one in fifty from 2.9–8.4 ms to 1.6 ms, both with exact results;
+  ordinary filters pay ~3% for the probe. Still 1 allocation per search. A
+  `Filter`'s `Match` may now be called twice for one vector in one search.
+
 ### Added
 
 - `BenchmarkConcurrentAdds`, single `Add`s from 1 and 16 goroutines.

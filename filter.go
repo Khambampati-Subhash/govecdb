@@ -26,9 +26,11 @@ import "github.com/khambampati-subhash/govecdb/internal/filter"
 //
 // The cost is worth knowing. A filter that matches a small share of the corpus
 // makes the search explore further to find K of them, so latency rises as
-// selectivity falls. At the extreme — a filter matching a handful of vectors out
-// of millions — scanning is the better tool, and this index is the wrong one to
-// ask.
+// selectivity falls — until it is cheaper not to walk the graph at all. Each
+// filtered search asks the filter about a spread of stored vectors first, and
+// when it expects fewer matches than about 48 × ef it scans every vector
+// instead, exactly: at 100,000 × 128 a one-in-a-thousand filter went from
+// 25–34 ms to 1.5 ms, with every result the true nearest match.
 //
 // # Absent keys
 //
@@ -39,8 +41,9 @@ import "github.com/khambampati-subhash/govecdb/internal/filter"
 // # The interface is open
 //
 // Implementing Filter is supported — a predicate this package has no constructor
-// for is a legitimate thing to want. Match is called once per candidate node,
-// under the index's read lock, and is handed a map it must not retain or mutate;
+// for is a legitimate thing to want. Match is called at most twice per stored
+// vector per search — once while estimating how selective the filter is, once
+// while searching — under the index's read lock, and is handed a map it must not retain or mutate;
 // Validate is called once per search, before any of that, and should return nil
 // when there is nothing to report.
 type Filter interface {

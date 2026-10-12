@@ -1,9 +1,11 @@
 package govecdb
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math/rand"
+	"slices"
 	"testing"
 )
 
@@ -319,5 +321,52 @@ func TestCallerFilterValidationIsHonoured(t *testing.T) {
 	_, err := db.Search(SearchRequest{Query: vec(rng, testDim), K: 5, Filter: brokenFilter{}})
 	if !errors.Is(err, ErrInvalidFilter) {
 		t.Fatalf("error = %v, want ErrInvalidFilter", err)
+	}
+}
+
+// TestSelectiveFilterIsExact: through the public API, a filter matching a
+// handful of vectors gets the exact nearest matches — the database scans
+// rather than walks below a measured selectivity, and a scan misses nothing.
+func TestSelectiveFilterIsExact(t *testing.T) {
+	const dim, n = 16, 5000
+	db, _ := openDB(t, WithDimension(dim), WithMetric(Euclidean))
+	rng := rand.New(rand.NewSource(90))
+	vs := make([]Vector, n)
+	for i := range vs {
+		vs[i] = Vector{ID: fmt.Sprintf("v%d", i), Values: vec(rng, dim), Metadata: Metadata{"tenant": int64(i % 250)}}
+	}
+	if err := db.AddBatch(vs); err != nil {
+		t.Fatal(err)
+	}
+	q := vec(rng, dim)
+	got, err := db.Search(SearchRequest{Query: q, K: 5, Filter: Eq("tenant", 7)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Brute force over the 20 vectors tenant 7 holds.
+	type hit struct {
+		id string
+		d  float64
+	}
+	var all []hit
+	for _, v := range vs {
+		if v.Metadata["tenant"] == int64(7) {
+			var d float64
+			for j := range v.Values {
+				x := float64(v.Values[j] - q[j])
+				d += x * x
+			}
+			all = append(all, hit{v.ID, d})
+		}
+	}
+	slices.SortFunc(all, func(a, b hit) int { return cmp.Compare(a.d, b.d) })
+	if len(got) != 5 {
+		t.Fatalf("%d results, want 5", len(got))
+	}
+	for i := range got {
+		if got[i].ID != all[i].id {
+			t.Fatalf("result %d is %s, the exact answer is %s", i, got[i].ID, all[i].id)
+		}
 	}
 }
