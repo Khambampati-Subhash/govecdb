@@ -24,8 +24,19 @@ order.
 - `Close` waits for a compaction in flight through its own lock rather than the
   writers' lock, which the compaction no longer holds.
 
+- **Concurrent writes commit in groups** — the first slice of v2 item 3.
+  Writers queued behind one in progress are written together by whichever
+  takes the writers' lock next: one log append, one fsync under `SyncAlways`,
+  linked on every core. Sixteen goroutines of single `Add`s into 10,000 × 128
+  went from 183 to 1,377 vec/s under `SyncAlways` and from 2,190 to 9,604
+  under `SyncNever`; before, they ran no faster than one goroutine. What an
+  acknowledged write means is unchanged.
+- The batch size below which the index links serially is 8, down from 32, so
+  groups of a dozen or so writers get every core.
+
 ### Added
 
+- `BenchmarkConcurrentAdds`, single `Add`s from 1 and 16 goroutines.
 - `hnsw.(*Graph).CompactOnline(quiesce)` (internal): a compaction that calls
   back before its swap so a caller can hold its own writers off for just that
   step; the root package reaches it through an optional `indexOnlineCompactor`,

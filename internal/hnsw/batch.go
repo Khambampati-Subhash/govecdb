@@ -130,8 +130,13 @@ func (g *Graph) insertPreparedBatch(ids []string, prepared [][]float32, order []
 
 const (
 	// minParallelBatch is the batch below which spinning up workers costs more
-	// than it saves.
-	minParallelBatch = 32
+	// than it saves. It was 32, unmeasured, and that stopped mattering once the
+	// database started grouping concurrent writes: sixteen writers make groups
+	// of about sixteen, which 32 sent down the serial path. Measured at 10K ×
+	// 256, sixteen goroutines of single Adds: 1,731 vec/s at 32, 6,766 at 16,
+	// 7,175 at 8, 7,322 at 2 (SyncNever). Eight is the knee. A small graph is
+	// still linked serially — insertChunk scales workers with its size.
+	minParallelBatch = 8
 
 	// chunkPerWorker sizes a chunk: enough inserts per worker that one slow
 	// insert does not leave the rest idle at the chunk's end, few enough that

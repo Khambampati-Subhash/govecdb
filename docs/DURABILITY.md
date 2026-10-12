@@ -159,6 +159,32 @@ append benchmark alone suggests — because once the fsync is gone, building the
 graph is all that is left. Anyone tempted by `SyncNever` for write throughput
 should know they are trading all durability for less than an order of magnitude.
 
+### Concurrent writers share a commit
+
+The table above is one writer. Many writers used to be no better: `writeMu`
+holds a write across its append *and* its apply, so sixteen goroutines of single
+`Add`s queued for it one at a time — 183 vec/s against one goroutine's 188
+under `SyncAlways`, each paying its own fsync. Writes now commit in groups: a
+writer queues its request and takes `writeMu`, and whoever holds it writes the
+whole queue as one `AppendBatch` — one fsync — and links it on every core.
+
+`BenchmarkConcurrentAdds`, single `Add`s into 10,000 × 128:
+
+| Policy | 1 writer | 16 writers, before | 16 writers, now |
+|---|---|---|---|
+| `SyncAlways` | 179 vec/s | 183 vec/s | **1,377 vec/s** (7.5×) |
+| `SyncNever` | 2,234 vec/s | 2,190 vec/s | **9,604 vec/s** (4.4×) |
+
+**What "acknowledged" means does not change.** An `Add` returns once *its*
+record is in the log under the policy and applied to the index — a grouped
+write simply shares the fsync that made it durable. Log order is queue order,
+and the apply keeps the last write to an id, so a group replays to exactly the
+state it left. A lone writer takes the same path it always did.
+
+One `AddBatch` of the same vectors is still faster (~19,000 vec/s at 10K × 256):
+a group is only as large as the number of writers waiting, and a batch is as
+large as the caller makes it.
+
 That `309 ns` row matters more than it looks. Re-inserting an unchanged vector is
 the WAL-replay path, and it costs one comparison rather than one insert — which
 is what stops recovery across a snapshot boundary from paying full price for
@@ -457,6 +483,10 @@ go test ./internal/hnsw/ -run='^$' -bench='Insert|Upsert|Search|Compact' -benchm
 go test ./internal/wal/ ./internal/snapshot/ -run='^$' -bench=. -benchmem -timeout 20m
 ```
 
+```bash
+go test . -run='^$' -bench='WritePath|ConcurrentAdds' -benchtime=1600x -timeout 30m
+```
+
 The correctness claims are tests rather than prose — `go test ./... -race` runs
 them all. The ones that carry this document:
 
@@ -471,6 +501,8 @@ them all. The ones that carry this document:
 | `SyncAlways` is durable when `Append` returns | `TestSyncAlwaysIsDurableOnReturn` |
 | ...and every record of a batch when `AppendBatch` returns | `TestAppendBatchIsDurableOnReturn` |
 | A record refused mid-batch fails the writer | `TestAppendBatchOversizedFailsTheWriter` |
+| Concurrent writes are logged and applied as one group | `TestConcurrentAddsShareACommit` |
+| A grouped write replays to the state it left | `TestGroupCommitReplaysToTheSameState` |
 | A failed snapshot leaves nothing behind | `TestCreateIsAtomic` |
 | Corrupt snapshots never reach the caller | `TestLoadRejects` |
 | A corrupt snapshot falls back to an older one | `TestLoadFallsBackToAnOlderSnapshot` |

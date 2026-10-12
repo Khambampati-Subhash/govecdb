@@ -72,7 +72,7 @@ Worth knowing before you adopt it, rather than after:
 |---|---|
 | **Linux and macOS only** | The log and snapshot store fsync the containing *directory*, which is not portable to Windows. Untested there. |
 | **`Compact()` is a full rebuild** | Searches and writes keep running through it — writes wait only for a short catch-up at the swap — but it costs a full index build of CPU and holds a second graph in memory until it finishes. You choose the moment; the database never triggers it. |
-| **Writers serialize** | Reads scale across cores and never wait for a writer's fsync. Separate writes do not run in parallel; one `AddBatch` links its vectors on every core (`WithInsertWorkers`), and so does log replay. |
+| **Writes commit in groups** | Reads scale across cores and never wait for a writer's fsync. Concurrent `Add`/`AddBatch` calls queued behind one in progress are written together — one log append, one fsync, linked on every core (`WithInsertWorkers`) — so concurrent writers share the cost instead of queueing for it. Within a group the graph still takes its write lock per chunk, which is what a search during ingest waits for. |
 | **SIMD on arm64 and amd64 only** | Distance kernels are NEON assembly on arm64 and AVX2+FMA on amd64 CPUs that have it (Haswell, 2013, and later; checked at startup). Other platforms, and older x86, run the portable Go kernels. |
 | **One database is one index** | Many indexes in one process means [running it as a service](docs/SERVICE.md); the library itself is still one directory, one index. |
 | **Selective filters approach a scan** | Past roughly one vector in a hundred, scanning the metadata is the better tool. |
