@@ -10,6 +10,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned and in what
 order.
 
+## [1.4.2] - 2026-10-12
+
+amd64 gets SIMD distance kernels. No exported API or on-disk format changed.
+
 ### Fixed
 
 - **The architecture diagrams described a database that was never built.**
@@ -503,7 +507,8 @@ Stated here rather than discovered later:
 - **A highly selective filter approaches a full scan.** Past roughly one vector
   in a hundred, a scan over the metadata is the better tool.
 
-[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.4.2...HEAD
+[1.4.2]: https://github.com/khambampati-subhash/govecdb/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/khambampati-subhash/govecdb/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/khambampati-subhash/govecdb/compare/v1.3.0...v1.3.1
