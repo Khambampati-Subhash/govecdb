@@ -571,11 +571,13 @@ func TestSnapshotSkipsWhenNothingChanged(t *testing.T) {
 	}
 }
 
-// TestCompactKeepsSearchesRunningWhileWritersWait: DB.Compact holds writeMu,
-// so no write reaches the graph during the rebuild — the index's fast path,
-// building under its read lock, always holds, and searches run throughout.
-// Writers wait for it instead.
-func TestCompactKeepsSearchesRunningWhileWritersWait(t *testing.T) {
+// TestCompactKeepsSearchesAndWritesRunning: the rebuild runs beside the live
+// graph and DB.Compact takes writeMu only for the last catch-up and the swap,
+// so a writer keeps adding through a compaction — and every vector it added
+// is in the compacted index. Until v1.4.2 Compact held writeMu for the whole
+// rebuild, and the writer's longest wait was the rebuild itself; that is the
+// comparison below, so reverting the change fails it.
+func TestCompactKeepsSearchesAndWritesRunning(t *testing.T) {
 	const dim = 32
 	db, _ := openConcurrent(t, dim)
 	loadRandom(t, db, 6000, dim, 14)
@@ -640,8 +642,8 @@ func TestCompactKeepsSearchesRunningWhileWritersWait(t *testing.T) {
 	for i := 1; i < len(finished); i++ {
 		gap = max(gap, finished[i].Sub(finished[i-1]))
 	}
-	t.Logf("Compact reclaimed %d in %v; %d searches completed during it; longest writer wait %v",
-		r.n, r.took, during, gap)
+	t.Logf("Compact reclaimed %d in %v; %d searches completed during it; %d adds in all; longest writer wait %v",
+		r.n, r.took, during, len(finished), gap)
 	if r.err != nil {
 		t.Fatal(r.err)
 	}
@@ -651,10 +653,19 @@ func TestCompactKeepsSearchesRunningWhileWritersWait(t *testing.T) {
 	if during < 3 {
 		t.Fatalf("only %d searches completed during Compact: it is excluding readers", during)
 	}
-	// Writers are excluded for the rebuild, so the writer has one wait about
-	// as long as the rebuild itself. Half allows for the time Compact spent
-	// queued for writeMu before it got it.
-	if gap < r.took/2 {
-		t.Fatalf("longest writer wait %v during a %v Compact: writers are not excluded", gap, r.took)
+	// Held off for the rebuild, the writer's longest wait was about as long as
+	// the rebuild itself. Now it is one catch-up of at most a few hundred
+	// inserts, against a rebuild of 3,000 — under -race as well, since the
+	// detector slows both alike.
+	if gap >= r.took/2 {
+		t.Fatalf("longest writer wait %v during a %v Compact: writers waited for the rebuild", gap, r.took)
+	}
+	if want := 3000 + len(finished); db.Len() != want {
+		t.Fatalf("Len = %d after Compact, want %d: writes made during it were lost", db.Len(), want)
+	}
+	for i := range finished {
+		if _, err := db.Get(fmt.Sprintf("n%d", i)); err != nil {
+			t.Fatalf("n%d was added during Compact: %v", i, err)
+		}
 	}
 }

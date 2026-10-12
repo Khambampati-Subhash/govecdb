@@ -10,6 +10,27 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned and in what
 order.
 
+### Changed
+
+- **`Compact` no longer holds writes for the rebuild** — v2 item 2 is done.
+  The replacement graph is built with no lock on the live one, writes keep
+  landing, and each id they touch is caught up into the replacement before the
+  swap — as its *current* state, so order does not matter and nothing is
+  copied. `DB.Compact` holds the writers' lock only for the last catch-up and
+  the swap. Measured under the race detector, 6,000 × 32 half dead: the longest
+  `Add` wait during a 5 s compaction fell from the whole 5 s to ~50 ms, with
+  ~1,700 adds landing meanwhile and none lost. A compaction with no concurrent
+  writes still produces exactly the graph a fresh build would.
+- `Close` waits for a compaction in flight through its own lock rather than the
+  writers' lock, which the compaction no longer holds.
+
+### Added
+
+- `hnsw.(*Graph).CompactOnline(quiesce)` (internal): a compaction that calls
+  back before its swap so a caller can hold its own writers off for just that
+  step; the root package reaches it through an optional `indexOnlineCompactor`,
+  so an `Index` without it is still compacted the old way.
+
 ## [1.4.2] - 2026-10-12
 
 amd64 gets SIMD distance kernels. No exported API or on-disk format changed.

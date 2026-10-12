@@ -36,8 +36,9 @@ import (
 //
 // writeMu is the writers' lock. It is held across a write's log append *and*
 // its apply, which keeps apply order equal to log order — all the ordering
-// rule needs, and a rule between writers. Snapshot, Compact, Sync and Close
-// take it too, so none of them ever runs beside a half-finished write. No
+// rule needs, and a rule between writers. Snapshot, Sync and Close take it
+// too, and Compact for its swap, so none of them ever runs beside a
+// half-finished write. No
 // reader ever takes it, because it is held across an fsync: one SyncAlways
 // writer used to hold searches off for its whole fsync, taking search p50 from
 // 40 µs to 4.9 ms.
@@ -58,8 +59,10 @@ import (
 // 10,000-vector AddBatch used to wait for all of it, 545 ms.
 //
 // A third, snapMu, only serializes snapshots against each other and against
-// Close; it is taken before writeMu and no reader touches it. closed and
-// snapSeq are atomics, so reading them takes no lock at all.
+// Close; it is taken before writeMu and no reader touches it. compactMu does
+// the same for Compact, which holds writeMu only for its swap and is taken
+// before either. closed and snapSeq are atomics, so reading them takes no lock
+// at all.
 //
 // # No context parameter
 //
@@ -82,6 +85,11 @@ type DB struct {
 	// and is how Close waits for one in flight. Taken before writeMu, never
 	// after it.
 	snapMu sync.Mutex
+
+	// compactMu serializes compactions and is how Close waits for one in
+	// flight. A compaction takes writeMu only for its swap, so writeMu alone
+	// no longer covers it. Taken before snapMu and writeMu, never after.
+	compactMu sync.Mutex
 
 	// dirty records a change to the index that no log record stands for — a
 	// compaction — so the next snapshot is not skipped as unchanged. Guarded
@@ -706,28 +714,46 @@ func (db *DB) truncateLog(snapDir string) (int, error) {
 }
 
 // Compact rebuilds the index over its live vectors and reports how many slots
-// were reclaimed. Writers wait for it; searches do not. It holds writeMu for
-// the rebuild, so nothing changes the graph while the index builds the
-// replacement under its read lock, and the index's write lock is held only for
-// the swap. It used to stop the world: no search ran for the whole rebuild.
+// were reclaimed. Neither searches nor writes wait for the rebuild. The index
+// builds the replacement beside the live graph, catches it up with the writes
+// that landed meanwhile, and only for the last of those and the swap does
+// Compact take writeMu — so a writer waits for one short catch-up, and since
+// writeMu is a lock no reader takes, searches do not queue behind that writer.
+// It used to stop the world, and then, from v1.4.0, to hold writes for the
+// whole rebuild.
 //
-// The database does not schedule this. Stats().DeadRatio() is the signal, and
-// only the caller knows which moment can afford to hold writes — around 0.5 is
-// where it pays, because the rebuild tracks survivors rather than garbage.
+// The database does not schedule this. Stats().DeadRatio() is the signal —
+// around 0.5 is where it pays, because the rebuild tracks survivors rather
+// than garbage. Memory is what it costs while it runs: the replacement graph
+// exists beside the old one until the swap.
 func (db *DB) Compact() (int, error) {
-	db.writeMu.Lock()
-	defer db.writeMu.Unlock()
+	db.compactMu.Lock()
+	defer db.compactMu.Unlock()
 
 	if db.closed.Load() {
 		return 0, ErrClosed
 	}
-	n := db.index.Compact()
-	if n > 0 {
-		// The graph changed shape with no record in the log, so the snapshot
-		// on disk no longer describes it — the next one must not be skipped.
-		db.dirty = true
+	oc, ok := db.index.(indexOnlineCompactor)
+	if !ok {
+		db.writeMu.Lock()
+		defer db.writeMu.Unlock()
+		n := db.index.Compact()
+		if n > 0 {
+			db.dirty = true
+		}
+		return n, nil
 	}
-	return n, nil
+	return oc.CompactOnline(func() func() {
+		db.writeMu.Lock()
+		return func() {
+			// The graph changed shape with no record in the log, so the
+			// snapshot on disk no longer describes it — the next one must not
+			// be skipped. Only a compaction with something to reclaim gets
+			// this far.
+			db.dirty = true
+			db.writeMu.Unlock()
+		}
+	}), nil
 }
 
 // Len is how many vectors a search can return.
@@ -809,11 +835,13 @@ func (db *DB) Close() error {
 		<-db.doneCal
 	}
 
-	// Waits out a Snapshot a caller started — including its prune and log
-	// truncation — and any write or Compact that passed its closed check before
+	// Waits out a Compact, a Snapshot a caller started — including its prune
+	// and log truncation — and any write that passed its closed check before
 	// we set it, so the directory is released with nothing still writing into
 	// it. Close used to wait only for the interval snapshotter, and a caller's
 	// Snapshot went on deleting files in a directory the next Open now owned.
+	db.compactMu.Lock()
+	defer db.compactMu.Unlock()
 	db.snapMu.Lock()
 	defer db.snapMu.Unlock()
 	db.writeMu.Lock()

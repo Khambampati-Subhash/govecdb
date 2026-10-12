@@ -342,10 +342,14 @@ copying bytes. It is still ~2,000× faster than rebuilding the index from the
 same vectors.
 
 For reference, `Compact()` is the same rebuild operation and confirms the shape —
-its cost tracks *survivors*, not garbage. Writers wait for it; searches do not:
-the replacement is built under the graph's read lock and only swapped in under
-the write lock (6,000 vectors, half dead: ~7,300 searches complete during a
-470 ms `DB.Compact`, where none did before):
+its cost tracks *survivors*, not garbage. Neither searches nor writes wait for
+it: the replacement is built beside the live graph, caught up with the writes
+that landed meanwhile, and swapped in under the write lock; the database holds
+its writers off only for the last catch-up and the swap. Measured at 6,000 ×
+32 with half dead, under the race detector: ~1,700 `Add`s land during a 5 s
+`DB.Compact` and the longest any of them waits is ~50 ms, where through
+v1.4.2 one waited for the whole rebuild (and before v1.4.0 searches did too).
+The table is the build itself:
 
 | Dead ratio | 25% | 50% | 75% |
 |---|---|---|---|

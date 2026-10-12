@@ -135,7 +135,8 @@ func ExampleDB_Snapshot() {
 
 // Tombstones are the price of deletes and replacements alike, and compaction is
 // the only thing that pays it back. The database exposes the signal and leaves
-// the timing to you, because writes wait for the whole rebuild.
+// the timing to you, because the rebuild is a full index build: CPU for its
+// length, and a second graph in memory until the swap.
 func ExampleDB_Compact() {
 	dir, err := os.MkdirTemp("", "govecdb-example")
 	if err != nil {

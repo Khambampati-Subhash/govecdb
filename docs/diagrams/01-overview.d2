@@ -125,17 +125,18 @@ validate: validate.go — the security boundary {
 db: govecdb.DB — one directory, in RAM {
   class: group
 
-  locks: Three locks (db.go, above type DB) {
+  locks: The DB's locks (db.go, above type DB) {
     class: critical
 
     explain: |md
       - **writeMu** — writers, across append *and* apply, so
-        apply order = log order. Snapshot, Compact, Sync,
-        Close take it. **No reader ever does.**
+        apply order = log order. Snapshot, Sync, Close take
+        it; Compact only for its swap. **No reader ever does.**
       - **applyMu** — exclusive per apply only (batches in
         groups of `applyGroup` = max(64, 4 × workers));
         shared by readers so no one sees (v2, md1)
-      - **snapMu** — snapshot vs snapshot and Close
+      - **snapMu** — snapshot vs snapshot and Close;
+        **compactMu** the same for Compact
     |
   }
 

@@ -113,8 +113,10 @@ type Stats struct {
 // DeadRatio is the fraction of slots that are tombstones, in [0,1].
 //
 // It is the signal for when to Compact, and it is exposed rather than acted on
-// because writes wait for the whole rebuild (searches do not): only the caller
-// knows which moment can afford the pause. Around 0.5 is the point where compacting pays — the pause
+// because a compaction is a full index build — a core's worth of CPU for its
+// length, and a second graph in memory until the swap — though neither
+// searches nor writes wait for it: only the caller knows which moment can
+// afford that. Around 0.5 is the point where compacting pays — the build
 // tracks survivors rather than garbage, so compacting early costs more and
 // reclaims less.
 func (s Stats) DeadRatio() float64 {

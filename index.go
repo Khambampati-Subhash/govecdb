@@ -60,7 +60,8 @@ type Index interface {
 	// Compact reclaims tombstoned slots and reports how many were freed. The DB
 	// calls it holding the writers' lock, so it may block writes; it should not
 	// block searches for its whole length, since a compaction runs for seconds
-	// on a large index. The HNSW graph builds under its read lock and swaps.
+	// on a large index. An index that can also let writes land implements
+	// indexOnlineCompactor, and the DB calls that instead.
 	Compact() int
 }
 
@@ -132,6 +133,21 @@ type indexBatcher interface {
 
 func (h *hnswIndex) InsertBatch(ids []string, values [][]float32, workers int) error {
 	return h.g.InsertBatch(ids, values, workers)
+}
+
+// indexOnlineCompactor is an index that can compact while writes land on it.
+// Optional: an index without it is compacted with the writers held off for the
+// whole rebuild, which is correct and merely blocks writes for longer.
+type indexOnlineCompactor interface {
+	// CompactOnline reclaims what Compact does. Just before its swap it calls
+	// quiesce, which returns once the DB's writers are held off, and calls
+	// what quiesce returned once the swap is done. quiesce is not called when
+	// there is nothing to reclaim.
+	CompactOnline(quiesce func() (resume func())) int
+}
+
+func (h *hnswIndex) CompactOnline(quiesce func() (resume func())) int {
+	return h.g.CompactOnline(quiesce)
 }
 
 // indexCalibrator is an index that can measure how wide it needs to search and
