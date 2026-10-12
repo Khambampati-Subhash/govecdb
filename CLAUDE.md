@@ -28,7 +28,7 @@ from the ones ahead of it.
 | 3a Parallel batch build | **done** (v1.3.0) | `internal/hnsw/batch.go` |
 | 3 Fine-grained write locking | **group commit done** — concurrent writers share a commit; lock-free graph writes open | `db.go` (`put`) |
 | 4 Collections | **done** (v1.1.0) | `service/` |
-| 5 Filter selectivity estimation | open | — |
+| 5 Filter selectivity estimation | **done** — sampled, not statistics: selective filters are scanned exactly | `internal/hnsw/filterscan.go` |
 | 6 Quantized index | open — the `Index` interface was built for it | — |
 | 7 REST / 7b gRPC | REST **done** (v1.1.0); gRPC open, separate module | `httpapi/`, `cmd/govecdbd/` |
 | 8 Clustering / replication | **designed**, not built — separate module | `docs/CLUSTER.md` |
@@ -519,6 +519,17 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   into filtering the output slice — it is the same mistake as filtering
   tombstones at the end, and `admits()` deliberately holds both checks so an edit
   cannot fix one and forget the other.
+- **A selective filter is scanned, not walked** (`filterscan.go`). The walk
+  visits ≈ min(N, 3·ef/p) nodes at ~350 ns; a scan reads N at ~15 ns. So
+  `shouldScan` probes `allow` on live slots in a **golden-ratio** spread (a
+  stride from zero misses a contiguous tenant block — `TestProbeSeesAContiguousRun`)
+  and scans when expected matches < `scanPerEf` (48) × ef; it stops early at
+  2 × `sampleMatches`, so an ordinary filter pays ~64 probes (~3%). Fitted
+  constants were 41/60/75 at dim 32/128/512 — 48 errs toward the walk, keep it
+  below them. The scan is exact and reuses `st.results`, so **1 alloc/op**
+  holds. No store statistics: the predicate is opaque, and asking it is the
+  only estimate that works for any `Filter`. `allow` may now run **twice** per
+  node per search (probe + walk). 100K × 128, one in 1,000: 25–34 ms → 1.5 ms.
 - **The predicate is over ids, not metadata.** `internal/hnsw` must stay ignorant
   of metadata: giving it a second data model would make every future `Index`
   implementation responsible for one. The root package closes over the store.

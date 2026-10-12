@@ -134,7 +134,7 @@ it, because several of these look independent and are not.
 | 3a | Parallel batch build | nothing — one batch, one lock | **done in v1.3.0** |
 | 3 | Fine-grained write locking | 2 | **group commit done** — lock-free graph writes open |
 | 4 | Collections / namespaces | nothing, but wants 1 | **done in v1.1.0** |
-| 5 | Filter selectivity estimation | 4 is unrelated; needs store statistics | |
+| 5 | Filter selectivity estimation | 4 is unrelated; needs store statistics | **done** — by sampling, not statistics |
 | 6 | Quantized index | nothing — the `Index` interface was built for it | |
 | 7 | REST server | 4 | **done in v1.1.0** |
 | 7b | gRPC server | 7, and a second module | |
@@ -417,6 +417,44 @@ and `DB` was not touched. Three things the sketch above did not anticipate:
   alphanumerics, `-` and `_` — no dot at all, so `..` is refused by construction.
 
 ### 5. Filter selectivity estimation
+
+**Done, and the sketch below was wrong twice.**
+
+*The line was not one in a hundred.* Measured at 100K × 128, the walk visits
+roughly min(N, 3·ef/p) nodes — it must admit about ef matches and meets them at
+rate p — at ~350 ns a visit, while a scan reads every slot in order at ~15 ns
+and computes a distance only for matches. One in ten at ef=256 was already
+cheaper scanned (1.85 ms against 2.44 ms, and exact against recall 0.95); one
+in a thousand walked the *entire* graph, 25–34 ms, against a 1.8 ms scan. The
+crossover is expected matches ≈ 3·ef·(visit/scan cost): fitted 41·ef at dim 32,
+60·ef at 128, 75·ef at 512. The code uses 48·ef, erring toward the walk.
+
+*It did not need statistics.* The predicate is an opaque closure — possibly a
+caller's own `Filter` — so per-key cardinalities would have needed the store to
+maintain distributions on every write and a planner to push them through
+And/Or/Not. Asking the predicate itself answers the only question that matters
+for any predicate: `shouldScan` probes live slots in a golden-ratio spread
+(deterministic, and proportional for a filter matching one contiguous import,
+which a stride from zero misses) and stops at twice the threshold's expected
+matches — a few dozen calls for an ordinary filter, ~3% of its search. Only a
+filter near or under the line is probed to the full count, where the walk it
+replaces costs milliseconds. It all sits inside `internal/hnsw`
+(`filterscan.go`): the cost model is the graph's own, and neither `Index` nor
+the root package changed. One contract moved: the predicate may now be called
+twice for a node in one search, once by the probe and once by the walk.
+
+Results at 100K × 128: one in fifty 2.9–8.4 ms → 1.6 ms, one in a thousand
+25–34 ms → 1.5 ms, both exact; one in two unchanged within the probe's ~3%.
+`BenchmarkSearchFilter` stays at 1 alloc/op on every row — the scan's bounded
+heap is the search state's own results buffer.
+
+What it does not do: the scan is O(N), cheap per node but not sublinear. At
+millions of vectors a very selective filter wants an index on the metadata
+itself — posting lists from value to ids — so the scan reads only candidates.
+That is the query planner the sketch below anticipated, and it is only worth
+building once a corpus makes the scan the slow part.
+
+*The original sketch:*
 
 Measured, a filter admitting fewer than about one vector in a hundred makes the
 graph the wrong tool — a scan over the metadata, distance-checking only what
