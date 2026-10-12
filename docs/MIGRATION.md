@@ -130,7 +130,7 @@ it, because several of these look independent and are not.
 | | Item | Blocked on | |
 |---|---|---|---|
 | 1 | Observability seam | nothing | **done in v1.3.0** |
-| 2 | Online (non-blocking) compaction | 1, for the same reason everything wants 1 | **done** — reads in v1.4.0, writes after v1.4.2 |
+| 2 | Online (non-blocking) compaction | 1, for the same reason everything wants 1 | **done** — reads in v1.4.0, writes in v1.5.0 |
 | 3a | Parallel batch build | nothing — one batch, one lock | **done in v1.3.0** |
 | 3 | Fine-grained write locking | 2 | **group commit done** — lock-free graph writes open |
 | 4 | Collections / namespaces | nothing, but wants 1 | **done in v1.1.0** |
@@ -233,7 +233,7 @@ report what they do — and are now unblocked.
 
 **Done, in two halves, neither by the route sketched below.**
 
-*Writes* — after v1.4.2. The build no longer holds any lock on the live graph:
+*Writes* — v1.5.0. The build no longer holds any lock on the live graph:
 a node's id and stored vector are written once and never edited (an update
 builds a new slot), so the build reads them freely from a list captured under a
 short read lock. Writes land on the old graph meanwhile, and `place` and
@@ -901,7 +901,7 @@ original sketch, and the narrowing is the interesting part.
   fail. It swaps a live graph while writes are landing; everything else on the v2
   list is additive.
 
-  *Landed after v1.4.2, guarded by a deterministic test that holds the build
+  *Landed in v1.5.0, guarded by a deterministic test that holds the build
   open and issues every kind of write under it (`TestCompactLetsWritesLand`),
   a concurrent hammer (`TestCompactUnderConcurrentWritesLosesNothing`), and a
   DB-level check that every `Add` made during a compaction survives it. Each

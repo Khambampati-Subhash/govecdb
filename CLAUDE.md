@@ -16,7 +16,7 @@ Module path: `github.com/khambampati-subhash/govecdb` · Go 1.24+ (built with 1.
 
 ## Where the project is
 
-**v1.4.2 on `main`.** v1 — a from-scratch rebuild, one subsystem at a time — is
+**v1.5.0 on `main`.** v1 — a from-scratch rebuild, one subsystem at a time — is
 complete: an embeddable library with durability, recovery and filtering. v2 is
 under way, taken partly out of dependency order where an item needed nothing
 from the ones ahead of it.
@@ -24,7 +24,7 @@ from the ones ahead of it.
 | v2 item | State | Where |
 |---|---|---|
 | 1 Observability seam | **done** (v1.3.0) | `events.go`, `httpapi/events.go` |
-| 2 Online compaction | **done** — reads (v1.4.0), writes (Unreleased): neither waits for the rebuild | `internal/hnsw/compact.go` |
+| 2 Online compaction | **done** — reads (v1.4.0), writes (v1.5.0): neither waits for the rebuild | `internal/hnsw/compact.go` |
 | 3a Parallel batch build | **done** (v1.3.0) | `internal/hnsw/batch.go` |
 | 3 Fine-grained write locking | **group commit done** — concurrent writers share a commit; lock-free graph writes open | `db.go` (`put`) |
 | 4 Collections | **done** (v1.1.0) | `service/` |

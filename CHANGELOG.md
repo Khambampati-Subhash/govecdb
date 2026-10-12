@@ -10,6 +10,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned and in what
 order.
 
+## [1.5.0] - 2026-10-13
+
+Three v2 items, all on one node: writes no longer wait for a compaction,
+concurrent writers share a commit, and selective filters are answered by an
+exact scan. No exported API was removed and the on-disk format is unchanged.
+
 ### Changed
 
 - **`Compact` no longer holds writes for the rebuild** — v2 item 2 is done.
@@ -553,7 +559,8 @@ Stated here rather than discovered later:
 - **A highly selective filter approaches a full scan.** Past roughly one vector
   in a hundred, a scan over the metadata is the better tool.
 
-[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.4.2...HEAD
+[Unreleased]: https://github.com/khambampati-subhash/govecdb/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.4.2...v1.5.0
 [1.4.2]: https://github.com/khambampati-subhash/govecdb/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/khambampati-subhash/govecdb/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/khambampati-subhash/govecdb/compare/v1.3.1...v1.4.0

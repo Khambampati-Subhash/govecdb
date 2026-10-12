@@ -1196,6 +1196,6 @@ remaining work is not feature work:
 This log is frozen at v1; v2 is tracked in [`MIGRATION.md`](MIGRATION.md#v2-scope),
 which records each item's outcome and what its sketch got wrong. Of the three
 follow-ups above, the observability seam shipped in v1.3.0 and online
-compaction in two halves — searches in v1.4.0, writes after v1.4.2, by catching
+compaction in two halves — searches in v1.4.0, writes in v1.5.0, by catching
 the replacement up with each touched id's current state rather than the change
 log and double-buffered swap sketched here. Fine-grained write locking is next.

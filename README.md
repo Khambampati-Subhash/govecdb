@@ -32,12 +32,20 @@ matches, _ := db.Search(govecdb.SearchRequest{Query: query, K: 10})
 
 ## Status
 
-**v1.4.2 — released and usable, as a library or as a server.** `govecdb.Open`
+**v1.5.0 — released and usable, as a library or as a server.** `govecdb.Open`
 gives you add, get, delete, search, filter, enumerate, snapshot and compact over
 one directory, durable through a write-ahead log and recoverable from snapshots.
 Batch writes and recovery build the index on every core, and everything the
 database does on its own is reported through one observer. `cmd/govecdbd` serves
 a directory of collections over HTTP, and adds no dependencies doing it.
+
+v1.5 takes three items off the v2 list without leaving one node: **writes no
+longer wait for `Compact`** (the longest writer wait during a 5 s compaction
+went from 5 s to ~50 ms), **concurrent writers share a commit** (sixteen
+goroutines of single `Add`s, 183 → 1,377 vec/s under `SyncAlways`), and
+**selective filters are scanned exactly** instead of walking the whole graph
+(one in a thousand of 100K, 25–34 ms → 1.5 ms). No exported API was removed and
+the on-disk format is unchanged.
 
 v1.4 is a production-hardening release, from a review of every layer against
 a millions-of-vectors, continuous-ingest workload: **reads no longer wait for
