@@ -26,7 +26,7 @@ from the ones ahead of it.
 | 1 Observability seam | **done** (v1.3.0) | `events.go`, `httpapi/events.go` |
 | 2 Online compaction | **done** — reads (v1.4.0), writes (Unreleased): neither waits for the rebuild | `internal/hnsw/compact.go` |
 | 3a Parallel batch build | **done** (v1.3.0) | `internal/hnsw/batch.go` |
-| 3 Fine-grained write locking | **next** — 2 is done | — |
+| 3 Fine-grained write locking | **group commit done** — concurrent writers share a commit; lock-free graph writes open | `db.go` (`put`) |
 | 4 Collections | **done** (v1.1.0) | `service/` |
 | 5 Filter selectivity estimation | open | — |
 | 6 Quantized index | open — the `Index` interface was built for it | — |
@@ -329,6 +329,10 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   loses to Go asm at every dimension (45.9 vs 25.9 ns at 512), C and Rust ran
   identically, and moving the whole search loop native buys ≤14% for losing
   CGO-free builds. The harness is on local branch `exp/native-core`.
+- `minParallelBatch` is **8**, not 32: group commit makes groups of about the
+  writer count, and 32 sent sixteen writers' groups down the serial path
+  (1,731 → 7,175 vec/s at 8, 10K × 256). A small graph stays serial anyway —
+  `insertChunk` caps workers at live/`nodesPerWorker`.
 - `chunkPerWorker` is **4**: a chunk holds the graph's write lock, and readers
   queue behind it (search p50 under ingest 15.5 → 8.3 ms vs 8). The root's
   `applyGroup` is `4 × workers` to match — keep the two equal.
@@ -591,6 +595,17 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   newest usable snapshot** — every snapshot rejected and the log truncated
   behind them. It used to open with most of the data gone and the next snapshot
   made that permanent.
+- **Concurrent puts share a commit** (`put`/`writeGroup` in `db.go`). `Add`
+  and `AddBatch` queue a `putRequest` and take `writeMu`; whoever holds it
+  writes the whole queue (FIFO, ≤ `maxBatch` vectors, never splitting a
+  request) as one `AppendBatch` + `applyPuts`, and a caller whose request was
+  written by someone else returns its result. No leader goroutine, no
+  channels: the wait is bounded by one group. Log order is queue order and
+  `applyPuts` keeps the last write per id, so a group replays to the state it
+  left (`TestGroupCommitReplaysToTheSameState`, which fails if apply order
+  diverges from log order). Measured before it: 16 concurrent `Add`s ran no
+  faster than one. A lone `Add` keeps the 0-alloc `Append` path. Deletes are
+  not grouped yet.
 - **Fail closed** — a WAL failure makes the DB permanently `ErrReadOnly`; reads
   keep working. This is the policy `internal/wal` explicitly deferred upward.
 - **No `context.Context`**, on purpose. Everything is local and bounded, and

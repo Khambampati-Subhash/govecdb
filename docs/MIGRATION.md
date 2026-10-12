@@ -132,7 +132,7 @@ it, because several of these look independent and are not.
 | 1 | Observability seam | nothing | **done in v1.3.0** |
 | 2 | Online (non-blocking) compaction | 1, for the same reason everything wants 1 | **done** — reads in v1.4.0, writes after v1.4.2 |
 | 3a | Parallel batch build | nothing — one batch, one lock | **done in v1.3.0** |
-| 3 | Fine-grained write locking | 2 | **next** |
+| 3 | Fine-grained write locking | 2 | **group commit done** — lock-free graph writes open |
 | 4 | Collections / namespaces | nothing, but wants 1 | **done in v1.1.0** |
 | 5 | Filter selectivity estimation | 4 is unrelated; needs store statistics | |
 | 6 | Quantized index | nothing — the `Index` interface was built for it | |
@@ -330,6 +330,40 @@ obvious small region to lock instead.
 It follows online compaction rather than leading it, because the WAL's ordering
 constraint — write to the log, then apply — decides what a finer lock is allowed
 to do, and the double-buffered swap decides what it must not break.
+
+**The first slice was not a lock at all — it was group commit.** Measured
+before touching anything, at 10K × 256: sixteen goroutines of single `Add`s ran
+at 1,704 vec/s against one goroutine's 1,730, and 177 against 168 under
+`SyncAlways` — while one `AddBatch` of the same vectors ran at 18,961 and
+17,807. The ceiling was not the graph's lock; it was the database's `writeMu`
+holding each write across its own append and apply, so concurrent writers never
+reached the parallel batch path or shared an fsync. So writers now queue a
+request and take `writeMu`, and whoever holds it writes the whole queue as one
+`AppendBatch` and one `applyPuts` (`put` / `writeGroup` in `db.go`). No leader
+goroutine and no channels: a caller whose request someone else wrote finds it
+done. At 10K × 128 (`BenchmarkConcurrentAdds`), sixteen writers went from 183 to
+1,377 vec/s under `SyncAlways` and 2,190 to 9,604 under `SyncNever`; one
+writer is unchanged.
+
+It needed one index change: `minParallelBatch` was 32, unmeasured, and groups
+of about sixteen fell under it and linked serially — `SyncNever` did not move
+at all until it came down. At 8: 1,731 → 7,175 vec/s (10K × 256).
+
+**What is left of item 3** is what group commit cannot reach:
+
+- *Searches still wait for ingest.* A group links under the graph's write lock
+  a chunk at a time, and a search queues behind each chunk (p50 8.3 ms at 100K
+  × 512 under ingest, against 0.63 ms alone). Removing that needs searches that
+  read neighbor lists without the graph lock — copy-on-write lists behind
+  atomic pointers, chunked node storage so `nodes` never moves under a reader,
+  a sharded id map — which is a change to the search hot path, the 1 alloc/op
+  baseline and the codec's view of a node. Measure the stall it removes under a
+  realistic ingest rate before paying for it.
+- *A lone writer is still one core.* 2–4 ms a vector at dim 512 is one insert's
+  build-time search and pruning; only a concurrent writer helps it, or the
+  sub-quadratic prune already listed as deferred.
+- *Deletes are not grouped.* Cheap in the index, but each pays its own fsync
+  under `SyncAlways`; grouping them means mixed record types in one append.
 
 *With 2 done, what it must not break is concrete:* a compaction in flight
 learns of writes only through `place` and `tombstone`, under the graph's write
