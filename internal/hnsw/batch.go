@@ -113,10 +113,19 @@ func (g *Graph) InsertBatch(ids []string, vectors [][]float32, workers int) erro
 		prepared[i] = g.prepare(vectors[i])
 	}
 
+	g.insertPreparedBatch(ids, prepared, order, workers)
+	return nil
+}
+
+// insertPreparedBatch inserts prepared[i] under ids[i] for each i in order, a
+// chunk per hold of the write lock. The vectors are already in stored form and
+// order names each id at most once. Compact's catch-up uses it too: the
+// vectors it re-links are already stored form, and preparing them again would
+// drift a unit vector by an ulp.
+func (g *Graph) insertPreparedBatch(ids []string, prepared [][]float32, order []int, workers int) {
 	for lo := 0; lo < len(order); {
 		lo += g.insertChunk(ids, prepared, order[lo:], workers)
 	}
-	return nil
 }
 
 const (
