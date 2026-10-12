@@ -352,13 +352,30 @@ at all until it came down. At 8: 1,731 → 7,175 vec/s (10K × 256).
 **What is left of item 3** is what group commit cannot reach:
 
 - *Searches still wait for ingest.* A group links under the graph's write lock
-  a chunk at a time, and a search queues behind each chunk (p50 8.3 ms at 100K
-  × 512 under ingest, against 0.63 ms alone). Removing that needs searches that
-  read neighbor lists without the graph lock — copy-on-write lists behind
-  atomic pointers, chunked node storage so `nodes` never moves under a reader,
-  a sharded id map — which is a change to the search hot path, the 1 alloc/op
-  baseline and the codec's view of a node. Measure the stall it removes under a
-  realistic ingest rate before paying for it.
+  a chunk at a time, and a search queues behind each chunk. **Measured, and
+  deferred.** 50K × 256, eight searchers at ef=128, ingest through the database:
+
+  | Ingest | search p50 | p99 |
+  |---|---|---|
+  | none | 208 µs | 241 µs |
+  | 100/s | 209 µs | 244 µs |
+  | 1,000/s | 211 µs | 1.29 ms |
+  | saturated, 16 writers (5,866/s) | 1.23 ms | 2.04 ms |
+
+  At a realistic rate the median does not move; the tail picks up about a
+  millisecond. Saturated, the median is 6× — and it is the lock, not CPU: with
+  insert workers capped at 2, leaving most cores idle, p50 was still 1.35 ms.
+  So lock-free neighbor reads would remove it, but the graph is not the only
+  thing in the way. Every apply group holds `applyMu` exclusively and database
+  searches take it shared — that is what stops a reader seeing `(v2, md1)` — so
+  a graph that let searches through would still have them wait at the DB. And
+  an upsert tombstones the old slot when the new one is *placed*: a node kept
+  invisible until linked makes the id vanish from results mid-update, which the
+  index promises never happens. Doing it right means redesigning the
+  vector/metadata pairing and update visibility along with copy-on-write
+  neighbor lists and stable node storage — the search hot path, the 1 alloc/op
+  baseline and the codec's view of a node — to buy back a millisecond of tail
+  at 1,000 writes/s. Revisit when a workload's numbers say otherwise.
 - *A lone writer is still one core.* 2–4 ms a vector at dim 512 is one insert's
   build-time search and pruning; only a concurrent writer helps it, or the
   sub-quadratic prune already listed as deferred.
