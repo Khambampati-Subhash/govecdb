@@ -39,10 +39,14 @@ func (g *Graph) Search(query []float32, k, ef int) ([]Result, error) {
 // The honest cost is the same one tombstones carry. A filter that matches little
 // keeps the result set under-filled, which loosens the pruning bound and makes
 // the search explore wider — self-correcting, but at low selectivity it
-// approaches a full scan, and a scan over the metadata is the better tool there.
+// approaches a walk of the whole graph. So below a measured line it does not
+// walk at all: it probes the predicate on a spread of live nodes to estimate
+// how much it matches, and scans every live slot instead when that is cheaper
+// — exactly, so a scanned search has recall 1. See filterscan.go.
 //
-// allow is called at most once per node per search, under the read lock, and
-// must not call back into the graph.
+// allow is called under the read lock, at most twice per node per search (once
+// by the probe, once by the walk or scan), and must not call back into the
+// graph.
 func (g *Graph) SearchFilter(query []float32, k, ef int, allow func(id string) bool) ([]Result, error) {
 	if len(query) != g.cfg.Dimension {
 		return nil, ErrDimensionMismatch
@@ -74,6 +78,10 @@ func (g *Graph) SearchFilter(query []float32, k, ef int, allow func(id string) b
 		return nil, nil
 	}
 
+	if allow != nil && g.shouldScan(allow, ef) {
+		return g.results(g.scanFilter(st, q, k, allow)), nil
+	}
+
 	// Descend the upper layers greedily to reach the right region.
 	cur := g.entry
 	for lc := g.maxLevel; lc > 0; lc-- {
@@ -88,11 +96,17 @@ func (g *Graph) SearchFilter(query []float32, k, ef int, allow func(id string) b
 	if len(w) > k {
 		w = w[:k]
 	}
+	return g.results(w), nil
+}
+
+// results turns sorted candidates into the caller's Results — the one
+// allocation a search makes. Callers hold the read lock.
+func (g *Graph) results(w []candidate) []Result {
 	out := make([]Result, len(w))
 	for i, c := range w {
 		out[i] = Result{ID: g.nodes[c.idx].id, Distance: c.dist}
 	}
-	return out, nil
+	return out
 }
 
 // admits reports whether a node may become an answer: live, and accepted by the

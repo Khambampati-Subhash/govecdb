@@ -27,6 +27,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `suggest.go` | `SuggestedEf` — the measured curve, `ef ∝ n^0.78 · k^0.2 · (16/M)^0.85`, fitted so callers need not guess. |
 | `calibrate.go` | `Calibrate` — measures this graph's own data (leave-one-out sample queries against an exact scan) and scales `SuggestedEf` to it. |
 | `search.go` | `Result`, `Search`, and the primitives it rides on: `greedyClosest`, `searchLayer`. |
+| `filterscan.go` | Choosing between walking and scanning for a filtered search: `shouldScan` probes the predicate, `scanFilter` answers exactly. |
 | `neighbors.go` | Edge management: alpha-pruned `selectNeighbors`, `pruneConnections`, `connect`, adjacency lookups. |
 | `node.go` | A single vector: `id`, `vector`, per-layer neighbor lists. |
 | `distance.go` | `Metric` (Cosine / Euclidean / DotProduct) + the portable unrolled kernels. Everything returns **smaller = closer**, so the graph never branches on the metric. |

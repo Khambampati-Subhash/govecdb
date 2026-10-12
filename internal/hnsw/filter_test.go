@@ -252,7 +252,7 @@ func BenchmarkSearchFilter(b *testing.B) {
 	// hash lookup that allocates nothing. Deriving it from the id inside the
 	// benchmark — parsing the number back out, say — would measure the parser
 	// and report it as the cost of filtering.
-	for _, sel := range []int{1, 2, 10, 50} {
+	for _, sel := range []int{1, 2, 10, 50, 1000} {
 		name := "unfiltered"
 		if sel > 1 {
 			name = fmt.Sprintf("one-in-%d", sel)

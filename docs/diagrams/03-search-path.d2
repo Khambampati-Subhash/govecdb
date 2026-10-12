@@ -78,7 +78,8 @@ s3: 3 · Build the predicate {
     `allow(id) = store.Match(id, f.Match)`
     over ids, not metadata — the index never sees
     a second data model. `Match` does not copy:
-    **0 allocs**, it runs once per candidate node
+    **0 allocs**; it runs at most twice per node
+    (once by the probe in 4½, once by the walk or scan)
   |
 }
 
@@ -97,6 +98,29 @@ reader: "db.applyMu.RLock — one hold spans traversal and metadata" {
 
   hot_path: "g.mu.RLock — RAM only, parallel with other searches" {
     class: hot
+
+    plan: "4½ · Filtered? Probe, then walk or scan" {
+      class: step
+      body: |md
+        `shouldScan`: ask `allow` about live slots in a
+        golden-ratio spread — stops after ~2×16 matches.
+        Expected matches < **48 × ef** → scan; else walk.
+        The walk visits ≈ min(N, 3·ef/p) nodes at ~350 ns;
+        a scan reads N at ~15 ns, distances only matches.
+        100K × 128, 1 in 1,000: **25–34 ms → 1.5 ms**, exact.
+      |
+    }
+
+    scan: "scanFilter — exact, every live slot once" {
+      class: step
+      body: |md
+        Bounded max-heap of k in `st.results`;
+        recall **1.0**, still **1 alloc/op**
+      |
+    }
+
+    plan -> s5: walk
+    plan -> scan: "scan"
 
     s5: 5 · Greedy descent, maxLevel → 1 {
       class: step
@@ -151,8 +175,9 @@ reader: "db.applyMu.RLock — one hold spans traversal and metadata" {
     |
   }
 
-  s4 -> hot_path.s5
+  s4 -> hot_path.plan
   hot_path.s6 -> s7 -> s8
+  hot_path.scan -> s7
 }
 
 lock_note: |md

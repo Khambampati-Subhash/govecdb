@@ -232,10 +232,14 @@ multiplies the whole traversal rather than just the final comparison:
 `ef=64`) — a metadata filter is applied *during* the traversal, so a search that
 can only accept one vector in fifty has to travel further to find ten of them:
 
-| Admitted | none (unfiltered) | 1 in 2 | 1 in 10 | 1 in 50 |
-|---|---|---|---|---|
-| Latency | 66 µs | 131 µs | 346 µs | 812 µs |
-| Allocs | 1 | 1 | 1 | 1 |
+| Admitted | none (unfiltered) | 1 in 2 | 1 in 10 | 1 in 50 | 1 in 1,000 |
+|---|---|---|---|---|---|
+| Walk only (before) | 44 µs | 87 µs | 217 µs | 585 µs | — |
+| Now (walk or scan) | 43 µs | 85 µs | 103 µs | 130 µs | 61 µs |
+| Allocs | 1 | 1 | 1 | 1 | 1 |
+
+At 1 in 10 and below this corpus is scanned rather than walked — see the end of
+this section.
 
 This is the same curve tombstones produce and for the same reason: a node the
 filter rejects still rides the search frontier, but never enters the result set,
@@ -250,9 +254,25 @@ garbage: the predicate is a lookup against the metadata store that borrows the
 map instead of copying it (`store.Map.Match`, asserted at 0 allocs), and the
 search's own 1 alloc/op baseline is untouched.
 
-Past roughly one in a hundred, the graph stops being the right tool — a scan over
-the metadata, distance-checking only what matches, beats a traversal that is
-visiting most of the graph anyway.
+**Below a measured line the graph is not walked at all.** The walk has to find
+about `ef` matching nodes, and at selectivity *p* it meets them at rate *p* — it
+visits roughly min(N, 3·ef/*p*) nodes, at ~350 ns each (a random access, a
+neighbor list, a distance). A scan reads every slot in order at ~15 ns and
+computes a distance only for matches. So each filtered search first asks the
+filter about a golden-ratio spread of live slots — a few dozen calls for an
+ordinary filter, more only near the line — and scans when it expects fewer than
+48 × `ef` matches. At 100,000 × 128:
+
+| Admitted | walk | scan | now |
+|---|---|---|---|
+| 1 in 2 | 234 µs | 3.2 ms | 241 µs (walk) |
+| 1 in 10, ef=256 | 2.44 ms, recall 0.95 | 1.85 ms | 1.83 ms, exact |
+| 1 in 50 | 2.9–8.4 ms | 1.7 ms | 1.6 ms, exact |
+| 1 in 1,000 | 25–34 ms | 1.8 ms | 1.5 ms, exact |
+
+The crossover is nearer one in ten than the one in a hundred this section used
+to quote, and it moves with dimension — the constant fitted 41 at dim 32, 60 at
+128 and 75 at 512; 48 errs toward the walk.
 
 ---
 
