@@ -350,7 +350,7 @@ func TestSweepScale(t *testing.T) {
 		nq = 200
 	}
 
-	var latencies []float64
+	var latencies, visits []float64
 	for _, n := range sizes {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			rng := rand.New(rand.NewSource(901))
@@ -358,7 +358,13 @@ func TestSweepScale(t *testing.T) {
 			cfg := DefaultConfig(dim, Cosine)
 
 			g, build := buildIndex(t, cfg, c)
-			recall, perQuery := evaluate(t, g, c, Cosine, makeQueries(rng, nq, dim), k, ef)
+			queries := makeQueries(rng, nq, dim)
+			recall, perQuery := evaluate(t, g, c, Cosine, queries, k, ef)
+			var visited int
+			for _, q := range queries {
+				visited += layer0Visits(g, q, ef)
+			}
+			visits = append(visits, float64(visited)/float64(len(queries)))
 
 			record(t, sample{
 				Sweep: "scale", Label: strconv.Itoa(n),
@@ -400,46 +406,69 @@ func TestSweepScale(t *testing.T) {
 	// linear is far above anything the cache effect produces and far below a
 	// scan.
 	//
-	// # Two bounds, because a wall clock measures the machine too
+	// # The hard bound is counted, not timed
 	//
-	// The paragraph above concedes that this growth is a property of the
-	// machine, and a shared CI runner is the case where that stops being a
-	// footnote: small corpora sit in cache and large ones contend for memory
-	// with whatever else is on the host, so the *ratio* inflates without
-	// anything about the index changing. This assertion failed on exactly one
-	// of six build jobs — macOS, Go 1.25 — at 13.73x against an 8x bound, while
-	// the same commit measured 3.2x on a quiet machine.
+	// The paragraph above concedes that latency growth is a property of the
+	// machine, and a shared CI runner is where that stops being a footnote: a
+	// macOS job measured 13.73x, and later 19.58x — past linear — on commits
+	// that measured ~3x on a quiet machine and passed on the same commit's
+	// other run. A timed bound loose enough for every runner means nothing,
+	// and the recall tests cannot stand in for it, because a scan has
+	// *perfect* recall.
 	//
-	// Loosening the bound to fit the worst runner would leave a number that no
-	// longer means anything. Deleting the check would drop the only guard
-	// against a scan regression, which the recall tests cannot catch — a scan
-	// has *perfect* recall. So the tight bound runs where timing is
-	// trustworthy, and everywhere else the catastrophe bound still runs:
-	// latency must at minimum grow slower than the corpus, which no amount of
-	// cache pressure explains and a scan cannot satisfy.
-	//
-	// The real fix is to assert on something countable rather than timed —
-	// distance computations per search are machine-independent and directly
-	// express the algorithmic claim. That needs a counter the hot path cannot
-	// afford in production, so it is a build-tagged follow-up rather than a
-	// change to make quietly here.
+	// So the assertion that runs everywhere is on how many layer-0 nodes a
+	// search visits, read off the visited list's stamps after the search — a
+	// count that is the same on every machine, costs the hot path nothing, and
+	// is exactly the algorithmic claim: a scan visits N, the graph a near
+	// constant. The timed bound still runs where timing is trustworthy, as the
+	// end-to-end check that the count is what latency follows.
 	nGrowth := float64(sizes[len(sizes)-1]) / float64(sizes[0])
+	visitGrowth := visits[len(visits)-1] / visits[0]
 	latGrowth := latencies[len(latencies)-1] / latencies[0]
 	bound := nGrowth / 2
-	t.Logf("corpus grew %.0fx, search latency grew %.2fx (sub-linear bound: %.2fx)", nGrowth, latGrowth, bound)
+	t.Logf("corpus grew %.0fx: layer-0 visits per search %.0f -> %.0f (%.2fx), latency %.2fx (sub-linear bound: %.2fx)",
+		nGrowth, visits[0], visits[len(visits)-1], visitGrowth, latGrowth, bound)
 
+	if visitGrowth > bound {
+		t.Fatalf("layer-0 visits per search grew %.2fx for a %.0fx corpus — that is scan-like, not sub-linear", visitGrowth, nGrowth)
+	}
 	if !timingIsTrustworthy() {
-		if latGrowth >= nGrowth {
-			t.Fatalf("search latency grew %.2fx for a %.0fx corpus — at or past linear, "+
-				"which is scan-like however noisy the host", latGrowth, nGrowth)
-		}
-		t.Logf("shared host: asserted only the %.2fx catastrophe bound, not the %.2fx sub-linear one", nGrowth, bound)
+		t.Logf("shared host: asserted the counted bound only, not the timed one")
 		return
 	}
-
 	if latGrowth > bound {
 		t.Fatalf("search latency grew %.2fx for a %.0fx corpus — that is scan-like, not sub-linear", latGrowth, nGrowth)
 	}
+}
+
+// layer0Visits runs the descent and the layer-0 search that Search runs, on a
+// state of its own, and counts the layer-0 nodes it stamped visited. A test
+// helper rather than a counter in searchLayer: the stamps are already there,
+// so production pays nothing for the number.
+func layer0Visits(g *Graph, query []float32, ef int) int {
+	q := append([]float32(nil), query...)
+	if g.normalized {
+		Normalize(q)
+	}
+	st := g.acquireState()
+	defer g.releaseState(st)
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.entry == -1 {
+		return 0
+	}
+	cur := g.entry
+	for lc := g.maxLevel; lc > 0; lc-- {
+		cur = g.greedyClosest(st, cur, q, lc)
+	}
+	g.searchLayer(st, q, cur, ef, 0, nil)
+	n := 0
+	for _, m := range st.visited.marks {
+		if m == st.visited.gen {
+			n++
+		}
+	}
+	return n
 }
 
 // timingIsTrustworthy reports whether wall-clock ratios measured here say more
