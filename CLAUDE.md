@@ -343,6 +343,14 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - `chunkPerWorker` is **4**: a chunk holds the graph's write lock, and readers
   queue behind it (search p50 under ingest 15.5 → 8.3 ms vs 8). The root's
   `applyGroup` is `4 × workers` to match — keep the two equal.
+- **Layer-0 neighbor lists live in the graph, not the node** (`layer0.go`):
+  chunks of 1,024 fixed blocks `[count, ids…]`, `stride0 = 2M+2` uint32s, room
+  for exactly maxConn+1. `connect` writes into the block and **cannot grow
+  it**, so `link` prunes its own list before connecting into a full one (never
+  fires serially — bit-identical builds hold). Chunks, not one array, so growth
+  never copies the whole store under the write lock. Slots are added only in
+  `place` (write lock); `Compact`'s swap moves `layer0` with `nodes`; the codec
+  writes through `neighborsAt`, so the file format did not change.
 - Insert **copies** the caller's vector (and normalizes it for Cosine), so the graph
   never aliases a reused caller buffer.
 - `Insert` is an **upsert** — there is no `Update`. A second Insert under a live id

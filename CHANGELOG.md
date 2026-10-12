@@ -10,6 +10,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned and in what
 order.
 
+### Changed
+
+- **The graph holds ~170–195 bytes less per vector.** Every node's layer-0
+  neighbor list — the one a search spends nearly all its time in — now lives
+  in fixed `uint32` blocks owned by the graph instead of an `[]int` slice per
+  node: at 100,000 vectors, 563 → ~380 bytes of graph beyond each vector.
+  Inserts make 4 allocations instead of 6, and loading a snapshot's graph
+  allocates 38% less often. Search latency is unchanged (−1–2%, within noise),
+  and so is the snapshot format.
+
 ## [1.5.0] - 2026-10-13
 
 Three v2 items, all on one node: writes no longer wait for a compaction,
