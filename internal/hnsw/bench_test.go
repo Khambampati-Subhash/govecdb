@@ -188,7 +188,9 @@ func BenchmarkSearchTombstones(b *testing.B) {
 	}
 }
 
-// BenchmarkCompact measures how long writers wait. A compaction is a full
+// BenchmarkCompact measures a compaction end to end. Nobody waits for that
+// whole length any more — searches and writes run beside it — but it is the
+// CPU a compaction costs and how long a second graph is held. It is a full
 // index build over the *surviving* vectors, so its cost tracks how many live —
 // reclaiming more is cheaper, not dearer.
 //

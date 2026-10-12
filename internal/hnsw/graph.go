@@ -46,11 +46,23 @@ type Graph struct {
 	// recomputed, because it is what a compaction policy polls.
 	numDeleted int
 
-	// writes counts every change to nodes or ids — a slot placed, a slot
-	// tombstoned. Compact builds its replacement under the read lock and
-	// compares this at the swap, so a write that slipped in between the two
-	// locks is caught rather than discarded with the old graph.
-	writes uint64
+	// dirty collects every id a write touches while a compaction runs, so the
+	// replacement it built can be caught up rather than rebuilt (compact.go).
+	// Nil otherwise, which is all place and tombstone check.
+	//
+	// It is the one field written under the *read* lock: the compaction sets
+	// and drains it so, to stay out of a long reader's way. That is safe
+	// because compactMu admits one compaction, writers — its only other users
+	// — hold the write lock, and no reader touches it.
+	dirty map[string]struct{}
+
+	// compactMu serializes compactions. It is not mu: a compaction holds it
+	// for its whole length and takes mu only in short pieces.
+	compactMu sync.Mutex
+
+	// onCompactBuild, when set, runs as a compaction starts its build. Tests
+	// use it to hold a build open and prove that writes land meanwhile.
+	onCompactBuild func()
 
 	// locks guards neighbor lists while InsertBatch links in parallel.
 	// Allocated on the first batch that needs it, under mu, and never freed.

@@ -22,7 +22,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `insert.go` | `Insert` — building the graph, and replacing an id that is already in it; `link`, the part of an insert a batch parallelizes. |
 | `batch.go` | `InsertBatch` — linking a batch on several workers under striped node locks, in chunks that hold the write lock. |
 | `delete.go` | `Delete` — tombstoning a slot, and re-electing the entry point when it is the one deleted. |
-| `compact.go` | `Compact` — rebuilding the graph over its live vectors to reclaim tombstoned slots. |
+| `compact.go` | `Compact` / `CompactOnline` — rebuilding the graph over its live vectors to reclaim tombstoned slots, catching up the writes that land meanwhile. |
 | `codec.go` | `(*Graph).WriteTo` / `Read` — the graph as bytes, so recovery loads an index instead of rebuilding one. |
 | `suggest.go` | `SuggestedEf` — the measured curve, `ef ∝ n^0.78 · k^0.2 · (16/M)^0.85`, fitted so callers need not guess. |
 | `calibrate.go` | `Calibrate` — measures this graph's own data (leave-one-out sample queries against an exact scan) and scales `SuggestedEf` to it. |
@@ -39,7 +39,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `concurrent_test.go` | Parallel-vs-serial equivalence, mixed reader/writer race coverage. |
 | `delete_test.go` | Tombstone semantics, recall under deletes, entry re-election, stranding. |
 | `upsert_test.go` | Replacement semantics, replay no-ops, recall under updates, atomicity. |
-| `compact_test.go` | Slot reclamation, equality against a fresh build, recall after rebuild. |
+| `compact_test.go` | Slot reclamation, equality against a fresh build, recall after rebuild, writes landing mid-build. |
 | `distance_test.go` | Kernels vs a float64 reference across 28 dimensions, the platform kernel vs the Go one at every length 0–200 and unaligned offsets, tail handling, metric wiring. |
 | `pq_test.go` | Heap invariants under interleaved push/pop, ties, payload integrity. |
 | `visited_test.go` | Generation stamps, reuse across graph sizes, the 2³²-search wraparound. |
@@ -290,13 +290,20 @@ and hoping. That test is also what guards `insertPrepared`: stored vectors move
 across as-is, because re-normalizing an already-unit vector drifts it by an ulp
 and the compacted graph would quietly stop holding the same numbers.
 
-`Compact` builds the replacement under the **read** lock and takes the write
-lock only to swap it in, so searches keep running for the whole build; writers
-wait. A write can only slip in between the two locks, and `writes` — bumped by
-every `place` and `tombstone` — catches it: if it moved, the stale replacement
-is discarded and the graph rebuilt under the write lock, the old stop-the-world
-path, kept for correctness. A caller that excludes its own writers for the
-duration (the database holds its writers' lock) never takes it. The index still
+`Compact` builds the replacement holding **no lock** on the live graph — a
+node's id and stored vector never change after it is placed, so the build reads
+them freely — and searches *and* writes keep running against the old graph.
+While it runs, `place` and `tombstone` record every id they touch (`dirty`), and
+the compaction catches up: it drains those ids under a short **read** lock — a
+write lock would queue behind a snapshot's long `WriteTo` and stall every
+search behind it — and sets
+each one in the replacement to whatever the old graph holds for it *now* — its
+vector or nothing. Applying final state rather than replaying writes makes order
+irrelevant, and rounds repeat (on every core, via the batch path) until the
+backlog is small. The swap takes the write lock, applies what is left, and
+swaps. `CompactOnline(quiesce)` lets a caller that controls its own writers hold
+them off for just that last step — the database does, with its writers' lock,
+which no reader takes. The index still
 does not decide *when*; `Stats().DeadRatio()` reports the ratio and the caller
 picks a moment that tolerates the cost.
 
@@ -456,11 +463,13 @@ entry point if it reached a new top level.
 **Search(query, k, ef):** normalize query → greedily descend upper layers → one
 wide `searchLayer` on layer 0 → return the `k` closest.
 
-**Compact():** nothing to do if no slot is dead → otherwise, under the read
-lock, build a replacement graph, re-inserting every live vector in slot order
-with its stored vector → under the write lock, rebuild again only if `writes`
-moved, then swap `nodes` / `ids` / `entry` / `maxLevel` across and zero the
-tombstone count.
+**Compact():** nothing to do if no slot is dead → otherwise, under one read
+lock, start recording writes (`dirty`) and capture the live nodes; build a
+replacement with no lock held, re-inserting every live vector in slot order with
+its stored vector → catch up in rounds: drain `dirty` under the read lock, set
+each id in the replacement to its current state → `quiesce` if given → under the
+write lock, apply the rest and swap `nodes` / `ids` / `entry` / `maxLevel` /
+`numDeleted` across.
 
 ## Serializing the graph
 
@@ -509,10 +518,8 @@ half-solved twice.
 
 ## Not implemented yet (deliberately)
 
-Fine-grained write locking, fully **online** compaction — `Compact` no longer
-stops searches, but writers still wait for it. Each is a separate upcoming
-slice; see
-`docs/MIGRATION.md`.
+Fine-grained write locking — concurrent writers still serialize on the graph's
+lock, except inside one `InsertBatch`. See `docs/MIGRATION.md`.
 
 ```bash
 go test ./internal/hnsw/ -v                      # correctness + recall

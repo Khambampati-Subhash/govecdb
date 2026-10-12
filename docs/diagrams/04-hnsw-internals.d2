@@ -280,11 +280,13 @@ lifecycle: A slot outlives its vector — delete AND update {
     vectors in slot order — so it is testable by equality rather
     than by sampling recall.
 
-    **Searches keep running; writers wait.** The replacement is
-    built under the *read* lock and swapped under the write lock.
-    If `writes` moved in between, it rebuilds under the write lock
-    instead (through the DB it never does — `DB.Compact` holds
-    the writers' lock).
+    **Searches and writes keep running.** The replacement is
+    built holding *no* lock on the live graph — ids and stored
+    vectors never change once placed. `place` / `tombstone` record
+    each id they touch in `dirty`; catch-up rounds set those ids
+    in the replacement to their *current* state, then the swap
+    takes the write lock. `DB.Compact` holds `writeMu` only for
+    the last catch-up and the swap.
 
     The build tracks **survivors**: 2.61 s at 25% dead against
     0.79 s at 75%, per 5k × 128. Compacting early costs more and

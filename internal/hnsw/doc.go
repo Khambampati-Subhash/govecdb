@@ -20,9 +20,10 @@
 //
 // Compact settles that debt. It rebuilds the graph over its live vectors and
 // swaps it in whole — never a renumbering of the live graph, because every
-// neighbor list is a list of slot indices. Searches keep running while it
-// builds, but writers wait for the duration, so the index reports
-// Stats().DeadRatio() and leaves the timing to the caller.
+// neighbor list is a list of slot indices. Searches and writes keep running
+// while it builds — writes that land meanwhile are caught up before the swap —
+// but it is a full build's worth of CPU and a second graph's memory, so the
+// index reports Stats().DeadRatio() and leaves the timing to the caller.
 //
 // The graph can be written to bytes and read back (WriteTo and Read), so
 // recovery loads an index instead of rebuilding one — the difference between
