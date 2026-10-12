@@ -130,9 +130,9 @@ it, because several of these look independent and are not.
 | | Item | Blocked on | |
 |---|---|---|---|
 | 1 | Observability seam | nothing | **done in v1.3.0** |
-| 2 | Online (non-blocking) compaction | 1, for the same reason everything wants 1 | **reads done** — writers still wait |
+| 2 | Online (non-blocking) compaction | 1, for the same reason everything wants 1 | **done** — reads in v1.4.0, writes after v1.4.2 |
 | 3a | Parallel batch build | nothing — one batch, one lock | **done in v1.3.0** |
-| 3 | Fine-grained write locking | 2 | |
+| 3 | Fine-grained write locking | 2 | **next** |
 | 4 | Collections / namespaces | nothing, but wants 1 | **done in v1.1.0** |
 | 5 | Filter selectivity estimation | 4 is unrelated; needs store statistics | |
 | 6 | Quantized index | nothing — the `Index` interface was built for it | |
@@ -231,6 +231,44 @@ report what they do — and are now unblocked.
 
 ### 2. Online compaction
 
+**Done, in two halves, neither by the route sketched below.**
+
+*Writes* — after v1.4.2. The build no longer holds any lock on the live graph:
+a node's id and stored vector are written once and never edited (an update
+builds a new slot), so the build reads them freely from a list captured under a
+short read lock. Writes land on the old graph meanwhile, and `place` and
+`tombstone` — the only two places a write reaches the id map — record each id
+they touch. The compaction then catches up in rounds: drain the touched ids
+under a short write lock and set each in the replacement to the old graph's
+*current* state for it, vector or absence. Where the sketch called for a change
+log and a double-buffered swap, final state turned out to be enough: it makes
+order irrelevant (an id written five times is caught up once; one inserted and
+deleted again is a no-op) and holds no vector copies. The WAL did not need to
+shape it after all — the graph is derived state, and it is the graph's own
+current state that is replayed, not the log. `DB.Compact` passes a `quiesce`
+callback that takes `writeMu` for the last catch-up and the swap only:
+measured under the race detector at 6,000 × 32, half dead, the longest `Add`
+wait during a 5 s compaction fell from the whole 5 s to ~50 ms, with ~1,700
+adds landing during it and none lost.
+
+What it got wrong first: the drain took the graph's *write* lock. Before this
+change `Compact` and `Snapshot` both took `writeMu` and never overlapped; now a
+compaction runs beside a snapshot, whose `WriteTo` holds the graph's read lock
+for seconds, and a drain waiting for the write lock behind it held every new
+search for the rest of the snapshot — the same `RWMutex` shape as every stall
+the v1.4.0 review found. Caught in review of the diff, not by a test; the test
+(`TestCompactDoesNotQueueBehindALongReader`) came after and fails against that
+version. Everything before the swap now takes only the read lock, which
+excludes exactly what the drain needs excluded: writers. And the
+first version of `TestCompactLetsWritesLand` missed a `tombstone` that forgot to
+record, because every id it deleted had also just been re-put, so `place` had
+recorded it; mutation testing caught the test, not the code.
+
+What it costs: memory. The replacement exists beside the old graph until the
+swap, as it did before; nothing about that changed.
+
+*Reads* — v1.4.0, the half below.
+
 **Half done, by a cheaper route than the sketch below.** `Compact` now builds the
 replacement under the graph's *read* lock and swaps under the write lock, while
 the DB holds the writers' lock for the whole rebuild — so writes wait and reads
@@ -292,6 +330,12 @@ obvious small region to lock instead.
 It follows online compaction rather than leading it, because the WAL's ordering
 constraint — write to the log, then apply — decides what a finer lock is allowed
 to do, and the double-buffered swap decides what it must not break.
+
+*With 2 done, what it must not break is concrete:* a compaction in flight
+learns of writes only through `place` and `tombstone`, under the graph's write
+lock, into one map. A finer lock that lets two writers place nodes at once has
+to keep that record complete — a per-stripe set, or the map behind its own
+mutex — or a compaction silently drops a write.
 
 ### 4. Collections / namespaces — done in v1.1.0
 
@@ -767,3 +811,9 @@ original sketch, and the narrowing is the interesting part.
 - **Online compaction is the one item that can corrupt data**, rather than merely
   fail. It swaps a live graph while writes are landing; everything else on the v2
   list is additive.
+
+  *Landed after v1.4.2, guarded by a deterministic test that holds the build
+  open and issues every kind of write under it (`TestCompactLetsWritesLand`),
+  a concurrent hammer (`TestCompactUnderConcurrentWritesLosesNothing`), and a
+  DB-level check that every `Add` made during a compaction survives it. Each
+  was shown to fail with the bug it guards reintroduced.*

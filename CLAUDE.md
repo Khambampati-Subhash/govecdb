@@ -24,9 +24,9 @@ from the ones ahead of it.
 | v2 item | State | Where |
 |---|---|---|
 | 1 Observability seam | **done** (v1.3.0) | `events.go`, `httpapi/events.go` |
-| 2 Online compaction | **reads done** (v1.4.0) — `Compact` no longer stops searches; writes still wait | `internal/hnsw/compact.go` |
+| 2 Online compaction | **done** — reads (v1.4.0), writes (Unreleased): neither waits for the rebuild | `internal/hnsw/compact.go` |
 | 3a Parallel batch build | **done** (v1.3.0) | `internal/hnsw/batch.go` |
-| 3 Fine-grained write locking | after 2 | — |
+| 3 Fine-grained write locking | **next** — 2 is done | — |
 | 4 Collections | **done** (v1.1.0) | `service/` |
 | 5 Filter selectivity estimation | open | — |
 | 6 Quantized index | open — the `Index` interface was built for it | — |
@@ -353,14 +353,28 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   indices, so nothing may ever be renumbered in place. It re-inserts *stored*
   vectors via `insertPrepared` (no re-copy, and no re-normalize: that drifts a
   unit vector by an ulp and the rebuild would stop being bit-equal to a fresh
-  build, which `TestCompactMatchesAFreshBuild` asserts). It **builds the
-  replacement under the read lock and swaps under the write lock**, so searches
-  keep running; a mutation counter re-checked at the swap falls back to a
-  rebuild under the write lock if a standalone caller wrote meanwhile (through
-  the DB it never fires: `DB.Compact` holds the writers' lock, so writers wait).
-  The index never self-triggers, callers poll `Stats().DeadRatio()`. Threshold
-  ~0.5, not 0.25: the pause tracks *survivors*, so compacting early costs more
-  and reclaims less.
+  build, which `TestCompactMatchesAFreshBuild` asserts — when no write lands
+  during it). It **builds with no lock on the live graph**: a node's `id` and
+  `vector` are written once in `newNode` and never again, so never add a path
+  that edits a stored vector in place. Writes keep landing; `place` and
+  `tombstone` record each touched id in `dirty` (nil when no compaction runs),
+  and **catch-up applies each id's *current* state, never a replay of the
+  writes** — that is what makes order irrelevant. Recording starts in the same
+  read-lock hold that captures the live set; recording after it loses a write.
+  **Everything before the swap takes only the read lock** — `dirty` is written
+  under it, safe because compactMu admits one compaction and writers hold the
+  write lock. A write-lock drain queued behind a snapshot's seconds-long
+  `WriteTo` and stalled every search (`TestCompactDoesNotQueueBehindALongReader`).
+  Rounds (`catchUpRounds`, down to `catchUpQuiet`) then the swap under the write
+  lock. `DB.Compact` uses `CompactOnline(quiesce)` and takes `writeMu` only for
+  the last catch-up and the swap (~50 ms vs the whole 5 s rebuild, under
+  `-race`); `compactMu` is how `Close` waits for it. Catch-up tombstones count
+  in the new graph, so `reclaimed = old dead − new dead`. Guards:
+  `TestCompactLetsWritesLand` (a hook holds the build open; every write kind),
+  `TestCompactKeepsSearchesAndWritesRunning` — both proven to fail with the
+  bug reintroduced. The index never self-triggers, callers poll
+  `Stats().DeadRatio()`. Threshold ~0.5, not 0.25: the build tracks
+  *survivors*, so compacting early costs more and reclaims less.
 - Durability model: **write to WAL first, then apply to the in-memory graph**; on
   recovery, replay the WAL to rebuild the graph — the graph is derived state,
   never the source of truth.
@@ -559,10 +573,12 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   that cannot write itself out is still a usable index.
 - **Readers never wait for a writer's I/O.** Three locks, documented above
   `type DB` in `db.go`: `writeMu` serializes writers across log append *and*
-  apply (`Snapshot`, `Compact`, `Sync`, `Close` take it too) and **no reader
-  ever takes it**; `applyMu` is held exclusively only for the apply itself and
-  shared by readers that pair a vector with its metadata, so no one sees
-  `(v2, md1)`; `snapMu` serializes snapshots against each other and `Close`.
+  apply (`Snapshot`, `Sync`, `Close` take it too, and `Compact` for its swap)
+  and **no reader ever takes it**; `applyMu` is held exclusively only for the
+  apply itself and shared by readers that pair a vector with its metadata, so
+  no one sees `(v2, md1)`; `snapMu` serializes snapshots against each other and
+  `Close`; `compactMu` does the same for `Compact` (order: compactMu → snapMu →
+  writeMu).
   `closed` and `snapSeq` are atomics. Why: Go's `RWMutex` blocks new readers once
   a writer waits — one `SyncAlways` writer took search p50 from 40 µs to 4.9 ms,
   `AddBatch(10000)` held a search 545 ms, and a snapshot with one queued `Add`

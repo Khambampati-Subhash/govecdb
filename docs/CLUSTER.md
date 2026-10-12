@@ -213,7 +213,7 @@ Never in this module: Raft, gRPC, the router, the shipper transport.
 | 3 | Sequence numbers are reissued after a torn tail | needs the epoch (§5) |
 | 4 | The writer cannot take an external sequence; no durable-sequence bound | Stage 2 |
 | 5 | Truncation ignores followers | Stage 2 (retention floor) |
-| 6 | `Compact` held the write lock for a full rebuild — a failover trigger on a leader | being fixed: rebuild under the read lock, swap under the write lock |
+| 6 | `Compact` held the write lock for a full rebuild — a failover trigger on a leader | fixed: rebuilt beside the live graph, writes caught up, writers held off only for the swap |
 | 7 | Writes return no sequence | Stage 2 (`seq` in responses) |
 | 8 | `Range` sorts every live id once (~80 MB at 5M ids) | budget for it in a split |
 | 9 | `service.Manager` eviction and `Drop` (`RemoveAll`) | configure off / fence on cluster nodes |
@@ -230,7 +230,8 @@ Never in this module: Raft, gRPC, the router, the shipper transport.
 | 5 | Partition move | cluster | zero write errors during a move under load |
 | 6 | Split | cluster | final id set equals the source's |
 
-Online compaction (v2 item 2) should land before Stage 4. The quantized index
+Online compaction (v2 item 2) should land before Stage 4 — it has: writes now
+wait only for the swap. The quantized index
 (item 6) is independent and is the largest lever on vectors per node.
 
 ## 10. Risks
