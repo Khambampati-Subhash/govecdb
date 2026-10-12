@@ -30,8 +30,8 @@ from the ones ahead of it.
 | 4 Collections | **done** (v1.1.0) | `service/` |
 | 5 Filter selectivity estimation | **done** — sampled, not statistics: selective filters are scanned exactly | `internal/hnsw/filterscan.go` |
 | 6 Quantized index | open — the `Index` interface was built for it | — |
-| 7 REST / 7b gRPC | REST **done** (v1.1.0); gRPC open, separate module | `httpapi/`, `cmd/govecdbd/` |
-| 8 Clustering / replication | **designed**, not built — separate module | `docs/CLUSTER.md` |
+| 7 REST / 7b gRPC | REST **done** (v1.1.0); gRPC **decided against for now** — binary vectors, h2c, a Go client instead | `docs/SCALE_OUT_PLAN.md` |
+| 8 Clustering / replication | **designed**, not built; sharding not needed yet, **online backup is next** (Phase 2), replication on a trigger | `docs/SCALE_OUT_PLAN.md`, `docs/CLUSTER.md` |
 
 `docs/MIGRATION.md` holds the full scope, what blocks each item, and the record
 of every finished one — including what its original sketch got wrong. **Read the
@@ -105,7 +105,7 @@ change, if it needs one, is far cheaper before v2 ships than after.
 | the service, the daemon, the wire format | `docs/SERVICE.md`, `service/README.md`, `httpapi/README.md` |
 | an internal package | its own `README.md`, and its quick reference below |
 | the index | `internal/hnsw/README.md` — also the reference for code style |
-| replication, sharding, the WAL format | `docs/CLUSTER.md` |
+| replication, sharding, the WAL format, gRPC | `docs/SCALE_OUT_PLAN.md` (whether and when), then `docs/CLUSTER.md` (how) |
 | a lock, a data path, a default, or a locked baseline | `docs/diagrams/` — the `.d2` that draws it; **update and re-render in the same commit** (below) |
 
 ### The layout

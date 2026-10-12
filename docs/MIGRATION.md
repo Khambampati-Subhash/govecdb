@@ -137,8 +137,8 @@ it, because several of these look independent and are not.
 | 5 | Filter selectivity estimation | 4 is unrelated; needs store statistics | **done** — by sampling, not statistics |
 | 6 | Quantized index | nothing — the `Index` interface was built for it | |
 | 7 | REST server | 4 | **done in v1.1.0** |
-| 7b | gRPC server | 7, and a second module | |
-| 8 | Clustering and replication | 7 | designed — [CLUSTER.md](CLUSTER.md) |
+| 7b | gRPC server | 7, and a second module | **decided against for now** — binary vectors, h2c and a Go client instead; see [SCALE_OUT_PLAN.md](SCALE_OUT_PLAN.md) |
+| 8 | Clustering and replication | 7 | designed — [CLUSTER.md](CLUSTER.md); sharding not needed, online backup first — [SCALE_OUT_PLAN.md](SCALE_OUT_PLAN.md) |
 
 Items 4 and 7 shipped in v1.1.0, out of the order above — they were the two that
 needed nothing from the observability seam and they are the two that turn this

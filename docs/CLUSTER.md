@@ -1,6 +1,9 @@
 # GoVecDB — horizontal scaling design (v2 item 8)
 
-Status: **design, not built.** This is the plan for sharding and replication,
+Status: **design, not built.** Whether and when to build it is decided in
+[SCALE_OUT_PLAN.md](SCALE_OUT_PLAN.md), which supersedes this document's stage
+order and its "before v2" deadline for the epoch: online backup comes first,
+replication on an availability trigger, sharding on a capacity one. This is the plan for sharding and replication,
 grounded in the code as of v1.3.1. Only the engine primitives in
 [§6](#6-what-lands-in-this-module) land in this module; everything else lives in
 a separate module, `govecdb-cluster`, which imports this one. `go.mod` here
