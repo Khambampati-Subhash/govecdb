@@ -28,6 +28,12 @@ amd64 gets SIMD distance kernels. No exported API or on-disk format changed.
   `DeadRatio`, the package docs and the `Index` interface. Since 1.4.0 only
   writes wait; the `Index` contract now says an implementation should not block
   searches for the rebuild's length.
+- **`TestSearchDoesNotWaitForASyncAlwaysWriter` failed CI's non-race job**
+  (v1.4.1's test commit and v1.4.2's) on a p99 a whole fsync long. The
+  database was not waiting: with a 3 ms delay put into the log's fsync, p99
+  stayed at one index apply. A runner's ~3.8 ms fsync stalls the VM itself.
+  The SyncNever control now fsyncs a file of its own, so both sides carry the
+  machine's cost; with the stall reintroduced it still fails, 7.8 ms over 4.1.
 
 ### Changed
 

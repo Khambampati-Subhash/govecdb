@@ -91,6 +91,15 @@ func pct(sorted []time.Duration, p float64) time.Duration {
 // applies at least as often and never fsyncs: if searches waited on the disk,
 // the SyncAlways p50 would sit a whole fsync above that one; if they wait only
 // on applies, the two agree on any machine.
+//
+// An fsync can also slow a search without any lock at all. On a CI runner one
+// costs ~3.8 ms and stalls the VM, so ~1% of searches ran a whole fsync long
+// (p99 3.1 ms) — failing the p99 check twice, on v1.4.1 and v1.4.2 — while a
+// 3 ms sleep put into the log's fsync left p99 at one apply (~340 µs). The
+// stall was the machine's, not the database's. So the SyncNever control also
+// fsyncs a file of its own, outside the database and its locks, as fast as
+// the disk allows: it carries the machine's fsync cost, and only a search
+// waiting on the writer separates the two.
 func TestSearchDoesNotWaitForASyncAlwaysWriter(t *testing.T) {
 	const dim = 32
 	measure := func(policy SyncPolicy) (base, under []time.Duration, n int, each time.Duration) {
@@ -100,6 +109,34 @@ func TestSearchDoesNotWaitForASyncAlwaysWriter(t *testing.T) {
 
 		stop := make(chan struct{})
 		writes := make(chan int)
+		fsyncs := make(chan struct{})
+		if policy == SyncNever {
+			f, err := os.Create(filepath.Join(t.TempDir(), "unrelated-fsyncs"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			go func() {
+				defer close(fsyncs)
+				defer f.Close()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if _, err := f.Write([]byte{1}); err != nil {
+						t.Error(err)
+						return
+					}
+					if err := f.Sync(); err != nil {
+						t.Error(err)
+						return
+					}
+				}
+			}()
+		} else {
+			close(fsyncs)
+		}
 		go func() {
 			rng := rand.New(rand.NewSource(3))
 			n := 0
@@ -121,13 +158,14 @@ func TestSearchDoesNotWaitForASyncAlwaysWriter(t *testing.T) {
 		under = searchFor(t, db, dim, 300*time.Millisecond, 4)
 		close(stop)
 		n = <-writes
+		<-fsyncs
 		return base, under, n, time.Since(start) / time.Duration(max(n, 1))
 	}
 
 	base, under, n, each := measure(SyncAlways)
 	_, neverUnder, neverN, neverEach := measure(SyncNever)
 	t.Logf("no writer: p50 %v p99 %v; SyncAlways writer (%d adds, ~%v each): %d searches, p50 %v p99 %v; "+
-		"SyncNever writer (%d adds, ~%v each): p50 %v p99 %v",
+		"SyncNever writer plus unrelated fsyncs (%d adds, ~%v each): p50 %v p99 %v",
 		pct(base, .5), pct(base, .99), n, each, len(under), pct(under, .5), pct(under, .99),
 		neverN, neverEach, pct(neverUnder, .5), pct(neverUnder, .99))
 	if n == 0 {
