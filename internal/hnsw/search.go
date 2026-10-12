@@ -136,7 +136,7 @@ func (g *Graph) greedyClosest(st *searchState, start int, target []float32, lc i
 		for _, nb := range g.readNeighbors(st, best, lc) {
 			d := g.dist(g.nodes[nb].vector, target)
 			if d < bestDist {
-				bestDist, best, improved = d, nb, true
+				bestDist, best, improved = d, int(nb), true
 			}
 		}
 		if !improved {
@@ -204,8 +204,8 @@ func (g *Graph) searchLayer(st *searchState, query []float32, entryPoint, ef, lc
 		// overwrite the list being read.
 		fresh := st.fresh[:0]
 		for _, nb := range g.readNeighbors(st, c.idx, lc) {
-			if !st.visited.visit(nb) {
-				fresh = append(fresh, nb)
+			if !st.visited.visit(int(nb)) {
+				fresh = append(fresh, int(nb))
 			}
 		}
 		st.fresh = fresh

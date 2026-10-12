@@ -73,10 +73,13 @@ graph_struct: "Graph — internal/hnsw/graph.go" {
   normalized: "bool — stored vectors are unit length (Cosine)"
   nodes: "[]*node — slots, append-only; indexes never shift"
   ids: "map[string]int — LIVE external id → slot"
+  layer0: "[][]uint32 — every slot's layer-0 block, 1,024 slots a chunk"
+  stride0: "int — block size: count + 2·M + 1 slots"
   entry: "int — entry point, -1 when empty"
   maxLevel: int
   numDeleted: "int — tombstoned slots; the compaction signal"
-  writes: "uint64 — mutation count, re-checked at Compact's swap"
+  dirty: "map[string]struct{} — ids written while a Compact runs; nil otherwise"
+  compactMu: "sync.Mutex — one compaction at a time"
   locks: "*nodeLocks — 4,096 striped mutexes (32 KiB), batches only"
   pool: "sync.Pool — hands out per-traversal searchState"
   efScale: "atomic.Uint64 — Calibrate's ef factor, not serialized"
@@ -95,9 +98,9 @@ state_struct: "searchState — internal/hnsw/state.go" {
   found: "[]candidate — searchLayer's sorted output"
   rejected: "[]candidate — selectNeighbors' backfill"
   pruneBuf: "[]candidate — pruneConnections' scratch"
-  selected: "[]int — insert's chosen neighbors, this layer"
+  selected: "[]uint32 — insert's chosen neighbors, this layer"
   queryBuf: "[]float32 — normalized copy of the query"
-  nbrBuf: "[]int — a neighbor list copied out under its lock"
+  nbrBuf: "[]uint32 — a neighbor list copied out under its lock"
   fresh: "[]int — one expansion's unvisited neighbors (prefetch)"
   sink: "float32 — keeps touchLines' loads alive"
   locks: "*nodeLocks — non-nil only in a batch worker"
@@ -109,7 +112,7 @@ node_struct: "node — internal/hnsw/node.go" {
 
   id: "string — caller's external id"
   vector: "[]float32 — graph-owned copy, normalized for Cosine"
-  neighbors: "[][]int — neighbors[l] = slots on layer l"
+  upper: "[][]uint32 — upper[l-1] = slots on layer l ≥ 1 (layer 0: Graph.layer0)"
   deleted: "bool — tombstone: dead as an answer, alive as a route"
   linking: "atomic.Bool — edges still being built in a batch; others step around it"
 }
@@ -304,10 +307,11 @@ memory: Memory budget {
     ### Per node
 
     **vector** — `dim × 4 bytes`
-    **neighbors** — up to `2M` 8-byte ints on L0 + `M` per upper
-    layer; at M=16: up to 256 B on L0, plus slice headers
-    (the codec writes them as `uint32`: 662 B/vector on disk
-    at 128 dims)
+    **layer 0** — one block of `2M + 2` uint32 in the graph's
+    flat store: 136 B at M=16, no per-node allocation
+    **upper layers** — `M` uint32 each, on ~1 node in M
+    Measured beyond the vector, 100K vectors: **~370–395 B**
+    (id, map entry, node, lists) — was ~565 B with `[][]int`
 
     ### At 768 dims
 
@@ -315,7 +319,7 @@ memory: Memory budget {
 
     ### At 128 dims
 
-    512 B/vector → the **neighbor lists are the same order as the data**
+    512 B/vector → the **graph is still most of the data's size**
 
     Know which regime you are in — it decides whether quantization
     or graph compaction is the optimization that matters.

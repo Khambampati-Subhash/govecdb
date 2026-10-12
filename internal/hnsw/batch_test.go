@@ -39,12 +39,14 @@ func buildBatch(t *testing.T, cfg Config, c corpus, workers int) (*Graph, time.D
 func assertWellFormed(t *testing.T, g *Graph) {
 	t.Helper()
 	for idx, n := range g.nodes {
-		for lc, nbrs := range n.neighbors {
+		for lc := 0; lc <= n.topLevel(); lc++ {
+			nbrs := g.neighborsAt(idx, lc)
 			if len(nbrs) > g.maxConn(lc) {
 				t.Fatalf("node %d layer %d has %d edges, cap %d", idx, lc, len(nbrs), g.maxConn(lc))
 			}
 			seen := make(map[int]bool, len(nbrs))
-			for _, nb := range nbrs {
+			for _, nb32 := range nbrs {
+				nb := int(nb32)
 				switch {
 				case nb == idx:
 					t.Fatalf("node %d links to itself on layer %d", idx, lc)
@@ -255,10 +257,10 @@ func unreachable(g *Graph) int {
 	for len(queue) > 0 {
 		n := queue[0]
 		queue = queue[1:]
-		for _, nb := range g.nodes[n].neighbors[0] {
+		for _, nb := range g.neighborsAt(n, 0) {
 			if !seen[nb] {
 				seen[nb] = true
-				queue = append(queue, nb)
+				queue = append(queue, int(nb))
 			}
 		}
 	}

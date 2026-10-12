@@ -37,9 +37,15 @@ type Graph struct {
 	// cosine kernel collapse to a plain dot product.
 	normalized bool
 
-	nodes    []*node
-	ids      map[string]int // external id -> index into nodes
-	entry    int            // index of the entry point, -1 when empty
+	nodes []*node
+	ids   map[string]int // external id -> index into nodes
+
+	// layer0 holds every slot's layer-0 neighbor block, stride0 uint32s each,
+	// layer0Chunk slots to a chunk (layer0.go).
+	layer0  [][]uint32
+	stride0 int
+
+	entry    int // index of the entry point, -1 when empty
 	maxLevel int
 
 	// numDeleted counts tombstoned slots. Kept as a running total rather than
@@ -132,6 +138,7 @@ func newGraph(cfg Config) *Graph {
 		dist:       cfg.Metric.fastFunc(normalized),
 		mMax:       cfg.M,
 		mMax0:      cfg.M * 2,
+		stride0:    cfg.M*2 + 2,
 		ml:         1.0 / math.Log(float64(cfg.M)),
 		alpha:      cfg.Alpha,
 		rng:        rand.New(rand.NewSource(cfg.Seed)),

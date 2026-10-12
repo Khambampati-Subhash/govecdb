@@ -29,7 +29,8 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `search.go` | `Result`, `Search`, and the primitives it rides on: `greedyClosest`, `searchLayer`. |
 | `filterscan.go` | Choosing between walking and scanning for a filtered search: `shouldScan` probes the predicate, `scanFilter` answers exactly. |
 | `neighbors.go` | Edge management: alpha-pruned `selectNeighbors`, `pruneConnections`, `connect`, adjacency lookups. |
-| `node.go` | A single vector: `id`, `vector`, per-layer neighbor lists. |
+| `node.go` | A single vector: `id`, `vector`, its upper-layer neighbor lists. |
+| `layer0.go` | Every node's layer-0 neighbor list, as fixed blocks of `uint32` in chunks owned by the graph. |
 | `distance.go` | `Metric` (Cosine / Euclidean / DotProduct) + the portable unrolled kernels. Everything returns **smaller = closer**, so the graph never branches on the metric. |
 | `distance_arm64.go`, `dot_arm64.s`, `l2_arm64.s` | NEON `Dot` / `SquaredEuclidean` on arm64. Every other platform (amd64 included) and `-tags purego` use the Go kernels via `distance_generic.go`. |
 | `pq.go` | Hand-written min/max heaps over `[]candidate` — no `container/heap`, no interface boxing. |
@@ -65,7 +66,7 @@ silently different graph.
 
 `M=1` is not a thin graph, it is an undefined one: levels are drawn from
 `-ln(u)/ln(M)`, and `ln(1)` is zero, so `ml` is `+Inf`, `randomLevel` returns
-`MaxInt64`, and `make([][]int, level+1)` panics on the **first** `Insert` — with
+`MaxInt64`, and `make([][]uint32, level)` panics on the **first** `Insert` — with
 nothing in the message connecting it to the line that chose `M`.
 
 ## Design decisions that matter

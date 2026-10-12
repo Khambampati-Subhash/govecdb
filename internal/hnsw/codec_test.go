@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"reflect"
 	"runtime"
+	"slices"
 	"testing"
 
 	"github.com/khambampati-subhash/govecdb/internal/snapshot"
@@ -77,8 +78,14 @@ func assertSameGraph(t *testing.T, want, got *Graph) {
 		if !reflect.DeepEqual(g.vector, w.vector) {
 			t.Fatalf("node %d vector differs", i)
 		}
-		if !reflect.DeepEqual(g.neighbors, w.neighbors) {
-			t.Fatalf("node %d neighbors differ:\n got %v\nwant %v", i, g.neighbors, w.neighbors)
+		if g.topLevel() != w.topLevel() {
+			t.Fatalf("node %d top level = %d, want %d", i, g.topLevel(), w.topLevel())
+		}
+		for lc := 0; lc <= w.topLevel(); lc++ {
+			gn, wn := got.neighborsAt(i, lc), want.neighborsAt(i, lc)
+			if !slices.Equal(gn, wn) {
+				t.Fatalf("node %d layer %d neighbors differ:\n got %v\nwant %v", i, lc, gn, wn)
+			}
 		}
 	}
 

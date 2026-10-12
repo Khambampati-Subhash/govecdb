@@ -102,6 +102,7 @@ func (g *Graph) insertPrepared(id string, vec []float32) {
 // Nothing can reach it until link connects it.
 func (g *Graph) place(id string, vec []float32, level int) int {
 	idx := len(g.nodes)
+	g.addSlot0(idx)
 	g.nodes = append(g.nodes, newNode(id, vec, level))
 	g.ids[id] = idx
 	g.touch(id)
@@ -151,7 +152,7 @@ func (g *Graph) link(st *searchState, idx int) {
 		// bidirectional, and a dead neighbor still routes, so linking to a
 		// tombstone beats isolation.
 		if len(neighbors) == 0 {
-			neighbors = append(neighbors, cur)
+			neighbors = append(neighbors, uint32(cur))
 		}
 
 		// The node's own edges first. The prune is a no-op serially — at most
@@ -160,16 +161,23 @@ func (g *Graph) link(st *searchState, idx int) {
 		// would refuse.
 		g.lockNode(st, idx)
 		for _, nb := range neighbors {
-			g.connect(idx, nb, lc)
+			// A layer-0 block holds one edge past the cap and no more, so a
+			// list already there is pruned before it takes another. Serially
+			// this never fires — the list starts empty and gets at most
+			// maxConn — so a serial build is unchanged by it.
+			if len(g.neighborsAt(idx, lc)) > g.maxConn(lc) {
+				g.pruneConnections(st, idx, lc)
+			}
+			g.connect(idx, int(nb), lc)
 		}
 		g.pruneConnections(st, idx, lc)
 		g.unlockNode(st, idx)
 
 		for _, nb := range neighbors {
-			g.lockNode(st, nb)
-			g.connect(nb, idx, lc)
-			g.pruneConnections(st, nb, lc)
-			g.unlockNode(st, nb)
+			g.lockNode(st, int(nb))
+			g.connect(int(nb), idx, lc)
+			g.pruneConnections(st, int(nb), lc)
+			g.unlockNode(st, int(nb))
 		}
 		if len(w) > 0 {
 			cur = w[0].idx // closest, to seed the next lower layer

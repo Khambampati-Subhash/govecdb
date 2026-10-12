@@ -258,11 +258,11 @@ func (g *Graph) searchWithout(q []float32, k, ef, hide int) []string {
 		for improved := true; improved; {
 			improved = false
 			for _, nb := range g.neighborsAt(cur, lc) {
-				if nb == hide {
+				if int(nb) == hide {
 					continue
 				}
 				if d := g.dist(g.nodes[nb].vector, q); d < bestDist {
-					bestDist, cur, improved = d, nb, true
+					bestDist, cur, improved = d, int(nb), true
 				}
 			}
 		}

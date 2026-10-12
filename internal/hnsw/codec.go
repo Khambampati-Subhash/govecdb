@@ -158,7 +158,7 @@ func (g *Graph) WriteTo(w io.Writer) (int64, error) {
 	e.u32(uint32(g.maxLevel))
 	e.u64(uint64(len(g.nodes)))
 
-	for _, n := range g.nodes {
+	for i, n := range g.nodes {
 		var flags byte
 		if n.deleted {
 			flags = 1
@@ -171,7 +171,8 @@ func (g *Graph) WriteTo(w io.Writer) (int64, error) {
 		e.u32(uint32(n.topLevel()))
 		e.vector(n.vector)
 
-		for _, layer := range n.neighbors {
+		for lc := 0; lc <= n.topLevel(); lc++ {
+			layer := g.neighborsAt(i, lc)
 			e.u32(uint32(len(layer)))
 			e.indices(layer)
 		}
@@ -409,10 +410,10 @@ func (e *encoder) vector(v []float32) {
 }
 
 // indices writes a neighbor list as uint32s.
-func (e *encoder) indices(ix []int) {
+func (e *encoder) indices(ix []uint32) {
 	b := e.scratch(len(ix) * 4)
 	for i, v := range ix {
-		byteOrder.PutUint32(b[i*4:], uint32(v))
+		byteOrder.PutUint32(b[i*4:], v)
 	}
 	e.raw(b)
 }
@@ -508,13 +509,16 @@ func (d *decoder) node(g *Graph, nodeCount uint32) (*node, error) {
 	}
 
 	n := &node{
-		id:        string(id), // copies; scratch is reused by the next node
-		vector:    vec,
-		neighbors: make([][]int, topLevel+1),
-		deleted:   flags&1 != 0,
+		id:      string(id), // copies; scratch is reused by the next node
+		vector:  vec,
+		upper:   make([][]uint32, topLevel),
+		deleted: flags&1 != 0,
 	}
+	// The caller appends this node next, so its slot is len(g.nodes).
+	slot := len(g.nodes)
+	g.addSlot0(slot)
 
-	for lc := range n.neighbors {
+	for lc := 0; lc <= int(topLevel); lc++ {
 		count := d.u32()
 		if d.err != nil {
 			return nil, d.err
@@ -535,7 +539,14 @@ func (d *decoder) node(g *Graph, nodeCount uint32) (*node, error) {
 		if d.err != nil {
 			return nil, d.err
 		}
-		layer := make([]int, count)
+		var layer []uint32
+		if lc == 0 {
+			b := g.block0(slot)
+			b[0] = count
+			layer = b[1 : 1+count]
+		} else {
+			layer = make([]uint32, count)
+		}
 		for i := range layer {
 			idx := byteOrder.Uint32(raw[i*4:])
 			// An out-of-range neighbor is the one corruption that would not
@@ -545,9 +556,11 @@ func (d *decoder) node(g *Graph, nodeCount uint32) (*node, error) {
 				return nil, fmt.Errorf("%w: neighbor %d on layer %d, %d nodes exist",
 					ErrCorruptGraph, idx, lc, nodeCount)
 			}
-			layer[i] = int(idx)
+			layer[i] = idx
 		}
-		n.neighbors[lc] = layer
+		if lc > 0 {
+			n.upper[lc-1] = layer
+		}
 	}
 	return n, nil
 }

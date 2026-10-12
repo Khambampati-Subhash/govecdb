@@ -202,7 +202,7 @@ func (g *Graph) swap(fresh *Graph, workers int) int {
 	// caught up with, and those are not reclaimed — the old graph made the
 	// same ones.
 	reclaimed := g.numDeleted - fresh.numDeleted
-	g.nodes, g.ids = fresh.nodes, fresh.ids
+	g.nodes, g.ids, g.layer0 = fresh.nodes, fresh.ids, fresh.layer0
 	g.entry, g.maxLevel = fresh.entry, fresh.maxLevel
 	g.numDeleted = fresh.numDeleted
 	g.dirty = nil

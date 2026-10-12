@@ -65,8 +65,15 @@ A five-agent review against a millions-of-vectors, continuous-ingest workload
 - **Not worth touching, measured:** the read lock (search scales 9.3× at 16
   goroutines with or without it), the `searchState` pool, the heaps (~2%), the
   visited set (<3.4%).
-- **Open, measured and deferred:** a flat layer-0 layout with `uint32` neighbor ids (−14–16% search,
-  −150 B/vector, no codec change — the codec already writes `uint32`); a
+- **The flat layer-0 layout landed after v1.5.0 and was a memory win, not a speed
+  one:** −170–195 B/vector (563 → ~380 B of graph beyond each vector), insert
+  6 → 4 allocs, snapshot load 50,676 → 31,386 allocs — but cold search moved
+  only −1–2%, not the −14–16% the review predicted. A neighbor's *vector* is
+  still `*node` → slice header → data, and `touchLines` already overlaps those
+  misses. A flat vector arena is the next lever, but compaction shares vector
+  memory between the old and new graph today and an arena would double the
+  largest thing in memory during every compaction — decide that first.
+- **Open, measured and deferred:** a
   sub-quadratic prune; a per-collection read-only gauge (needs a `Stats` field).
 - **The WAL fsync outside its lock is a Linux win, a macOS loss** (APFS blocks
   writes during an fsync: 12.8 → 27 µs/append at a 2 ms interval). Production
@@ -240,7 +247,7 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
 - `M` (neighbors/node) is **structural** — set once, changing it needs a rebuild.
   Must be **0 (use the default 16) or >= 2**; `New` returns `ErrInvalidConfig`
   otherwise. `M=1` is undefined, not merely thin: `ml = 1/ln(M)` is `+Inf`, so
-  `randomLevel` returns `MaxInt64` and `make([][]int, level+1)` panics on the
+  `randomLevel` returns `MaxInt64` and `make([][]uint32, level)` panics on the
   *first* `Insert`. Negative M is refused rather than defaulted, so a caller's
   mistake does not become a silently different graph. `validateHeader` enforces
   `M >= 2` too — a stored config is the *effective* one, so a loaded graph would

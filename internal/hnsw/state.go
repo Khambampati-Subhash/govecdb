@@ -20,9 +20,9 @@ type searchState struct {
 	found    []candidate // searchLayer's sorted output; valid until its next call
 	rejected []candidate // selectNeighbors' backfill list
 	pruneBuf []candidate // pruneConnections' distance-annotated neighbors
-	selected []int       // insert's chosen neighbors for the current layer
+	selected []uint32    // insert's chosen neighbors for the current layer
 	queryBuf []float32   // normalized copy of the caller's query
-	nbrBuf   []int       // a neighbor list copied out under its lock
+	nbrBuf   []uint32    // a neighbor list copied out under its lock
 	fresh    []int       // searchLayer's unvisited neighbors of one expansion
 
 	// sink receives the loads touchLines makes, so the compiler cannot drop

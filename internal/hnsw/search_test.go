@@ -30,7 +30,8 @@ func (g *Graph) searchLayerOnePass(st *searchState, query []float32, entryPoint,
 		if len(results) >= ef && c.dist > results[0].dist {
 			break
 		}
-		for _, nb := range g.readNeighbors(st, c.idx, lc) {
+		for _, nb32 := range g.readNeighbors(st, c.idx, lc) {
+			nb := int(nb32)
 			if st.visited.visit(nb) {
 				continue
 			}

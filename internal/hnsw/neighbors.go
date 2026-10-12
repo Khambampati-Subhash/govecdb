@@ -20,11 +20,11 @@ import (
 // The selection is appended to dst[:0] and returned, so the caller decides where
 // it lives: pruneConnections hands in the node's own neighbor array and the
 // result overwrites it in place. dst must not alias cands.
-func (g *Graph) selectNeighbors(st *searchState, cands []candidate, m int, dst []int) []int {
+func (g *Graph) selectNeighbors(st *searchState, cands []candidate, m int, dst []uint32) []uint32 {
 	selected := dst[:0]
 	if len(cands) <= m {
 		for _, c := range cands {
-			selected = append(selected, c.idx)
+			selected = append(selected, uint32(c.idx))
 		}
 		return selected
 	}
@@ -43,7 +43,7 @@ func (g *Graph) selectNeighbors(st *searchState, cands []candidate, m int, dst [
 			}
 		}
 		if keep {
-			selected = append(selected, c.idx)
+			selected = append(selected, uint32(c.idx))
 		} else {
 			rejected = append(rejected, c)
 		}
@@ -57,7 +57,7 @@ func (g *Graph) selectNeighbors(st *searchState, cands []candidate, m int, dst [
 	// with backfill off, recall on the clustered corpus that motivated the
 	// suspicion fell from 0.954 to 0.94. Alpha was the cause; this stays.
 	for i := 0; len(selected) < m && i < len(rejected); i++ {
-		selected = append(selected, rejected[i].idx)
+		selected = append(selected, uint32(rejected[i].idx))
 	}
 
 	st.rejected = rejected
@@ -83,7 +83,7 @@ func (g *Graph) pruneConnections(st *searchState, idx, lc int) {
 	self := g.nodes[idx].vector
 	cands := st.pruneBuf[:0]
 	for _, nb := range nbrs {
-		cands = append(cands, candidate{nb, g.dist(g.nodes[nb].vector, self)})
+		cands = append(cands, candidate{int(nb), g.dist(g.nodes[nb].vector, self)})
 	}
 	st.pruneBuf = cands
 
@@ -114,26 +114,42 @@ func (g *Graph) pruneConnections(st *searchState, idx, lc int) {
 		return cmp.Compare(a.dist, b.dist)
 	})
 
-	g.nodes[idx].neighbors[lc] = g.selectNeighbors(st, cands, maxConn, nbrs)
+	// For layer 0, nbrs is a view of the block itself, so the selection lands
+	// in place and only the count is left to write.
+	selected := g.selectNeighbors(st, cands, maxConn, nbrs)
+	if lc == 0 {
+		g.block0(idx)[0] = uint32(len(selected))
+		return
+	}
+	g.nodes[idx].upper[lc-1] = selected
 }
 
 // connect adds `to` to `from`'s neighbor list on layer lc, skipping duplicates.
 //
-// A list is given room for maxConn+1 the first time it is full: insert appends
-// one edge and immediately prunes back to maxConn in place, so that one spare
-// slot is all a list ever needs and it never reallocates again. Plain append
-// would double a full 32-edge list to 64 on the first overflow, which is both
+// On layer 0 the list is a block with room for maxConn+1 (layer0.go): insert
+// appends one edge and immediately prunes back. An upper-layer list is given
+// that same room the first time it is full, so it never reallocates again —
+// plain append would double a full list on the first overflow, which is both
 // the allocation and twice the memory the list will ever use.
 func (g *Graph) connect(from, to, lc int) {
+	if lc == 0 {
+		b := g.block0(from)
+		if slices.Contains(b[1:1+b[0]], uint32(to)) {
+			return
+		}
+		b[1+b[0]] = uint32(to) // past the block when full: link prunes first
+		b[0]++
+		return
+	}
 	n := g.nodes[from]
-	nbrs := n.neighbors[lc]
-	if slices.Contains(nbrs, to) {
+	nbrs := n.upper[lc-1]
+	if slices.Contains(nbrs, uint32(to)) {
 		return
 	}
 	if len(nbrs) == cap(nbrs) {
 		nbrs = slices.Grow(nbrs, max(1, g.maxConn(lc)+1-len(nbrs)))
 	}
-	n.neighbors[lc] = append(nbrs, to)
+	n.upper[lc-1] = append(nbrs, uint32(to))
 }
 
 // readNeighbors returns node idx's neighbors on layer lc for a traversal to
@@ -141,7 +157,7 @@ func (g *Graph) connect(from, to, lc int) {
 // workers rewrite lists in place, so it is a copy taken under the node's lock,
 // valid until the next readNeighbors on st — and it leaves out nodes still
 // being linked, so a worker only ever builds on finished ones.
-func (g *Graph) readNeighbors(st *searchState, idx, lc int) []int {
+func (g *Graph) readNeighbors(st *searchState, idx, lc int) []uint32 {
 	if st.locks == nil {
 		return g.neighborsAt(idx, lc)
 	}
@@ -173,14 +189,20 @@ func (g *Graph) unlockNode(st *searchState, idx int) {
 	}
 }
 
-// neighborsAt returns node idx's neighbor slice on layer lc (nil if the node
-// does not reach that layer).
-func (g *Graph) neighborsAt(idx, lc int) []int {
+// neighborsAt returns node idx's neighbor slots on layer lc (nil if the node
+// does not reach that layer). On layer 0 it is a view of the node's block, with
+// the block's spare room as its capacity, so pruneConnections can select into
+// it in place.
+func (g *Graph) neighborsAt(idx, lc int) []uint32 {
+	if lc == 0 {
+		b := g.block0(idx)
+		return b[1 : 1+b[0]]
+	}
 	n := g.nodes[idx]
 	if lc > n.topLevel() {
 		return nil
 	}
-	return n.neighbors[lc]
+	return n.upper[lc-1]
 }
 
 // maxConn is the neighbor cap for a layer: denser on layer 0.
