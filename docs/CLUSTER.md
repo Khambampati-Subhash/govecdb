@@ -36,9 +36,9 @@ keeps no `require` block.
 5. **Truncation ignores followers** — it deletes below the oldest retained
    snapshot only.
 6. **`Match.Distance` is comparable across shards of one spec**: one kernel per
-   metric, cosine normalized on insert. arm64 (NEON, FMA) and amd64 can differ
-   by ulps, which can change a tie-break but never correctness — hence the
-   `(Distance, ID)` merge order.
+   metric, cosine normalized on insert. arm64 (NEON) and amd64 (AVX2, or the Go
+   kernels on a CPU without it) can differ by ulps, which can change a
+   tie-break but never correctness — hence the `(Distance, ID)` merge order.
 7. **Search width per shard follows the shard's own size**: `SuggestedEf` and
    `Calibrate` already use the shard's `Len`.
 

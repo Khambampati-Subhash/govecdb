@@ -25,6 +25,16 @@ order.
   writes wait; the `Index` contract now says an implementation should not block
   searches for the rebuild's length.
 
+### Changed
+
+- **amd64 distance kernels are AVX2+FMA assembly**, 5.8–8.9× faster per call
+  than the Go kernels amd64 ran until now (Dot at dim 512: 157 → 18.9 ns, Xeon
+  at 2.3 GHz). Chosen once at startup by CPUID and XGETBV; a CPU or OS without
+  AVX2 and FMA, and `-tags purego`, keep the Go kernels. End to end on the same
+  machine: insert 2.5× (`BenchmarkInsert`), search 1.8–2.0×, and a 50K × 512
+  `AddBatch` on four cores 1,918 → 808 µs per vector. Distances differ from the
+  Go kernels by ulps, as NEON's do; no format or API changed.
+
 ## [1.4.1] - 2026-10-09
 
 A test-only release: v1.4.0's code is unchanged, and v1.4.0 was never

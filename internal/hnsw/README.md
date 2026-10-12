@@ -106,7 +106,7 @@ Two changes took search from **795 allocations to 2**:
 - `container/heap` passes values as `any`, boxing every candidate. The heaps here
   operate on `[]candidate` directly.
 
-### 4. Unrolled distance kernels, and NEON on arm64
+### 4. Unrolled distance kernels, NEON on arm64 and AVX2 on amd64
 Independent accumulators break the floating-point dependency chain so the CPU
 can overlap additions, and slices are re-sliced to a common length to hoist
 bounds checks. Euclidean went 74.5 ns → 26.6 ns.
@@ -130,7 +130,28 @@ left is the graph walk and the cache misses fetching each candidate's vector,
 which no kernel — in any language — removes. The summation order differs from
 the Go kernels, so results differ by ulps across architectures; every
 graph-vs-graph equality test compares graphs built with the same kernel.
-There is no amd64 assembly because nothing here can test it.
+
+On amd64 the kernels are AVX2+FMA: 64 floats per iteration into eight 8-lane
+accumulators — four measured 21% slower, waiting on FMA latency — then an
+8-wide loop and a scalar tail. AVX2 is not in amd64's baseline, so CPUID and
+XGETBV pick the kernel once at startup, and a CPU or OS without it runs the Go
+code. Intel Xeon at 2.3 GHz (cloud VM, 4 vCPUs), L1-resident, against
+`-tags purego` on the same commit:
+
+| dim | Dot, Go → AVX2 | SquaredEuclidean, Go → AVX2 |
+|---:|---:|---:|
+| 128 | 41.0 → 7.0 ns | 46.0 → 8.0 ns |
+| 512 | 157 → 18.9 ns | 183 → 22.9 ns |
+| 768 | 235 → 26.3 ns | 275 → 32.0 ns |
+| 1536 | 474 → 52.8 ns | 533 → 65.8 ns |
+
+The gain is larger than NEON's because the Go kernels are slower on x86 (157
+against 77 ns at dim 512 on the M4), not because the assembly is faster: the
+AVX2 kernel at dim 512 is 18.9 ns against NEON's 28.5. End to end on the same
+machine: `BenchmarkInsert` 1,110 → 448 µs (2.5x), `BenchmarkSearch` 214 → 119
+µs (1.8x), `BenchmarkSearchByDimension` 1.9–2.0x from dim 384 up. AVX-512 is
+not used yet: it is a third kernel, and on some Intel parts it lowers the
+core's clock for everything else — to be measured, not assumed.
 
 **Those cache misses are most of a large search, and touching first hides
 them.** At 100K × 512 a distance inside a search costs ~290 ns against ~80 ns
@@ -489,8 +510,8 @@ half-solved twice.
 ## Not implemented yet (deliberately)
 
 Fine-grained write locking, fully **online** compaction — `Compact` no longer
-stops searches, but writers still wait for it — and amd64 SIMD assembly (arm64
-has NEON kernels). Each is a separate upcoming slice; see
+stops searches, but writers still wait for it. Each is a separate upcoming
+slice; see
 `docs/MIGRATION.md`.
 
 ```bash

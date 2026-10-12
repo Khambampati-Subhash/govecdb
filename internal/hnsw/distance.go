@@ -2,7 +2,8 @@
 // CLOSER, so the graph never has to branch on which metric is in use.
 //
 // The kernels below are the portable ones. On arm64 Dot and SquaredEuclidean
-// dispatch to NEON assembly instead (distance_arm64.go); see the README for why
+// dispatch to NEON assembly instead (distance_arm64.go), and on amd64 to AVX2
+// assembly where the CPU has it (distance_amd64.go); see the README for why
 // that is Go assembly and not cgo.
 //
 // The Go kernels are hand-unrolled with eight independent accumulators. This is not

@@ -427,8 +427,8 @@ vector over a 40 MiB scan) — the most a full rewrite could buy, paid for with
 CGO, cross-compilation and race-detector coverage. What remains is DRAM
 latency, which no language fixes: touching neighbor vectors before scoring them
 took search a further 1.7–1.9×, and quantization (item 6) cuts the bytes
-fetched. So: NEON assembly shipped, amd64 AVX2 is the open kernel task, and the
-core stays Go.
+fetched. So: NEON assembly shipped, then AVX2 for amd64 (157 → 18.9 ns per Dot
+at dim 512 on a Xeon), and the core stays Go.
 
 ### Out of scope for v2 as well
 

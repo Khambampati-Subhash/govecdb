@@ -65,8 +65,7 @@ A five-agent review against a millions-of-vectors, continuous-ingest workload
 - **Not worth touching, measured:** the read lock (search scales 9.3× at 16
   goroutines with or without it), the `searchState` pool, the heaps (~2%), the
   visited set (<3.4%).
-- **Open, measured and deferred:** amd64 AVX2 kernels (untestable on the dev
-  Mac); a flat layer-0 layout with `uint32` neighbor ids (−14–16% search,
+- **Open, measured and deferred:** a flat layer-0 layout with `uint32` neighbor ids (−14–16% search,
   −150 B/vector, no codec change — the codec already writes `uint32`); a
   sub-quadratic prune; a per-collection read-only gauge (needs a `Stats` field).
 - **The WAL fsync outside its lock is a Linux win, a macOS loss** (APFS blocks
@@ -321,13 +320,15 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   (`TestSearchLayerMatchesOnePass`). `fresh` is **never `nbrBuf`**: in a batch
   `readNeighbors` returns `nbrBuf` itself. One load per vector, or per other
   line, measured as no gain.
-- **arm64 kernels are NEON Go assembly** (`dot_arm64.s`, `l2_arm64.s`; Go
-  fallback elsewhere and under `-tags purego`). **Do not move the core to Rust
+- **arm64 kernels are NEON Go assembly** (`dot_arm64.s`, `l2_arm64.s`), **amd64
+  kernels AVX2+FMA** (`dot_amd64.s`, `l2_amd64.s`, chosen at startup by CPUID
+  and XGETBV — older x86 gets the Go kernels); Go fallback elsewhere and under
+  `-tags purego`. The dev Mac cannot run the amd64 ones: CI's ubuntu jobs and
+  `TestAMD64DispatchBothWays` (both sides of the branch) are what test them. **Do not move the core to Rust
   or C:** measured, a cgo call is 19.5 ns before any work, so per-distance FFI
   loses to Go asm at every dimension (45.9 vs 25.9 ns at 512), C and Rust ran
   identically, and moving the whole search loop native buys ≤14% for losing
-  CGO-free builds. The harness is on local branch `exp/native-core`. amd64 has
-  no SIMD yet — untestable on the dev machine.
+  CGO-free builds. The harness is on local branch `exp/native-core`.
 - `chunkPerWorker` is **4**: a chunk holds the graph's write lock, and readers
   queue behind it (search p50 under ingest 15.5 → 8.3 ms vs 8). The root's
   `applyGroup` is `4 × workers` to match — keep the two equal.

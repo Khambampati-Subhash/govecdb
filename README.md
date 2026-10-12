@@ -73,7 +73,7 @@ Worth knowing before you adopt it, rather than after:
 | **Linux and macOS only** | The log and snapshot store fsync the containing *directory*, which is not portable to Windows. Untested there. |
 | **`Compact()` pauses writes** | Searches keep running through it; writes wait for the full rebuild. You choose the moment; the database never triggers it. |
 | **Writers serialize** | Reads scale across cores and never wait for a writer's fsync. Separate writes do not run in parallel; one `AddBatch` links its vectors on every core (`WithInsertWorkers`), and so does log replay. |
-| **SIMD on arm64 only** | Distance kernels are NEON assembly on arm64; amd64 still runs the portable Go kernels (~2–3× slower per distance). |
+| **SIMD on arm64 and amd64 only** | Distance kernels are NEON assembly on arm64 and AVX2+FMA on amd64 CPUs that have it (Haswell, 2013, and later; checked at startup). Other platforms, and older x86, run the portable Go kernels. |
 | **One database is one index** | Many indexes in one process means [running it as a service](docs/SERVICE.md); the library itself is still one directory, one index. |
 | **Selective filters approach a scan** | Past roughly one vector in a hundred, scanning the metadata is the better tool. |
 | **The service is a single process** | No clustering, no replication. [v2 item 8](docs/MIGRATION.md#v2-scope). |

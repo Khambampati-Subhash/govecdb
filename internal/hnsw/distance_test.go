@@ -308,7 +308,7 @@ func TestMetricWiring(t *testing.T) {
 	}
 }
 
-// TestKernelMatchesGeneric holds the platform kernel (NEON on arm64) to the
+// TestKernelMatchesGeneric holds the platform kernel (NEON, AVX2) to the
 // portable one at every length up to 200 — each side of the 32-wide main loop,
 // the 4-wide loop and the scalar tail — and at several start offsets, since a
 // sub-slice of a reused buffer is rarely 16-byte aligned. On a platform with
