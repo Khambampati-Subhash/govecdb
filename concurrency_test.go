@@ -669,3 +669,169 @@ func TestCompactKeepsSearchesAndWritesRunning(t *testing.T) {
 		}
 	}
 }
+
+// holdFirstGroup makes db's first write group wait until release is closed,
+// and records the size of every group in sizes. holding is closed once the
+// first group is being held. The hook runs under writeMu, so sizes is safe to
+// read once every writer has returned.
+func holdFirstGroup(db *DB) (holding, release chan struct{}, sizes *[]int) {
+	holding, release = make(chan struct{}), make(chan struct{})
+	sizes = new([]int)
+	db.onWriteGroup = func(n int) {
+		*sizes = append(*sizes, n)
+		if len(*sizes) == 1 {
+			close(holding)
+			<-release
+		}
+	}
+	return holding, release, sizes
+}
+
+// waitQueued waits until n puts are queued behind writeMu.
+func waitQueued(t *testing.T, db *DB, n int) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		db.pendingMu.Lock()
+		queued := len(db.pending)
+		db.pendingMu.Unlock()
+		if queued == n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d puts queued, want %d", queued, n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestConcurrentAddsShareACommit: writers that queue behind one in progress
+// are written together by whichever of them takes writeMu next — one append,
+// one fsync, one apply — and each still gets its own answer. The first group
+// is held open by a hook, so the grouping is deterministic, not a race won.
+func TestConcurrentAddsShareACommit(t *testing.T) {
+	const dim, writers = 8, 16
+	db, _ := openDB(t, WithDimension(dim))
+	holding, release, sizes := holdFirstGroup(db)
+	rng := rand.New(rand.NewSource(70))
+
+	errs := make(chan error, writers)
+	add := func(i int, v []float32) { errs <- db.Add(Vector{ID: fmt.Sprintf("v%d", i), Values: v}) }
+	go add(0, vec(rng, dim))
+	<-holding
+	for i := 1; i < writers; i++ {
+		go add(i, vec(rng, dim))
+	}
+	waitQueued(t, db, writers-1)
+	close(release)
+	for range writers {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if !slices.Equal(*sizes, []int{1, writers - 1}) {
+		t.Fatalf("groups of %v, want [1 %d]: the queued writers were not written together", *sizes, writers-1)
+	}
+	if s := db.Stats(); s.Live != writers || s.LastSeq != writers {
+		t.Fatalf("%+v: want %d live and %d records", s, writers, writers)
+	}
+}
+
+// TestWriteGroupsAreCapped: a group holds at most maxBatch vectors, so one
+// queue of writers cannot make a single unbounded append and apply — and a
+// request the cap left behind is still written before its caller returns.
+func TestWriteGroupsAreCapped(t *testing.T) {
+	const dim = 8
+	db, _ := openDB(t, WithDimension(dim), WithLimits(defaultMaxIDBytes, defaultMaxK, defaultMaxEf, 4, defaultMaxMetadata))
+	holding, release, sizes := holdFirstGroup(db)
+	rng := rand.New(rand.NewSource(71))
+
+	errs := make(chan error, 12)
+	go func() { errs <- db.Add(Vector{ID: "first", Values: vec(rng, dim)}) }()
+	<-holding
+	// Requests of 3, 1, 2, 1, 3 and 1 vectors, queued in that order.
+	reqs := [][]Vector{}
+	for i, n := range []int{3, 1, 2, 1, 3, 1} {
+		vs := make([]Vector, n)
+		for j := range vs {
+			vs[j] = Vector{ID: fmt.Sprintf("r%d-%d", i, j), Values: vec(rng, dim)}
+		}
+		reqs = append(reqs, vs)
+	}
+	for i, vs := range reqs {
+		go func() { errs <- db.AddBatch(vs) }()
+		waitQueued(t, db, i+1) // fixes the queue order
+	}
+	close(release)
+	for range 1 + len(reqs) {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// FIFO, at most 4 vectors a group, and never a request split in two:
+	// [3+1] [2+1] [3+1].
+	if want := []int{1, 2, 2, 2}; !slices.Equal(*sizes, want) {
+		t.Fatalf("groups of %v requests, want %v", *sizes, want)
+	}
+	if got := db.Len(); got != 12 {
+		t.Fatalf("Len = %d, want 12", got)
+	}
+}
+
+// TestGroupCommitReplaysToTheSameState: concurrent writers racing on shared
+// ids, through Add and AddBatch, and the state they leave must be the state
+// the log replays to. That is the ordering rule — apply order is log order —
+// checked across groups that mix many callers' records.
+func TestGroupCommitReplaysToTheSameState(t *testing.T) {
+	const dim, writers, ops, ids = 8, 16, 40, 60
+	db, dir := openDB(t, WithDimension(dim))
+
+	var wg sync.WaitGroup
+	for w := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rng := rand.New(rand.NewSource(int64(80 + w)))
+			for i := range ops {
+				id := func() string { return fmt.Sprintf("s%d", rng.Intn(ids)) }
+				md := Metadata{"w": int64(w), "i": int64(i)}
+				var err error
+				if i%3 == 0 {
+					err = db.AddBatch([]Vector{
+						{ID: id(), Values: vec(rng, dim), Metadata: md},
+						{ID: id(), Values: vec(rng, dim), Metadata: md},
+					})
+				} else {
+					err = db.Add(Vector{ID: id(), Values: vec(rng, dim), Metadata: md})
+				}
+				if err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	before := make(map[string]Vector)
+	for i := range ids {
+		id := fmt.Sprintf("s%d", i)
+		if v, err := db.Get(id); err == nil {
+			before[id] = v
+		}
+	}
+	db = reopen(t, db, dir, WithDimension(dim))
+	for id, want := range before {
+		got, err := db.Get(id)
+		if err != nil {
+			t.Fatalf("%s: %v after replay", id, err)
+		}
+		if !slices.Equal(got.Values, want.Values) || got.Metadata["w"] != want.Metadata["w"] || got.Metadata["i"] != want.Metadata["i"] {
+			t.Fatalf("%s replays to %v %v, was %v %v", id, got.Values, got.Metadata, want.Values, want.Metadata)
+		}
+	}
+	if db.Len() != len(before) {
+		t.Fatalf("Len = %d after replay, was %d", db.Len(), len(before))
+	}
+}

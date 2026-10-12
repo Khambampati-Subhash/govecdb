@@ -228,7 +228,7 @@ api.del -> validate
 api.search -> validate
 
 # --- the write ordering that makes durability work ---
-validate -> db.locks: "writes: take writeMu"
+validate -> db.locks: "writes: queue, take writeMu,\nwrite every queued put as one group"
 db.locks -> db.wal_writer: "1. append"
 db.wal_writer -> storage.wal_files: "fsync per policy\n(SyncAlways: commit point)" {
   style.stroke: "#FFB74D"

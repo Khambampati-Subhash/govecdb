@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -85,6 +86,16 @@ type DB struct {
 	// and is how Close waits for one in flight. Taken before writeMu, never
 	// after it.
 	snapMu sync.Mutex
+
+	// pending is the queue of puts waiting for writeMu; whoever takes writeMu
+	// next writes them as one group (see put). Guarded by pendingMu, which is
+	// only ever held to touch the queue, and may be taken under writeMu.
+	pendingMu sync.Mutex
+	pending   []*putRequest
+
+	// onWriteGroup, when set, runs as a group is written, with its number of
+	// requests. Tests use it to hold a group open while others queue.
+	onWriteGroup func(requests int)
 
 	// compactMu serializes compactions and is how Close waits for one in
 	// flight. A compaction takes writeMu only for its swap, so writeMu alone
@@ -289,26 +300,14 @@ func Open(dir string, opts ...Option) (db *DB, err error) {
 //
 // The log is written first, then the index, so a crash between them costs a
 // replayed record rather than an acknowledged write that vanished.
+//
+// Concurrent calls share a commit (see put): under SyncAlways sixteen writers
+// pay one fsync between them rather than one each.
 func (db *DB) Add(v Vector) error {
 	if err := db.opts.validateVector(v); err != nil {
 		return err
 	}
-
-	db.writeMu.Lock()
-	defer db.writeMu.Unlock()
-
-	if err := db.writable(); err != nil {
-		return err
-	}
-	db.buf = encodePut(db.buf[:0], v)
-	if _, err := db.log.Append(wal.TypePut, db.buf); err != nil {
-		return db.fail(err)
-	}
-	if err := db.applyPut(v); err != nil {
-		return err
-	}
-	db.kickCalibration(db.index.Len())
-	return nil
+	return db.put([]Vector{v})
 }
 
 // AddBatch stores many vectors. It validates all of them before writing any, so
@@ -334,21 +333,117 @@ func (db *DB) AddBatch(vs []Vector) error {
 		}
 	}
 
+	return db.put(vs)
+}
+
+// putRequest is one Add or AddBatch waiting for writeMu. Whoever holds it next
+// may write this request along with its own, so done and err are guarded by
+// writeMu, not by the goroutine that made the request.
+type putRequest struct {
+	vs   []Vector
+	done bool
+	err  error
+}
+
+// put writes vs — and every other put queued behind writeMu with it — as one
+// group: one log append, one fsync under SyncAlways, one parallel apply.
+//
+// # Why group commit, and why here
+//
+// writeMu serializes writers across append and apply, so concurrent Adds used
+// to run one at a time however many cores there were: measured at 10K × 256,
+// sixteen goroutines adding 1,600 vectors managed 1,704 a second against one
+// goroutine's 1,730 — and 177 against 168 under SyncAlways, every one paying
+// its own fsync. The same vectors in one AddBatch went at 18,961 and 17,807,
+// because a batch is logged whole and linked on every core. Group commit hands
+// concurrent writers that path without touching the graph's locking: callers
+// queue, and whoever takes writeMu next writes the queue.
+//
+// There is no leader goroutine and nothing to hand off. Every caller queues
+// its request and then takes writeMu itself; one whose request was written by
+// someone else meanwhile finds it done and returns its result. So no caller
+// waits for more than the group in progress and then its own, and a caller
+// alone pays what it always did.
+//
+// What a request is promised is unchanged: put returns once its records are in
+// the log under the sync policy and applied to the index. Log order is queue
+// order, and the apply keeps the last write to an id, as replaying the group
+// would. A request that fails validation never queues; a failure writing the
+// group is every member's failure, as it would be for a batch — the database
+// is read-only by then.
+func (db *DB) put(vs []Vector) error {
+	req := &putRequest{vs: vs}
+	db.pendingMu.Lock()
+	db.pending = append(db.pending, req)
+	db.pendingMu.Unlock()
+
 	db.writeMu.Lock()
 	defer db.writeMu.Unlock()
+	// A group is capped, so this request may not be in the first one taken;
+	// the queue is FIFO and each pass takes at least one request, so it ends.
+	for !req.done {
+		db.writeGroup()
+	}
+	return req.err
+}
 
+// writeGroup takes the oldest queued puts, up to maxBatch vectors but always
+// at least one request, and writes them. Callers hold writeMu.
+func (db *DB) writeGroup() {
+	db.pendingMu.Lock()
+	n, total := 0, 0
+	for n < len(db.pending) && (n == 0 || total+len(db.pending[n].vs) <= db.opts.maxBatch) {
+		total += len(db.pending[n].vs)
+		n++
+	}
+	group := slices.Clone(db.pending[:n])
+	db.pending = append(db.pending[:0], db.pending[n:]...)
+	db.pendingMu.Unlock()
+
+	if db.onWriteGroup != nil {
+		db.onWriteGroup(len(group))
+	}
+	err := db.writePuts(group, total)
+	for _, r := range group {
+		r.done, r.err = true, err
+	}
+}
+
+// writePuts logs and applies a group of put requests holding total vectors.
+// Callers hold writeMu.
+func (db *DB) writePuts(group []*putRequest, total int) error {
 	if err := db.writable(); err != nil {
 		return err
 	}
-	_, err := db.log.AppendBatch(wal.TypePut, len(vs), func(i int) []byte {
-		db.buf = encodePut(db.buf[:0], vs[i])
-		return db.buf
-	})
-	if err != nil {
-		return db.fail(err)
+	vs := group[0].vs
+	if len(group) > 1 {
+		vs = make([]Vector, 0, total)
+		for _, r := range group {
+			vs = append(vs, r.vs...)
+		}
 	}
-	if err := db.applyPuts(vs); err != nil {
-		return err
+
+	if len(vs) == 1 {
+		// The single write is the common case and the cheapest path there is:
+		// Append is 0 allocs, and one PUT needs nothing of the batch machinery.
+		db.buf = encodePut(db.buf[:0], vs[0])
+		if _, err := db.log.Append(wal.TypePut, db.buf); err != nil {
+			return db.fail(err)
+		}
+		if err := db.applyPut(vs[0]); err != nil {
+			return err
+		}
+	} else {
+		_, err := db.log.AppendBatch(wal.TypePut, len(vs), func(i int) []byte {
+			db.buf = encodePut(db.buf[:0], vs[i])
+			return db.buf
+		})
+		if err != nil {
+			return db.fail(err)
+		}
+		if err := db.applyPuts(vs); err != nil {
+			return err
+		}
 	}
 	db.kickCalibration(db.index.Len())
 	return nil

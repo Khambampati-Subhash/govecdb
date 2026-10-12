@@ -3,6 +3,7 @@ package govecdb
 import (
 	"fmt"
 	"math/rand"
+	"sync"
 	"testing"
 )
 
@@ -44,6 +45,57 @@ func BenchmarkWritePath(b *testing.B) {
 						}
 					}
 				}
+			})
+		}
+	}
+}
+
+// BenchmarkConcurrentAdds measures single Adds from 1 and 16 goroutines into a
+// 10,000-vector database. With one writer it is BenchmarkWritePath's "adds";
+// with sixteen it is what group commit buys — concurrent Adds used to
+// serialize and ran no faster than one. ns/op is per vector; vec/s is the
+// rate across all writers.
+func BenchmarkConcurrentAdds(b *testing.B) {
+	const dim, preload = 128, 10_000
+	for _, policy := range []SyncPolicy{SyncAlways, SyncNever} {
+		for _, writers := range []int{1, 16} {
+			b.Run(fmt.Sprintf("%s/writers=%d", policy, writers), func(b *testing.B) {
+				db, err := Open(b.TempDir(), WithDimension(dim), WithSyncPolicy(policy), WithEfCalibration(false))
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer db.Close()
+				rng := rand.New(rand.NewSource(1))
+				for lo := 0; lo < preload; lo += 5000 {
+					vs := make([]Vector, 5000)
+					for i := range vs {
+						vs[i] = Vector{ID: fmt.Sprintf("p%d", lo+i), Values: vec(rng, dim)}
+					}
+					if err := db.AddBatch(vs); err != nil {
+						b.Fatal(err)
+					}
+				}
+				vs := make([]Vector, b.N)
+				for i := range vs {
+					vs[i] = Vector{ID: fmt.Sprintf("w%d", i), Values: vec(rng, dim)}
+				}
+
+				b.ResetTimer()
+				var wg sync.WaitGroup
+				for w := range writers {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						for i := w; i < len(vs); i += writers {
+							if err := db.Add(vs[i]); err != nil {
+								b.Error(err)
+								return
+							}
+						}
+					}()
+				}
+				wg.Wait()
+				b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "vec/s")
 			})
 		}
 	}

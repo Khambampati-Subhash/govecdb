@@ -73,12 +73,15 @@ s1: 1 · Validate — no lock held {
   |
 }
 
-s2: 2 · Take writeMu, check writable() {
+s2: "2 · Queue, take writeMu, write the group" {
   class: step
   body: |md
-    One writer at a time across append **and** apply, so
-    apply order is log order. Closed, `WithReadOnly`, or a
-    past durability failure → refused here.
+    Queue a `putRequest`, then take writeMu. Whoever holds it
+    writes **every** queued request as one group (FIFO, ≤ maxBatch
+    vectors, never splitting one) — a caller whose request was
+    written meanwhile just returns its result. One group at a time
+    across append **and** apply, so apply order is log order.
+    Closed, `WithReadOnly`, or a past durability failure → refused.
   |
 }
 
@@ -103,7 +106,7 @@ wal_block: 3 · WAL APPEND — the commit point (under writeMu) {
     body: |md
       User space, not the kernel. Rotates at
       `MaxSegmentBytes`, fsyncing the old segment first.
-      AddBatch streams n records through the same buffer.
+      A group streams its n records through the same buffer.
     |
   }
 
@@ -111,7 +114,7 @@ wal_block: 3 · WAL APPEND — the commit point (under writeMu) {
     class: wal
     body: |md
       **SyncAlways** (zero value) — fsync before return, ~4.24 ms
-      AddBatch: **one** fsync for the whole batch
+      A group — one batch, or many writers' Adds — pays **one** fsync
       **SyncInterval** — ticker fsyncs every 50 ms (default)
       **SyncNever** — ~780 ns; flushed when the buffer fills or on Close
     |
@@ -147,7 +150,7 @@ durable_note: |md
 s4: 4 · Apply — under applyMu (exclusive), still under writeMu {
   class: critical
 
-  route: "Add → applyPut · AddBatch → applyPuts" {
+  route: "one vector → applyPut · a group → applyPuts" {
     class: step
     body: |md
       **One** hold of applyMu covers `index.Insert` **and**
@@ -328,7 +331,7 @@ s5: 5 · kickCalibration(Len) {
   |
 }
 
-s6: "6 · Ack — return nil, release writeMu" {
+s6: "6 · Ack — mark every request in the group done, release writeMu" {
   shape: circle
   style.fill: "#1B4D2E"
   style.stroke: "#66BB6A"
