@@ -8,8 +8,10 @@ import (
 
 // searchRequest is the body of POST .../search.
 type searchRequest struct {
-	// Query is the vector to search near.
-	Query float32s `json:"query"`
+	// Query is the vector to search near, as JSON numbers or, in QueryB64,
+	// base64 (b64.go). Exactly one may be set.
+	Query    float32s    `json:"query"`
+	QueryB64 b64Float32s `json:"query_b64"`
 
 	// K is how many results to return.
 	K int `json:"k"`
@@ -36,8 +38,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	query, err := oneOf("query", req.Query, req.QueryB64)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	search := govecdb.SearchRequest{
-		Query:        req.Query,
+		Query:        query,
 		K:            req.K,
 		Ef:           req.Ef,
 		TargetRecall: req.TargetRecall,
@@ -53,7 +60,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var matches []govecdb.Match
-	err := s.mgr.Use(r.PathValue("name"), func(db *govecdb.DB) error {
+	err = s.mgr.Use(r.PathValue("name"), func(db *govecdb.DB) error {
 		var err error
 		matches, err = db.Search(search)
 		return err

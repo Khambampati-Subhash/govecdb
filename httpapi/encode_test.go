@@ -171,7 +171,7 @@ func TestEncoderMatchesEncodingJSON(t *testing.T) {
 			vs[i] = randVector(r)
 		}
 		for _, v := range vs {
-			got, err := appendVector(nil, v)
+			got, err := appendVector(nil, v, formatNumbers)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -181,7 +181,7 @@ func TestEncoderMatchesEncodingJSON(t *testing.T) {
 		}
 		next := randString(r)
 		for _, more := range []bool{false, true} {
-			got, err := encodePage(nil, vs, next, more)
+			got, err := encodePage(nil, vs, next, more, formatNumbers)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -197,7 +197,7 @@ func TestEncoderMatchesEncodingJSON(t *testing.T) {
 		for range r.IntN(3) {
 			missing = append(missing, randString(r))
 		}
-		got, err = encodeBatch(nil, vs, missing)
+		got, err = encodeBatch(nil, vs, missing, formatNumbers)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -214,7 +214,7 @@ func TestEncoderRefusesWhatEncodingJSONRefused(t *testing.T) {
 		if _, err := encodeMatches(nil, []govecdb.Match{{ID: "a", Distance: f}}); err == nil {
 			t.Errorf("distance %v encoded", f)
 		}
-		if _, err := appendVector(nil, govecdb.Vector{ID: "a", Values: []float32{1, f}}); err == nil {
+		if _, err := appendVector(nil, govecdb.Vector{ID: "a", Values: []float32{1, f}}, formatNumbers); err == nil {
 			t.Errorf("value %v encoded", f)
 		}
 	}
@@ -376,7 +376,13 @@ func BenchmarkEncodePage1000x512(b *testing.B) {
 	b.Run("hand-written", func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			encodePage(nil, vs, "", false)
+			encodePage(nil, vs, "", false, formatNumbers)
+		}
+	})
+	b.Run("b64", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			encodePage(nil, vs, "", false, formatB64)
 		}
 	})
 }
@@ -404,6 +410,8 @@ func BenchmarkDecodeSearch512(b *testing.B) {
 	}
 	b.Run("encoding-json", func(b *testing.B) { benchDecode[oldRequest](b, body) })
 	b.Run("float32s", func(b *testing.B) { benchDecode[searchRequest](b, body) })
+	body, _ = json.Marshal(map[string]any{"query_b64": refB64(q), "k": 10})
+	b.Run("b64", func(b *testing.B) { benchDecode[searchRequest](b, body) })
 }
 
 func BenchmarkDecodeAdd1000x512(b *testing.B) {
@@ -423,6 +431,11 @@ func BenchmarkDecodeAdd1000x512(b *testing.B) {
 	}
 	b.Run("encoding-json", func(b *testing.B) { benchDecode[oldRequest](b, body) })
 	b.Run("float32s", func(b *testing.B) { benchDecode[addRequest](b, body) })
+	for i, v := range vs {
+		in[i] = map[string]any{"id": v.ID, "values_b64": refB64(v.Values), "metadata": map[string]any(v.Metadata)}
+	}
+	body, _ = json.Marshal(map[string]any{"vectors": in})
+	b.Run("b64", func(b *testing.B) { benchDecode[addRequest](b, body) })
 }
 
 // keep maps imported for refMetadata below.

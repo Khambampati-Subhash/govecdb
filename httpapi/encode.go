@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -238,14 +239,20 @@ func appendMatch(dst []byte, m govecdb.Match) ([]byte, error) {
 	return append(dst, '}'), nil
 }
 
-// appendVector appends one record: {"id","values","metadata"}.
-func appendVector(dst []byte, v govecdb.Vector) ([]byte, error) {
+// appendVector appends one record: {"id","values","metadata"}, or
+// {"id","values_b64","metadata"} in the binary format.
+func appendVector(dst []byte, v govecdb.Vector, f vectorFormat) ([]byte, error) {
 	dst = append(dst, `{"id":`...)
 	dst = appendString(dst, v.ID)
-	dst = append(dst, `,"values":`...)
 	var err error
-	if dst, err = appendFloat32s(dst, v.Values); err != nil {
-		return dst, err
+	if f == formatB64 {
+		dst = append(dst, `,"values_b64":`...)
+		dst = appendB64Float32s(dst, v.Values)
+	} else {
+		dst = append(dst, `,"values":`...)
+		if dst, err = appendFloat32s(dst, v.Values); err != nil {
+			return dst, err
+		}
 	}
 	if len(v.Metadata) > 0 {
 		dst = append(dst, `,"metadata":`...)
@@ -256,17 +263,17 @@ func appendVector(dst []byte, v govecdb.Vector) ([]byte, error) {
 	return append(dst, '}'), nil
 }
 
-func appendVectors(dst []byte, vs []govecdb.Vector) ([]byte, error) {
+func appendVectors(dst []byte, vs []govecdb.Vector, f vectorFormat) ([]byte, error) {
 	// Sized up front: a page is megabytes, too big for the pool, and growing
 	// it by doubling allocated nearly three times its final size.
-	dst = slices.Grow(dst, encodedSize(vs))
+	dst = slices.Grow(dst, encodedSize(vs, f))
 	dst = append(dst, '[')
 	for i, v := range vs {
 		if i > 0 {
 			dst = append(dst, ',')
 		}
 		var err error
-		if dst, err = appendVector(dst, v); err != nil {
+		if dst, err = appendVector(dst, v, f); err != nil {
 			return dst, err
 		}
 	}
@@ -274,11 +281,17 @@ func appendVectors(dst []byte, vs []govecdb.Vector) ([]byte, error) {
 }
 
 // encodedSize estimates vectors' encoded length: a float32 is at most about
-// 15 bytes and usually 10-12, and an id and a little metadata fit in 96.
-func encodedSize(vs []govecdb.Vector) int {
+// 15 bytes and usually 10-12 as a number, and exactly 16/3 in base64; an id
+// and a little metadata fit in 96.
+func encodedSize(vs []govecdb.Vector, f vectorFormat) int {
 	n := 2
 	for _, v := range vs {
-		n += 12*len(v.Values) + len(v.ID) + 96
+		if f == formatB64 {
+			n += base64.StdEncoding.EncodedLen(4 * len(v.Values))
+		} else {
+			n += 12 * len(v.Values)
+		}
+		n += len(v.ID) + 96
 	}
 	return n
 }
@@ -313,7 +326,7 @@ func encodeMatches(dst []byte, ms []govecdb.Match) ([]byte, error) {
 }
 
 // encodePage writes {"next":...,"vectors":[...]}, next omitted on the last page.
-func encodePage(dst []byte, vs []govecdb.Vector, next string, more bool) ([]byte, error) {
+func encodePage(dst []byte, vs []govecdb.Vector, next string, more bool, f vectorFormat) ([]byte, error) {
 	dst = append(dst, '{')
 	if more {
 		dst = append(dst, `"next":`...)
@@ -321,7 +334,7 @@ func encodePage(dst []byte, vs []govecdb.Vector, next string, more bool) ([]byte
 		dst = append(dst, ',')
 	}
 	dst = append(dst, `"vectors":`...)
-	dst, err := appendVectors(dst, vs)
+	dst, err := appendVectors(dst, vs, f)
 	if err != nil {
 		return dst, err
 	}
@@ -329,11 +342,11 @@ func encodePage(dst []byte, vs []govecdb.Vector, next string, more bool) ([]byte
 }
 
 // encodeBatch writes {"missing":[...],"vectors":[...]}.
-func encodeBatch(dst []byte, vs []govecdb.Vector, missing []string) ([]byte, error) {
+func encodeBatch(dst []byte, vs []govecdb.Vector, missing []string, f vectorFormat) ([]byte, error) {
 	dst = append(dst, `{"missing":`...)
 	dst = appendStrings(dst, missing)
 	dst = append(dst, `,"vectors":`...)
-	dst, err := appendVectors(dst, vs)
+	dst, err := appendVectors(dst, vs, f)
 	if err != nil {
 		return dst, err
 	}
