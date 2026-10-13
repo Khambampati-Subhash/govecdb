@@ -237,6 +237,28 @@ written `1.0`, never `1`, so sending a fetched record back unchanged stores the
 same types it had. A NaN cannot be stored (it is refused as `invalid_metadata`);
 one written before that check comes back as `null`.
 
+#### Binary vectors
+
+Any vector can be sent as `values_b64` instead of `values` (and a search as
+`query_b64` instead of `query`): standard, padded base64 of the vector's
+float32s, each little-endian — numpy's `v.astype('<f4').tobytes()`, Go's
+`binary.LittleEndian`.
+
+```json
+{"vectors": [{"id": "doc-1", "values_b64": "zczMPc3MTD4=", "metadata": {"page": 3}}]}
+```
+
+Decoding is a copy rather than a parse, so it is the fast path for bulk ingest:
+a 1,000 × 512 batch decodes in **7.4 ms against 41 ms** as JSON numbers, and the
+body is 2.8 MB instead of 5.7. Set exactly one spelling per vector — both is
+`400 invalid_request`. The values are validated as numbers are, after decoding:
+a NaN costs nothing to spell in binary and is still `invalid_vector`.
+
+Reads take `?encoding=b64` — fetch one, fetch many and page through — and then
+return `values_b64` in place of `values`; a 1,000-vector page at 512 dimensions
+encodes in 1.0 ms instead of 20. `encoding=json` is the default, and the JSON
+form is unchanged. Any other value is `400 invalid_request`.
+
 ### `GET /v1/collections/{name}/vectors/{id}` — fetch one
 
 Ids are arbitrary UTF-8 and must be percent-encoded in the path:

@@ -88,9 +88,19 @@ below. Phases 1 and 2 are scheduled; 3–5 start only on their trigger.
 
 | # | Deliverable | Exit gate |
 |---|---|---|
-| 1.1 | **Binary vectors.** `values_b64` (base64 of little-endian float32) accepted wherever `values` / `query` are; `?encoding=b64` returns vectors that way from get, `GetBatch` and scan. Exactly one of the two per vector, else `400`. Same validation — dimension, finiteness — after decoding. | `BenchmarkDecodeAdd1000x512` under 5 ms on the b64 path (from 42.5); JSON remains the default and is unchanged byte for byte. |
+| 1.1 | **Binary vectors.** `values_b64` (base64 of little-endian float32) accepted wherever `values` / `query` are; `?encoding=b64` returns vectors that way from get, `GetBatch` and scan. Exactly one of the two per vector, else `400`. Same validation — dimension, finiteness — after decoding. | `BenchmarkDecodeAdd1000x512` under 5 ms on the b64 path (from 42.5); JSON remains the default and is unchanged byte for byte. **Built; the 5 ms gate missed** — see below. |
 | 1.2 | **HTTP/2 without TLS.** `-h2c` on `govecdbd` sets `Protocols` with unencrypted HTTP/2 beside HTTP/1.1. Off by default; TLS deployments already negotiate HTTP/2. | A daemon test drives 16 concurrent searches over one h2c connection. |
 | 1.3 | **`client/` — an official Go client.** Typed calls over `net/http`, `context.Context` at this layer (the library still takes none), b64 vectors by default, and the retry rules written once: `overloaded` and `unavailable` retried honouring `Retry-After` with jittered backoff and a ceiling, `too_many_open` likewise, everything else returned. Retrying is safe because a PUT is an upsert and a delete is idempotent. | The FEEDBACK.md scenario as a test — a front layer refusing each first add and search with the daemon's own error body — passes against the real handler, and fails with retries off. |
+
+**1.1, as built.** The b64 path decodes the 1,000 × 512 body in **7.4 ms** (from
+41.3 on the same machine), the JSON bytes are unchanged
+(`TestEncoderMatchesEncodingJSON`), and a page now encodes in 1.0 ms instead of
+20. The 5 ms gate was set without measuring `encoding/json`'s floor: with the
+vector as a `RawMessage`, nothing decoded, scanning the 2.8 MB body costs
+6.1–6.7 ms, and `json.Valid` alone is 4.8 ms. Under 5 ms needs a hand-written
+parser for the add body so the scanner never walks the base64 — a second JSON
+parser at the security boundary, left as the owner's call. At ~50 ms to apply
+a 1,000 × 512 batch, 7.4 ms is ~15% of the request, not on the order of it.
 
 ### Phase 2 — online backup (this module)
 

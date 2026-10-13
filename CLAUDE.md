@@ -754,6 +754,13 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   else is a `float64`.** Storing everything as float rounds a nanosecond timestamp
   (1.7e18 is past 2^53); storing everything as int turns 0.5 into 0. It is free at
   query time because `int64` and `float64` compare exactly.
+- **Binary vectors are `values_b64` / `query_b64` in and `?encoding=b64` out**
+  (`httpapi/b64.go`): padded standard base64 of little-endian float32s, bit-exact,
+  validated after decoding like numbers. Both spellings of one vector is
+  `invalid_request` — never prefer one. The 1,000 × 512 decode is 7.4 ms and
+  its floor is `encoding/json` scanning the base64 (6.1–6.7 ms, nothing
+  decoded), not the base64 itself; under 5 ms needs a hand-written add-body
+  parser, which is an owner decision, not an optimization to slip in.
 - **The number rule runs both ways.** `metadataOut` writes an integral float64
   as `1.0`, never `1`, so a fetched record posted back keeps its types. Do not
   replace it with plain `encoding/json` map marshalling — that is the bug it

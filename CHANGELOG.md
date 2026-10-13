@@ -10,6 +10,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 See [the v2 scope](docs/MIGRATION.md#v2-scope) for what is planned and in what
 order.
 
+### Added
+
+- **Binary vectors on the REST API.** Any vector can be sent as `values_b64`
+  (a search as `query_b64`): standard base64 of its little-endian float32s.
+  Reads — fetch one, fetch many, page through — take `?encoding=b64` and return
+  `values_b64` instead. At 1,000 × 512 an add body decodes in 7.4 ms instead of
+  41 ms and is half the size; a page encodes in 1.0 ms instead of 20. Values
+  are bit-exact both ways and validated as numbers are. Sending both spellings
+  of one vector, or an unknown `encoding`, is `400 invalid_request`. JSON
+  numbers stay the default and their bytes are unchanged.
+
 ### Changed
 
 - **The graph holds ~170–195 bytes less per vector.** Every node's layer-0

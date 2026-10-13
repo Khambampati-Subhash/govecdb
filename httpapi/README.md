@@ -33,6 +33,7 @@ build if one appears.
 | `filter.go` | The filter wire format. |
 | `json.go` | Decoding, and the rules for turning JSON into metadata. |
 | `encode.go` | The hand-written encoder for matches and records, and the reflection-free `float32` array decoder. |
+| `b64.go` | Binary vectors: `values_b64` / `query_b64` in, `?encoding=b64` out. |
 | `limit.go` | Backpressure: the read and write request pools. |
 | `metrics.go` | Prometheus text exposition. |
 | `events.go` | The database's events, logged at a severity and counted for `/metrics`. |
@@ -125,6 +126,32 @@ two fuzz targets compare it with `encoding/json` over adversarial input.
 `strconv.ParseFloat(tok, 32)` (what `encoding/json` calls) instead of
 reflection; it refuses a `null` element, which `encoding/json` silently turned
 into a 0.
+
+## Binary vectors, and where `encoding/json` stops
+
+`values_b64` / `query_b64` carry a vector as base64 of its little-endian
+float32s (`b64.go`), and `?encoding=b64` returns records that way. Measured at
+1,000 × 512: an add body decodes in 7.4 ms against 41 ms, a page encodes in
+1.0 ms against 20 ms. Values are bit-exact both ways, `-0` included.
+
+The decode floor is not the base64. With the vector held as a `RawMessage`,
+nothing decoded, `encoding/json` still spends **6.1–6.7 ms** scanning the 2.8 MB
+body, and `json.Valid` alone — one scanner pass — is 4.8 ms; decoding the base64
+into float32s is ~1.5 ms. Going lower means a hand-written parser for the add
+body, so the scanner never walks the base64. That is a second JSON parser at
+the security boundary and has not been written; measure the share of a request
+it would save before doing so.
+
+Three choices worth knowing. **Exactly one spelling** per vector: both is
+`invalid_request`, because two spellings that can disagree have no right
+answer. **Padded standard base64 only** — not the URL alphabet, not unpadded —
+so a client that gets it wrong is told rather than half-understood. And
+**`\/` is accepted**: the alphabet needs no JSON escape, but `/` may legally be
+written `\/` and some encoders do, so a string with a backslash falls back to
+`encoding/json` to unescape it. The encoder writes through a 768-byte stack
+chunk: base64 of a multiple of 3 bytes ends without padding, so the chunks
+concatenate into exactly the encoding of the whole (`TestB64EncodesAsOneBlock`
+straddles the seams).
 
 ## Long calls lift their own write deadline
 
