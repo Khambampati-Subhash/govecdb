@@ -35,9 +35,26 @@ func (g *Graph) selectNeighbors(st *searchState, cands []candidate, m int, dst [
 		if len(selected) >= m {
 			break
 		}
+		// A tie keeps the candidate: only a neighbor strictly closer to c than
+		// base is makes the edge redundant (hnswlib and Faiss test the same way).
+		// Rejecting on equality strands data. Far enough out, every float32
+		// distance from an outlier to the data rounds to one value — at 1e9 per
+		// component the ulp dwarfs the real differences — so each neighbor
+		// tied it with a chosen one and dropped it, and its inbound edges went
+		// to zero. Exact duplicates fail the same way: once a copy of base is
+		// chosen, every other candidate is exactly as far from it as from
+		// base, so all were rejected and backfill filled the list with more
+		// copies — 50 copies each of 100 vectors left 4,967 of 5,000
+		// unreachable. This rule brings that to 924; the rest is the general
+		// cost of storing duplicates as separate nodes, not a tie.
+		//
+		// A copy of a chosen neighbor (d == 0) is still rejected: it is
+		// reachable through that neighbor by construction, and keeping it is
+		// what would let a pile of duplicates take every slot.
 		keep := true
 		for _, s := range selected {
-			if g.alpha*g.dist(g.nodes[c.idx].vector, g.nodes[s].vector) <= c.dist {
+			d := g.dist(g.nodes[c.idx].vector, g.nodes[s].vector)
+			if d == 0 || g.alpha*d < c.dist {
 				keep = false
 				break
 			}

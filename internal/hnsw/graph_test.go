@@ -155,6 +155,79 @@ func TestExactMatchFound(t *testing.T) {
 	}
 }
 
+// TestFarOutliersStayReachable: a vector far from everything else must still be
+// findable, even by itself. Past ~1e9 per component, every float32 Euclidean
+// distance from an outlier to data in [0,1) is one bit pattern — the ulp dwarfs
+// the real differences — so when selectNeighbors rejected a candidate on a tie
+// with a chosen neighbor, each node that received an edge to the outlier pruned
+// it away, and the outlier was left with no inbound edges: unreachable, and
+// absent from its own search. Measured before the fix: 0 inbound edges at 1e9,
+// 1e12 and 1e17, inserted first, middle or last; at 1e6 the ties are partial
+// and an alternating-sign outlier was still stranded at 500 vectors.
+//
+// 1e17 per component is a norm of 4e17 at dimension 16, inside the root
+// package's 1e18 cap, so this is input the database accepts.
+func TestFarOutliersStayReachable(t *testing.T) {
+	const dim, n = 16, 300
+	outliers := func(scale float32) map[string][]float32 {
+		pos, neg, alt := make([]float32, dim), make([]float32, dim), make([]float32, dim)
+		for i := range dim {
+			pos[i], neg[i], alt[i] = scale, -scale, scale
+			if i%2 == 1 {
+				alt[i] = -scale
+			}
+		}
+		return map[string][]float32{"pos": pos, "neg": neg, "alt": alt}
+	}
+	for _, scale := range []float32{1e6, 1e9, 1e17} {
+		for _, at := range []int{0, n / 2, n} {
+			for _, workers := range []int{1, 8} {
+				name := fmt.Sprintf("scale=%g/at=%d/workers=%d", scale, at, workers)
+				t.Run(name, func(t *testing.T) {
+					rng := rand.New(rand.NewSource(1))
+					var ids []string
+					var vecs [][]float32
+					out := outliers(scale)
+					for i := 0; i <= n; i++ {
+						if i == at {
+							for _, id := range []string{"pos", "neg", "alt"} {
+								ids, vecs = append(ids, id), append(vecs, out[id])
+							}
+						}
+						if i < n {
+							ids = append(ids, fmt.Sprintf("v%d", i))
+							vecs = append(vecs, randomVector(rng, dim))
+						}
+					}
+					g, _ := New(Config{Dimension: dim, Metric: Euclidean, Seed: 1})
+					if workers == 1 {
+						for i := range ids {
+							if err := g.Insert(ids[i], vecs[i]); err != nil {
+								t.Fatal(err)
+							}
+						}
+					} else if err := g.InsertBatch(ids, vecs, workers); err != nil {
+						t.Fatal(err)
+					}
+
+					if u := unreachable(g); u != 0 {
+						t.Errorf("%d of %d vectors unreachable", u, g.Len())
+					}
+					for id, v := range out {
+						res, err := g.Search(v, 1, 16)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if len(res) == 0 || res[0].ID != id {
+							t.Errorf("searching for %s by its own vector returned %+v", id, res)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
 // TestNormalizationPreservesRanking checks that unit-normalizing on insert (the
 // optimization that lets cosine collapse to a dot product) does not change the
 // ranking a general cosine implementation would produce.
