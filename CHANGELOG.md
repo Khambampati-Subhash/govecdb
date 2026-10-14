@@ -21,8 +21,72 @@ order.
   of one vector, or an unknown `encoding`, is `400 invalid_request`. JSON
   numbers stay the default and their bytes are unchanged.
 
+### Fixed
+
+- **A parallel batch no longer strands vectors on ordered data.** Nodes linked
+  in one `InsertBatch` chunk never saw each other (the in-flight rule), which
+  is harmless when a chunk is a random sample and strands vectors when it is
+  not: a document split into overlapping passages and added in order puts each
+  passage's nearest neighbors in its own chunk. Twins linked only to outsiders,
+  each outsider's prune kept one twin and dropped the other, and every edge
+  into the dropped one went the same way. Measured with 16 workers: 51–91 of
+  10,000 random-walk vectors unreachable per build, and 1–4 of 6,585 passages
+  from four books embedded by `nomic-embed-text` — absent even from a search
+  for their own vector. A fourth, serial phase now offers each node its
+  chunk's earlier nodes, as a serial insert would have seen them. Cost at 16
+  workers: +10% on uniform data (20K × 512: 1.82 → 2.00 s, 19.9 s serially),
+  2.4× on ordered data (20K × 256 walks: 0.35 → 0.83 s, 2.1 s serially).
+  `TestInsertBatchLinksBatchMates`.
+- **An outlier far from the data is reachable.** The diversity test rejected a
+  candidate on an exact distance tie, and far from the data every float32
+  distance rounds to one value, so each neighbor pruned the outlier away. The
+  test is strict now, as in hnswlib and Faiss, except that a candidate at
+  distance 0 from a chosen neighbor is still rejected so exact duplicates
+  cannot take every slot.
+- **Automatic `ef` delivers the recall it targets on real queries.** Calibrate
+  measured the graph with its own vectors as queries and was flattered four
+  ways, each found on real books (6,585 passages, questions embedded by the
+  same model) and each now closed:
+  - *Copies answered for the sample.* Hiding only the sample's own slot left
+    its twin — a page ingested twice, a re-indexed document — to walk the
+    search straight to the answer: recall 1.000 at `ef=10` for every sample.
+    Every exact copy is now hidden with the sample, **deleted ones included**:
+    a tombstone keeps its edges, and on a database churned by upserts and
+    deletes the dead twins alone took questions to 0.983 against 0.99. More
+    than 64 copies drops the sample as boilerplate.
+  - *Ties counted as misses.* Truth is now a radius, not a set of ids — a twin
+    at exactly the k-th distance is one of the k nearest. By id, the
+    twice-ingested books could not reach 0.99 at any width and every search was
+    scaled 16×.
+  - *The truth froze while the graph moved.* It now follows writes made during
+    a calibration, is retired when one of its answers is deleted, and the run
+    restarts (up to three times) when `Compact` renumbers the slots.
+  - *Too small a sample, too thin a margin.* Questions need 2.5–5.5× the width
+    a stored vector does. The margin is 6× (was 1.5×) and the default sample
+    512 (was 64; capped at half the live count): across 48 draws over four data
+    states the worst question recall at a 0.99 target was 0.9938, the mean
+    0.995–0.998. At 1.5× the same questions got 0.88 against 0.95.
+
+  Validated end to end on the books under twelve rounds of `kill -9` during
+  upserts, deletes and re-adds: every round recovered exactly what was
+  acknowledged, no vector was unreachable or missing from its own search, and
+  automatic-`ef` question recall was 0.9945–0.9982 per round. A calibration
+  now costs more — ~4 s for the exact scan at 1M × 768 on 16 cores, 130 ms on
+  the 6,585 passages — and still runs in the background.
+
 ### Changed
 
+- **The default target recall is 0.99, up from 0.95.** At 0.95 a retrieval of
+  10 passages may miss one in every other query; the default should be the
+  answer, not most of it. Together with the calibration margin above, searches
+  with `Ef` left zero are wider: on the books, ~176 µs per question ingested
+  once and ~290 µs ingested twice, against 0.995–0.997 recall. Where queries
+  look exactly like stored vectors the margin overshoots: uniform 62,500 × 128
+  now searches at ef 7,200 (5.9 ms) where the formula's 1,963 (2.3 ms) already
+  measured 1.000 — the README table has every row. Lower it with
+  `WithSearchTargetRecall` once measured on your own queries. A service
+  collection records its target at creation, so one created under 0.95 keeps
+  it.
 - **The graph holds ~170–195 bytes less per vector.** Every node's layer-0
   neighbor list — the one a search spends nearly all its time in — now lives
   in fixed `uint32` blocks owned by the graph instead of an `[]int` slice per

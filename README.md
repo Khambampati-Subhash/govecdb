@@ -406,7 +406,7 @@ Everything is a functional option on `Open`. Only `WithDimension` is required.
 | `WithMaxSegmentBytes(int64)` | `64 MiB` | Log truncation granularity, not a size cap. |
 | `WithSnapshotInterval(time.Duration)` | off | Snapshot on a timer. Off means you call `Snapshot()`. |
 | `WithSnapshotsKept(int)` | `2` | Also decides how much log is kept — see below. |
-| `WithSearchTargetRecall(float64)` | `0.95` | What a zero `Ef` aims for. Treated as a floor. |
+| `WithSearchTargetRecall(float64)` | `0.99` | What a zero `Ef` aims for. Treated as a floor. |
 | `WithLimits(id, k, ef, batch, mdKeys)` | `512, 10k, 100k, 10k, 256` | Per-call bounds. Configurable, not removable. |
 | `WithReadOnly()` | off | Open an existing directory without writing to it. Shares the directory with other readers, never with a writer. |
 | `WithInsertWorkers(int)` | `0` (GOMAXPROCS) | Cores one `AddBatch`, or log replay, links vectors on. `1` builds exactly the graph serial `Add`s would — set it with `WithSeed` for a reproducible index. |
@@ -613,8 +613,8 @@ Holding a recall target needs a wider search as the corpus grows — measured,
 the guidance lives where it is used:
 
 ```go
-// Ef left at zero: the width is chosen to clear TargetRecall (default 0.95).
-matches, _ := db.Search(govecdb.SearchRequest{Query: query, K: 10, TargetRecall: 0.95})
+// Ef left at zero: the width is chosen to clear TargetRecall (default 0.99).
+matches, _ := db.Search(govecdb.SearchRequest{Query: query, K: 10, TargetRecall: 0.99})
 ```
 
 `targetRecall` is a **floor to clear, not a point to hit** — the calibration
@@ -634,21 +634,37 @@ No formula can know how hard *your* data is, and the spread is enormous. At
 62,500 vectors and a 0.95 target, uniform random vectors at dimension 512 need
 `ef ≈ 3,072`; tightly clustered ones at the same size need `ef ≈ 10`. So a
 database calibrates itself: whenever its live count has doubled or halved, a
-background goroutine searches for a sample of its own vectors — each with its
-own node hidden from the traversal, as an un-inserted query would see the graph
-— checks them against an exact scan, and scales every later suggestion to fit.
+background goroutine searches for 512 of its own vectors — each with its own
+node and every exact copy of it (deleted ones too) hidden from the traversal,
+as an un-inserted query would see the graph — checks them against an exact
+scan, and scales every later suggestion to fit, with a **6× margin**.
 
-| 62,500 vectors unless noted, held-out queries | formula | calibrated |
+The margin is there because a real query is harder than a stored vector:
+questions embedded against book passages needed 2.5–5.5× the width the
+sample did. Without it the sample flattered the graph — at the old 1.5× margin,
+questions got 0.88 against a 0.95 target.
+
+| target 0.99, k=10 unless noted, held-out queries | formula | calibrated |
 |---|---|---|
-| clustered, dim 512, k=10 | ef 1158 · 0.999 · 1.6 ms | **ef 15 · 0.978 · 49 µs** |
-| clustered, dim 512, k=100 | ef 1835 · 1.000 · 2.6 ms | **ef 100 · 0.993 · 184 µs** |
-| uniform, dim 128, k=10 | ef 1158 · 0.992 · 5.8 ms | ef 900 · 0.978 · 4.7 ms |
-| uniform, dim 768, 20,000, k=10 | ef 476 · **0.817** | ef 1320 · **0.981** |
+| **6,585 book passages, nomic-embed-text (768), real questions + probes** | ef 340 · 1.000 · ~340 µs ¹ | **ef 132 · 0.996 · 176 µs** |
+| clustered, 62,500 × 512 | ef 1963 · 1.000 · 1.2 ms | **ef 420 · 1.000 · 279 µs** |
+| clustered, 62,500 × 512, k=100 | ef 3111 · 1.000 · 1.9 ms | **ef 666 · 0.998 · 418 µs** |
+| uniform, 62,500 × 128 | ef 1963 · 1.000 · 2.3 ms | ef 7200 · 1.000 · 5.9 ms |
+| uniform, 20,000 × 768 | ef 808 · **0.917** · 2.3 ms | ef 10548 · **1.000** · 6.2 ms |
 
-It narrows where the data is easy and widens where the formula undershoots.
-It costs one exact scan of the sample — 45 ms at 62,500 × 512, around a second
-at a million — outside any lock writers wait on. `Stats().EfScale` shows the
-factor; `WithEfCalibration(false)` turns it off for reproducible widths, and
+¹ Interpolated: `ef=320` measured 0.9998 at 330 µs.
+
+It narrows where the data is easy, widens where the formula undershoots, and
+on data whose queries look exactly like its vectors — the uniform rows — the
+margin makes it search wider than it must. That is the trade: the default is
+the answer rather than most of it, and latency pays for it. Lower the target
+with `WithSearchTargetRecall` once you have measured on your own queries.
+
+It costs an exact scan of the sample plus the probe searches, outside any lock
+writers wait on: 0.3 s at 62,500 × 512 clustered, 3.8 s at 62,500 × 128
+uniform and 11 s at 20,000 × 768 uniform (16 cores; the hard data probes wide),
+~4 s for the scan alone at a million × 768. `Stats().EfScale` shows the factor;
+`WithEfCalibration(false)` turns it off for reproducible widths, and
 `db.Calibrate()` runs one now. An explicit `Ef` is never touched.
 
 ### Tombstones, and what `Compact()` gives back

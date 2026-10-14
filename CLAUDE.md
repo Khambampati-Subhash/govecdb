@@ -279,13 +279,35 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   sample of stored vectors **with each one's own slot hidden** (`searchState.hide`,
   pre-marked visited in `searchLayer` — one branch per call, not per neighbor),
   against a brute-force truth computed outside the lock, and stores
-  `1.5 × measured / prior` in an atomic `efScale`. Do not "simplify" into plain
+  `6 × measured / prior` in an atomic `efScale`. Do not "simplify" into plain
   self-queries: a stored vector's neighbor list *is* its kNN, so uniform data
   "reached" 0.95 at ef=11 and then got 0.37 on held-out queries. The held-out
   tests (`TestCalibrate*`) are what caught it. The scale is not serialized.
   The DB runs it in a background goroutine (`calibrate.go` at the root) when
   the live count doubles or halves past `hnsw.MinCalibrationSize`; writers only
   kick a 1-slot channel. `WithEfCalibration(false)` for reproducible widths.
+  Four rules, each found on real books (questions vs passages, nomic-embed-text)
+  and each with a test that fails without it — do not loosen any:
+  - **Every exact copy is hidden with the sample — dead ones too.** A twin's
+    neighbor list is the sample's kNN again (recall 1.000 at ef=10 on a
+    twice-ingested corpus), and a tombstone keeps its edges, so a deleted twin
+    leaks the answer just as well (questions 0.983 vs 0.99 on a churned DB).
+    Copies are never answers; > `maxHiddenCopies` (64) drops the sample.
+    `TestCalibrateSeesThrough{,Dead}Copies`, `TestCalibrationHidesDeadCopies`.
+  - **Truth is a radius, not ids** — a twin tied at the k-th distance is a hit.
+    By id, twice-ingested books never reached 0.99 and every search went 16×.
+  - **The truth follows writes** (folded forward before each probe), is retired
+    when an answer is deleted, and the run restarts when `Compact` bumps
+    `layout` (slot numbers are only stable within one layout).
+    `TestCalibrationTruthFollowsWrites`.
+  - **Margin 6, 512 samples** (`calibrationMargin`, `defaultCalibrationQueries`,
+    capped at live/2). Questions need 2.5–5.5× the width a stored vector does,
+    and 128 samples drew 14–35 across seeds where 512 drew 20–25. Measured
+    over 48 draws: margin 5 worst 0.9902, 6 worst 0.9938 (+15–20% time), 1.5
+    gave 0.88 against 0.95. Cost: ~4 s exact scan at 1M × 768, 16 cores.
+- **The default target is 0.99, not 0.95** (`defaultTargetRecall`, service
+  `spec.go`). A service collection records its effective target, so one
+  created under 0.95 keeps 0.95 — do not "migrate" it.
 - **ef scales as `k^0.2` and `(16/M)^0.85`, not linearly in k and not ignoring
   M.** Measured: the width that holds a target barely moves from k=10 to k=100
   (768 → 1024 at 62.5K × 128; 3072 → 3072 at × 512), and M=32 needs exactly
@@ -314,6 +336,13 @@ If `go` is not on PATH: `export PATH=$PATH:/usr/local/go/bin`.
   other workers' traversals (`node.linking`, filtered in `readNeighbors`;
   without it 17/10,000 unreachable), and **workers scale with the graph**
   (`nodesPerWorker` = 32; at 50 vectors × 16 workers self-search missed 0.8%).
+  The in-flight rule makes a chunk blind to itself, which strands vectors when
+  a chunk's members are each other's nearest neighbors — passages of one
+  document added in order (51–91/10,000 on random walks, 1–4/6,585 book
+  passages). So **phase 4, serial, offers each node its chunk's earlier
+  nodes** (`linkMates`, through `reselect` — one prune per node, not per
+  candidate): +10% on uniform data, 2.4× on ordered, still ~2.5× faster than
+  serial there. `TestInsertBatchLinksBatchMates`.
   `TestInsertBatchStrandsNothing` walks reachability; `TestInsertBatchOneWorkerIsSerial`
   pins workers=1 to the serial graph. The serial path (`insertPrepared` →
   `place` + `link`) is bit-identical to before. Parallel builds are not
@@ -817,6 +846,7 @@ pass — a drop from 0.988 to 0.91 is a regression that stays green:
 | Metadata predicate allocations | 0 allocs/op | `TestMatchDoesNotAllocate` |
 | Recall spread across seeds | ≤ 0.05 | `TestRecallIsStableAcrossSeeds` |
 | Unreachable vectors after a parallel build | 0 | `TestInsertBatchStrandsNothing` |
+| Unreachable vectors, parallel build of ordered data | 0 | `TestInsertBatchLinksBatchMates` |
 | Parallel recall vs serial | within 0.02 | `TestInsertBatchRecallMatchesSerial` |
 | Serial build is bit-identical | exact | `TestCompactMatchesAFreshBuild`, `TestInsertBatchOneWorkerIsSerial` |
 
