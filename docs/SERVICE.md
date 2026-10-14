@@ -169,7 +169,7 @@ README](../httpapi/README.md#errors-are-one-shape).
   "sync_interval": "50ms",         // used by sync_policy: interval
   "snapshot_interval": "5m",       // omit for the daemon's -snapshot-interval; "off" for none
   "snapshots_kept": 2,
-  "target_recall": 0.95
+  "target_recall": 0.99
 }
 ```
 
@@ -317,7 +317,7 @@ them; only compaction reclaims it.
   "query": [0.1, 0.2, "..."],
   "k": 10,
   "ef": 0,                  // omit: chosen from the corpus size
-  "target_recall": 0.95,    // what an omitted ef aims for, as a floor
+  "target_recall": 0.99,    // what an omitted ef aims for, as a floor
   "filter": {"op": "exists", "key": "source"}
 }
 ```

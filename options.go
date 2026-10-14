@@ -160,7 +160,7 @@ type options struct {
 const (
 	defaultM              = 16
 	defaultEfConstruction = 200
-	defaultTargetRecall   = 0.95
+	defaultTargetRecall   = 0.99
 	defaultSyncInterval   = 50 * time.Millisecond
 	defaultSnapshotsKept  = 2
 	defaultMaxIDBytes     = 512
@@ -333,6 +333,11 @@ func WithSnapshotInterval(d time.Duration) Option {
 // doubled or halved since it last did, in a background goroutine that Close
 // stops. The result scales every later suggestion (Stats.EfScale).
 //
+// The sample is the database's own vectors, and a real query is harder than a
+// stored vector: questions embedded against book passages needed 2.5–5.5× the
+// width the sample did. The scale carries a 6× margin for that, so on data
+// whose queries look like its vectors it searches wider than it must.
+//
 // Turn it off for reproducible search widths, in tests or benchmarks. An
 // explicit Ef is never touched either way; call Calibrate to run one by hand.
 func WithEfCalibration(enabled bool) Option {
@@ -399,7 +404,12 @@ func WithSnapshotsKept(n int) Option {
 }
 
 // WithSearchTargetRecall sets the recall a search aims for when SearchRequest.Ef
-// is left zero. Defaults to 0.95, treated as a floor.
+// is left zero. Defaults to 0.99, treated as a floor.
+//
+// 0.99 rather than 0.95 because the default should be the answer, not most of
+// it: at 0.95 a retrieval of 10 passages may miss one in every other query. The
+// width it costs is roughly 1.7× the formula's 0.95 width, and Calibrate scales
+// both. Lower it for throughput once you have measured on your own queries.
 func WithSearchTargetRecall(r float64) Option {
 	return func(o *options) error {
 		if r <= 0 || r >= 1 {

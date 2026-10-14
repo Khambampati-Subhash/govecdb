@@ -65,7 +65,7 @@ s2: 2 · Choose ef {
   class: step
   body: |md
     `Ef == 0` means "choose it":
-    `SuggestedEf(K, target)` — target defaults to **0.95**
+    `SuggestedEf(K, target)` — target defaults to **0.99**
     fitted `ef ∝ n^0.78 · k^0.2 · (16/M)^0.85`
     **× efScale** from the last `Calibrate` (1 until one runs)
     clamped to `maxEf`, then `max(ef, K)`
@@ -230,7 +230,9 @@ recall_note: |md
   so leave `Ef` at 0 and set `TargetRecall` instead.
   `Calibrate` (leave-one-out, background, re-run when the
   live count doubles or halves) corrects the formula for
-  how hard *this* data is.
+  how hard *this* data is: 512 samples, each hidden with
+  its exact copies (dead ones too), × a **6× margin** —
+  real questions need 2.5–5.5× a stored vector's width.
 
   Locked baselines: **recall@10 = 0.999** at dim 32,
   **0.988** at dim 768, against brute force in `graph_test.go`.

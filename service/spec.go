@@ -83,7 +83,8 @@ type Spec struct {
 	SnapshotsKept int
 
 	// TargetRecall is the recall a search aims for when it does not name its own
-	// width. Zero means the default.
+	// width. Zero means the default, 0.99. A collection created when the default
+	// was 0.95 recorded 0.95 and keeps it.
 	TargetRecall float64
 }
 
@@ -118,7 +119,7 @@ func (s Spec) Defaults() Spec {
 		s.SnapshotsKept = 2
 	}
 	if s.TargetRecall == 0 {
-		s.TargetRecall = 0.95
+		s.TargetRecall = 0.99
 	}
 	return s
 }
