@@ -20,7 +20,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `config.go` | `Config` knobs, `DefaultConfig`, and the sentinel errors callers match on. |
 | `graph.go` | The `Graph` type: state, `New`, `Len`, and the shared helpers (`randomLevel`, `prepare`). |
 | `insert.go` | `Insert` — building the graph, and replacing an id that is already in it; `link`, the part of an insert a batch parallelizes. |
-| `batch.go` | `InsertBatch` — linking a batch on several workers under striped node locks, in chunks that hold the write lock. |
+| `batch.go` | `InsertBatch` — linking a batch on several workers under striped node locks, in chunks that hold the write lock, then introducing each chunk's nodes to each other serially. |
 | `delete.go` | `Delete` — tombstoning a slot, and re-electing the entry point when it is the one deleted. |
 | `compact.go` | `Compact` / `CompactOnline` — rebuilding the graph over its live vectors to reclaim tombstoned slots, catching up the writes that land meanwhile. |
 | `codec.go` | `(*Graph).WriteTo` / `Read` — the graph as bytes, so recovery loads an index instead of rebuilding one. |

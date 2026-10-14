@@ -84,9 +84,23 @@ func (g *Graph) selectNeighbors(st *searchState, cands []candidate, m int, dst [
 // pruneConnections trims a node's neighbor list on layer lc back to the layer
 // cap, applying the same diversity heuristic used when inserting.
 func (g *Graph) pruneConnections(st *searchState, idx, lc int) {
+	g.reselect(st, idx, lc, nil)
+}
+
+// reselect re-chooses idx's neighbors on layer lc from its current list plus
+// extra, under the same rule as pruneConnections, in one pass. extra must not
+// repeat idx or anything already in the list.
+//
+// It exists for InsertBatch's batch-mate pass, which offers a node many
+// candidates at once: adding them one edge at a time would prune the full
+// list once per candidate, and did — 93% of that pass, measured.
+func (g *Graph) reselect(st *searchState, idx, lc int, extra []uint32) {
 	maxConn := g.maxConn(lc)
 	nbrs := g.neighborsAt(idx, lc)
-	if len(nbrs) <= maxConn {
+	if len(nbrs)+len(extra) <= maxConn {
+		for _, nb := range extra {
+			g.connect(idx, int(nb), lc)
+		}
 		return
 	}
 
@@ -100,6 +114,9 @@ func (g *Graph) pruneConnections(st *searchState, idx, lc int) {
 	self := g.nodes[idx].vector
 	cands := st.pruneBuf[:0]
 	for _, nb := range nbrs {
+		cands = append(cands, candidate{int(nb), g.dist(g.nodes[nb].vector, self)})
+	}
+	for _, nb := range extra {
 		cands = append(cands, candidate{int(nb), g.dist(g.nodes[nb].vector, self)})
 	}
 	st.pruneBuf = cands

@@ -290,3 +290,46 @@ func TestInsertBatchStrandsNothing(t *testing.T) {
 		}
 	}
 }
+
+// walkCorpus is documents as random walks: each vector a small step from the
+// one before it, in order. It is the shape of a retrieval corpus — a document
+// split into overlapping passages and added in order — where a chunk's members
+// are each other's nearest neighbors, which uniform and clustered corpora
+// never arrange.
+func walkCorpus(rng *rand.Rand, docs, steps, dim int, step float64) corpus {
+	c := corpus{vecs: make(map[string][]float32, docs*steps), dim: dim}
+	for d := range docs {
+		cur := make([]float32, dim)
+		for j := range cur {
+			cur[j] = rng.Float32()*2 - 1
+		}
+		for s := range steps {
+			v := make([]float32, dim)
+			for j := range v {
+				v[j] = cur[j] + float32(rng.NormFloat64()*step)
+			}
+			cur = v
+			id := fmt.Sprintf("d%d-%d", d, s)
+			c.vecs[id] = v
+			c.order = append(c.order, id)
+		}
+	}
+	return c
+}
+
+// TestInsertBatchLinksBatchMates: nodes linked in one chunk never see each
+// other, so on data whose nearest neighbors arrive together a parallel build
+// stranded 51 to 91 of each 10,000 here until linkMates
+// introduced them. A serial build strands none, and neither may this.
+func TestInsertBatchLinksBatchMates(t *testing.T) {
+	for run := range 2 {
+		for _, dim := range []int{16, 64} {
+			c := walkCorpus(rand.New(rand.NewSource(int64(run))), 20, 500, dim, 0.03)
+			g, _ := buildBatch(t, Config{Dimension: dim, Seed: int64(run)}, c, 16)
+			if n := unreachable(g); n != 0 {
+				t.Errorf("run %d dim %d: %d of %d vectors unreachable", run, dim, n, g.Len())
+			}
+			assertWellFormed(t, g)
+		}
+	}
+}

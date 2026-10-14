@@ -1,6 +1,7 @@
 package hnsw
 
 import (
+	"math"
 	"runtime"
 	"slices"
 	"sync"
@@ -42,6 +43,7 @@ import (
 //     traversal copies a list out under its lock, and a write — appending an
 //     edge and pruning the list back to its cap — holds it for the duration. No
 //     worker holds two locks, so there is no order to get wrong.
+//  4. Serially, introduce the chunk's nodes to each other — see below.
 //
 // Vectors are immutable once placed, and so are tombstone flags for the life of
 // the chunk, so every distance and every prune ranking reads them freely.
@@ -61,7 +63,21 @@ import (
 // walks the graph to hold that.
 //
 // A repair pass — find nodes that lost their last inbound edge, re-link them —
-// was written first, and deleted once this rule left it nothing to repair.
+// was written first, and deleted once this rule left it nothing to repair on
+// uniform and clustered data.
+//
+// # Nodes of one chunk are introduced afterwards
+//
+// The same rule makes a chunk blind to itself: two nodes in flight together
+// never see each other. That is harmless when a chunk is a random sample of the
+// data and strands vectors when it is not — a document split into overlapping
+// passages and added in order puts each passage's nearest neighbors in its own
+// chunk. Phase 4 offers each node the chunk's earlier nodes, as a serial insert
+// would have seen them (linkMates). Measured with 16 workers, it costs 10% on
+// uniform data (20K x 512: 1.82 → 2.00 s, against 19.9 s serially) and 2.4x
+// on ordered data (20K x 256 random walks: 0.35 → 0.83 s, against 2.1 s
+// serially) — a parallel build that is correct, rather than one 6x faster that
+// is not.
 //
 // # What it does not promise
 //
@@ -265,7 +281,80 @@ func (g *Graph) insertChunk(ids []string, prepared [][]float32, rest []int, work
 		}()
 	}
 	wg.Wait()
+
+	// Phase 4: introduce the chunk's nodes to each other, serially and in
+	// batch order, as serial inserts would have.
+	st := g.acquireState()
+	for j, idx := range todo {
+		g.linkMates(st, idx, todo[:j])
+	}
+	g.releaseState(st)
 	return len(which)
+}
+
+// linkMates offers idx the batch-mates that phase 3 hid from it — earlier
+// nodes of its own chunk — exactly as a serial insert would have seen them:
+// as candidates competing with its current neighbors under the same diversity
+// rule, with an edge back from each one it keeps. Called serially, under the
+// write lock, after every node of the chunk is linked.
+//
+// The in-flight rule is what makes phase 3 safe, and also what makes it blind
+// within a chunk: two nodes linking at once never see each other. On data
+// where a chunk's members are each other's nearest neighbors — a document
+// split into overlapping passages and added in order, which is how a
+// retrieval corpus arrives — that blindness strands vectors. Twins A and B
+// each link only to outsiders; each outsider X then holds both, and its prune
+// drops A for B, because B is closer to A than X is. Every edge into A goes the
+// same way and A becomes unreachable. Measured on random walks (20 documents
+// of 500 steps, 16 workers): 51–91 of 10,000 vectors stranded per build,
+// against none serially, and 1–4 of 6,585 passages from four books embedded
+// by nomic-embed-text. TestInsertBatchLinksBatchMates holds it.
+//
+// Only mates that could be kept are considered: closer than idx's farthest
+// neighbor, or any when its list has room. A mate farther than everything idx
+// already links to loses the prune anyway, so for a chunk of unrelated vectors
+// — the uniform case — this is a distance per pair and nothing else.
+func (g *Graph) linkMates(st *searchState, idx int, mates []int) {
+	if len(mates) == 0 {
+		return
+	}
+	vec := g.nodes[idx].vector
+	for lc := min(g.nodes[idx].topLevel(), g.maxLevel); lc >= 0; lc-- {
+		maxConn := g.maxConn(lc)
+		nbrs := g.neighborsAt(idx, lc)
+		bar := float32(math.Inf(1))
+		if len(nbrs) >= maxConn {
+			bar = 0
+			for _, nb := range nbrs {
+				bar = max(bar, g.dist(g.nodes[nb].vector, vec))
+			}
+		}
+
+		offered := st.selected[:0]
+		for _, m := range mates {
+			if g.nodes[m].topLevel() < lc || slices.Contains(nbrs, uint32(m)) {
+				continue
+			}
+			if g.dist(g.nodes[m].vector, vec) < bar {
+				offered = append(offered, uint32(m))
+			}
+		}
+		st.selected = offered
+		if len(offered) == 0 {
+			continue
+		}
+
+		// The same order link uses: idx's own list first, then an edge back
+		// from each mate it kept.
+		g.reselect(st, idx, lc, offered)
+		kept := g.neighborsAt(idx, lc)
+		for _, m := range offered {
+			if slices.Contains(kept, m) {
+				g.connect(int(m), idx, lc)
+				g.pruneConnections(st, int(m), lc)
+			}
+		}
+	}
 }
 
 // resolve applies Insert's upsert rule to one id ahead of placing it: false

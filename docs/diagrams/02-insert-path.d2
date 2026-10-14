@@ -277,6 +277,9 @@ s4: 4 · Apply — under applyMu (exclusive), still under writeMu {
       3. parallel `link()`: striped `nodeLocks` (4,096 · 32 KiB),
          never two held; `node.linking` hides in-flight nodes
          from other workers' traversals
+      4. serial `linkMates`: each node is offered its chunk's
+         earlier nodes, as a serial insert saw them — step 3
+         hid them, which stranded passages added in order
     |
   }
 
