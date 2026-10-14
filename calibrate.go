@@ -31,8 +31,9 @@ import (
 
 // Calibrate measures this database's search width now, regardless of how much
 // the data has changed, and applies it to every later search that leaves Ef
-// zero. It blocks until done: under a second at a million vectors on a laptop,
-// most of it an exact scan spread across GOMAXPROCS goroutines.
+// zero. It blocks until done: seconds at a million vectors on a laptop — the
+// exact scan, spread across GOMAXPROCS goroutines, measured ~4 s at 768
+// dimensions on 16 cores — and the probe searches after it.
 //
 // Below hnsw.MinCalibrationSize live vectors it does nothing and resets the
 // scale to 1 — the formula's widths are tiny there either way.

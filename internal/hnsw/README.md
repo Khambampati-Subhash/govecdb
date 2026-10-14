@@ -25,7 +25,7 @@ down to the true neighbors, visiting only a tiny fraction of nodes (`~O(log N)`)
 | `compact.go` | `Compact` / `CompactOnline` — rebuilding the graph over its live vectors to reclaim tombstoned slots, catching up the writes that land meanwhile. |
 | `codec.go` | `(*Graph).WriteTo` / `Read` — the graph as bytes, so recovery loads an index instead of rebuilding one. |
 | `suggest.go` | `SuggestedEf` — the measured curve, `ef ∝ n^0.78 · k^0.2 · (16/M)^0.85`, fitted so callers need not guess. |
-| `calibrate.go` | `Calibrate` — measures this graph's own data (leave-one-out sample queries against an exact scan) and scales `SuggestedEf` to it. |
+| `calibrate.go` | `Calibrate` — measures this graph's own data (leave-one-out sample queries, each hidden with its exact copies, against an exact scan) and scales `SuggestedEf` to it, with a 6× margin for real queries. |
 | `search.go` | `Result`, `Search`, and the primitives it rides on: `greedyClosest`, `searchLayer`. |
 | `filterscan.go` | Choosing between walking and scanning for a filtered search: `shouldScan` probes the predicate, `scanFilter` answers exactly. |
 | `neighbors.go` | Edge management: alpha-pruned `selectNeighbors`, `pruneConnections`, `connect`, adjacency lookups. |

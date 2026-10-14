@@ -206,6 +206,7 @@ func (g *Graph) swap(fresh *Graph, workers int) int {
 	g.entry, g.maxLevel = fresh.entry, fresh.maxLevel
 	g.numDeleted = fresh.numDeleted
 	g.dirty = nil
+	g.layout++
 
 	// g.pool is deliberately not swapped. Its pooled scratch was sized for the
 	// larger graph, which is safe — visitedList.reset re-slices down and its

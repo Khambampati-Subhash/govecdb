@@ -52,6 +52,12 @@ type Graph struct {
 	// recomputed, because it is what a compaction policy polls.
 	numDeleted int
 
+	// layout counts the times Compact renumbered the slots. Everything else
+	// only appends, so a slot index taken under one layout means the same node
+	// for as long as the layout is unchanged; Calibrate relies on that to hold
+	// slot numbers outside the lock.
+	layout uint64
+
 	// dirty collects every id a write touches while a compaction runs, so the
 	// replacement it built can be caught up rather than rebuilt (compact.go).
 	// Nil otherwise, which is all place and tombstone check.
@@ -69,6 +75,11 @@ type Graph struct {
 	// onCompactBuild, when set, runs as a compaction starts its build. Tests
 	// use it to hold a build open and prove that writes land meanwhile.
 	onCompactBuild func()
+
+	// onCalibrateProbe, when set, runs between a calibration's truth and its
+	// probes. Tests use it to land writes in the one window where the two
+	// disagree about what the graph holds.
+	onCalibrateProbe func()
 
 	// locks guards neighbor lists while InsertBatch links in parallel.
 	// Allocated on the first batch that needs it, under mu, and never freed.

@@ -14,8 +14,8 @@ import (
 // the kind that an edit to either loop could quietly break.
 func (g *Graph) searchLayerOnePass(st *searchState, query []float32, entryPoint, ef, lc int, allow func(id string) bool) []candidate {
 	st.visited.reset(len(g.nodes))
-	if st.hide > 0 {
-		st.visited.visit(st.hide - 1)
+	for _, h := range st.hide {
+		st.visited.visit(h)
 	}
 	cands, results := st.cands[:0], st.results[:0]
 	d := g.dist(g.nodes[entryPoint].vector, query)
@@ -85,9 +85,11 @@ func TestSearchLayerMatchesOnePass(t *testing.T) {
 			Normalize(query)
 			for lc := 0; lc <= g.maxLevel; lc++ {
 				for _, allow := range []func(string) bool{nil, odd} {
-					hide := 0
+					var hide []int
 					if q%3 == 0 {
-						hide = 1 + rng.Intn(n)
+						for range 1 + rng.Intn(3) {
+							hide = append(hide, rng.Intn(n))
+						}
 					}
 					st.hide, ref.hide = hide, hide
 					got := g.searchLayer(st, query, g.entry, ef, lc, allow)
@@ -100,7 +102,7 @@ func TestSearchLayerMatchesOnePass(t *testing.T) {
 			}
 		}
 	}
-	st.hide, ref.hide = 0, 0
+	st.hide, ref.hide = nil, nil
 }
 
 // TestTouchLinesReadsEveryLine pins the stride: one load per 128-byte line,

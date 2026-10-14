@@ -67,9 +67,24 @@ const efMExponent = 0.85
 
 // calibrationMargin is the headroom Calibrate adds over the width it measured.
 // The sample queries are the collection's own vectors, which sit exactly on the
-// data; real queries sit near it, and are a little harder. The margin is also
-// what absorbs the noise in a 64-query sample.
-const calibrationMargin = 1.5
+// data; real queries do not, and the gap is not small. Measured on 6,585
+// passages from real books embedded with nomic-embed-text and 400 questions
+// embedded as queries, in four states of that data — ingested once, ingested
+// twice, churned by twelve kill -9 rounds of upserts and deletes to 27%
+// tombstones, and that compacted — the questions needed 2.5–5.5× the width
+// leave-one-out found for the same 0.99 (512 samples, twelve seeds each).
+//
+// So the margin is set by the worst of those 48 draws. At 5 it gave the
+// questions 0.9902 against 0.99, inside the measurement's own noise of
+// missing; 6 gave 0.9938 at worst and 0.995–0.998 on average, for 15–20%
+// more search time than 5; 7 gave 0.996 at worst for about 10% more again.
+// At 1.5 the calibrated width gave the questions 0.88 against 0.95.
+//
+// On data with no such shift — queries drawn like the vectors — this searches
+// wider than it needs to. That is the side to be wrong on: a slow answer is
+// visible, a wrong one is not. And it is a measurement on one embedding model:
+// a model whose queries sit further from its passages needs more.
+const calibrationMargin = 6
 
 // SuggestedEf returns a starting search width for Search(query, k, ef) on a
 // corpus of n vectors.

@@ -83,6 +83,7 @@ graph_struct: "Graph — internal/hnsw/graph.go" {
   locks: "*nodeLocks — 4,096 striped mutexes (32 KiB), batches only"
   pool: "sync.Pool — hands out per-traversal searchState"
   efScale: "atomic.Uint64 — Calibrate's ef factor, not serialized"
+  layout: "uint64 — bumped by Compact's renumbering; Calibrate retries on it"
 }
 
 # No explicit fill: a sql_table takes its BODY colour from `style.stroke` and
@@ -104,7 +105,7 @@ state_struct: "searchState — internal/hnsw/state.go" {
   fresh: "[]int — one expansion's unvisited neighbors (prefetch)"
   sink: "float32 — keeps touchLines' loads alive"
   locks: "*nodeLocks — non-nil only in a batch worker"
-  hide: "int — 1+slot Calibrate hides, 0 = none"
+  hide: "[]int — slots Calibrate hides: the sample and its exact copies"
 }
 
 node_struct: "node — internal/hnsw/node.go" {

@@ -36,10 +36,11 @@ type searchState struct {
 	// and nothing else. Cleared before the state goes back to the pool.
 	locks *nodeLocks
 
-	// hide is 1 + the slot searchLayer must treat as absent, or 0 for none.
-	// Only Calibrate sets it — see searchWithout — and it is cleared before
-	// the state goes back to the pool.
-	hide int
+	// hide lists the slots searchLayer must treat as absent. link puts the
+	// node being linked in it, so a node in a batch never finds itself;
+	// hitsWithout puts a calibration sample and its exact copies. Each empties
+	// it before the state goes back to the pool.
+	hide []int
 }
 
 // acquireState borrows scratch space for one traversal. Every path out must

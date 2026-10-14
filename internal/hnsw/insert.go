@@ -127,7 +127,7 @@ func (g *Graph) link(st *searchState, idx int) {
 	// reach it yet, so this changes nothing; in a parallel batch another
 	// worker may already have linked to it, and without this it could choose
 	// itself as a neighbor.
-	st.hide = idx + 1
+	st.hide = append(st.hide[:0], idx)
 
 	// Phase 1: greedily descend from the top down to level+1 with ef=1, just to
 	// find a good entry point near the new node.
@@ -183,5 +183,5 @@ func (g *Graph) link(st *searchState, idx int) {
 			cur = w[0].idx // closest, to seed the next lower layer
 		}
 	}
-	st.hide = 0
+	st.hide = st.hide[:0]
 }
